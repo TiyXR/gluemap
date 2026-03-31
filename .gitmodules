@@ -1,0 +1,12 @@
+[submodule "thirdparty/croco"]
+	path = thirdparty/croco
+	url = https://github.com/naver/croco.git
+[submodule "thirdparty/salad"]
+	path = thirdparty/salad
+	url = https://github.com/serizba/salad.git
+[submodule "thirdparty/doppelgangers-plusplus"]
+	path = thirdparty/doppelgangers-plusplus
+	url = https://github.com/doppelgangers25/doppelgangers-plusplus.git
+[submodule "thirdparty/pi3"]
+	path = thirdparty/pi3
+	url = https://github.com/yyfz/Pi3
