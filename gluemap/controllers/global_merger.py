@@ -1,6 +1,4 @@
 
-import os
-
 import numpy as np
 import torch
 import networkx as nx
@@ -30,11 +28,6 @@ from gluemap.math.virtual_tracks import (
     project_virtual_tracks,
     subsample_virtual_tracks,
 )
-from gluemap.estimators.similarity_alignment import (
-    load_worldpoints_dict,
-    align_all_edges,
-    motion_averaging,
-)
 
 import logging
 logger = logging.getLogger(__name__)
@@ -62,16 +55,7 @@ class GlobalGluer:
         self.boost_sequential = (
             True if hasattr(args, "is_sequential") and args.is_sequential else False
         )
-        # self.use_motion_averaging = getattr(args, "use_motion_averaging", False)
-        self.use_motion_averaging = False
         self.use_ceres_rotation_averaging = getattr(args, "use_ceres_rotation_averaging", True)
-        self.pointmap_dir = (
-            os.path.join(args.curr_path, "pointmap")
-            if hasattr(args, "curr_path")
-            else None
-        )
-        # self.force_load = getattr(args, "force_load", False)
-        self.force_load = False
 
     def main(self, predictions_dict, intrinsics_mapping, camera_model, num_img):
         self.N = num_img
@@ -254,51 +238,32 @@ class GlobalGluer:
         if self.boost_sequential:
             self._boost_sequential_edges(predictions_dict, boost_factor=5.0)
 
-        if not self.use_motion_averaging:
-            if self.use_ceres_rotation_averaging:
-                # Original two-pass: RA → filter → RA → filter
-                global_rotations = rotation_averaging(predictions_dict)
-                self._filter_invalid_edges(predictions_dict, global_rotations)
-                global_rotations = rotation_averaging(predictions_dict, global_rotations)
-                self._filter_invalid_edges(predictions_dict, global_rotations)
-            else:
-                global_rotations = rotation_averaging_pycolmap(
-                    predictions_dict, max_rotation_error_deg=self.max_rot_error
-                )
-                self._filter_invalid_edges(predictions_dict, global_rotations)
-
-            self._prune_invisible_pairs(predictions_dict)
-
-            # Initialize the structures by maximum spanning tree
-            global_centers, global_scales = self._initialize_mst_structures(
-                predictions_dict, global_rotations
-            )
-
-            # if not self.skip_optimization:
-            global_centers = similarity_averaging(
-                predictions_dict,
-                global_rotations,
-                global_centers=global_centers,
-                global_scales=global_scales,
-                max_num_iterations=200,
-            )
-            # breakpoint()
-            # global_centers = similarity_averaging_with_depth(
-            #     predictions_dict,
-            #     global_rotations,
-            #     global_centers=global_centers,
-            #     global_scales=global_scales,
-            #     max_num_iterations=200,
-            #     add_tracks=True,
-            #     add_virtual_points=True,
-            # )
-            # else:
-            #     global_centers = self.global_centers
-
+        if self.use_ceres_rotation_averaging:
+            # Original two-pass: RA → filter → RA → filter
+            global_rotations = rotation_averaging(predictions_dict)
+            self._filter_invalid_edges(predictions_dict, global_rotations)
+            global_rotations = rotation_averaging(predictions_dict, global_rotations)
+            self._filter_invalid_edges(predictions_dict, global_rotations)
         else:
-            global_rotations, global_centers = self._motion_averaging_estimation(
-                predictions_dict
+            global_rotations = rotation_averaging_pycolmap(
+                predictions_dict, max_rotation_error_deg=self.max_rot_error
             )
+            self._filter_invalid_edges(predictions_dict, global_rotations)
+
+        self._prune_invisible_pairs(predictions_dict)
+
+        # Initialize the structures by maximum spanning tree
+        global_centers, global_scales = self._initialize_mst_structures(
+            predictions_dict, global_rotations
+        )
+
+        global_centers = similarity_averaging(
+            predictions_dict,
+            global_rotations,
+            global_centers=global_centers,
+            global_scales=global_scales,
+            max_num_iterations=200,
+        )
 
         # Prune the edges by the global rotations
         self._mark_inconsistent_edges(
@@ -414,27 +379,6 @@ class GlobalGluer:
         )
 
         return global_intrinsics
-
-    def _motion_averaging_estimation(self, predictions_dict):
-        """Estimate global rotations and centers using dense world-point SIM(3) alignment."""
-        sim3_save_path = os.path.join(self.pointmap_dir, "..", "sim3_dict.pth")
-        if self.force_load and os.path.exists(sim3_save_path):
-            logger.info(f"Loading sim3_dict from {sim3_save_path}")
-            sim3_dict = torch.load(sim3_save_path)
-        else:
-            worldpoints_dict = load_worldpoints_dict(self.pointmap_dir)
-            sim3_dict = align_all_edges(worldpoints_dict, predictions_dict)
-            torch.save(sim3_dict, sim3_save_path)
-            logger.info(f"Saved sim3_dict to {sim3_save_path}")
-
-        num_stars = len(predictions_dict["indexes"])
-        global_rotations, global_scales, global_centers = motion_averaging(
-            sim3_dict,
-            predictions_dict,
-            num_stars=num_stars,
-        )
-        predictions_dict["sim3_dict"] = sim3_dict
-        return global_rotations, global_centers
 
     def _update_virtual_tracks(
         self, predictions_dict, global_intrinsics, intrinsics_mapping
