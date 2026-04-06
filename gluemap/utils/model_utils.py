@@ -59,17 +59,6 @@ def get_query_points(
         if query_points.shape[1] == 0:
             query_points = torch.rand(1, max_query_num, 2, device=query_image.device)
             return query_points
-        # elif len(methods) < 2:
-        #     method = "sift+aliked"
-        #     return get_query_points(query_image, method, max_query_num_raw, det_thres, sim_score, bbox)
-
-    # plt.clf()
-    # plt.imshow(query_image[0].cpu().numpy().transpose(1, 2, 0))
-    # plt.scatter(
-    #     query_points[0, :, 0].cpu().numpy(), query_points[0, :, 1].cpu().numpy(), s=1
-    # )
-    # plt.savefig("query_points_raw.png")
-    # cmap = plt.get_cmap("viridis")
 
     if query_points.shape[1] > max_query_num:
         # Generate the score for the weights
@@ -104,39 +93,13 @@ def get_query_points(
         query_points = query_points[:, random_point_indices, :]
     # If we required the strict number of points, we need to add some random points
     elif strict_num:
-        # Duplicate the points to match the max_query_num
         # Add some random points to the query points
-        # query_points = query_points.repeat(1, int(math.ceil(max_query_num / query_points.shape[1])), 1)[:, :max_query_num, :]
-        # print(query_points.shape[1])
-        query_points = torch.cat(
-            [
-                query_points,
-                torch.cat(
-                [torch.rand(
-                    1,
-                    max_query_num - query_points.shape[1],
-                    1,
-                    device=query_image.device,
-                ) * query_image.shape[-1], torch.rand(
-                    1,
-                    max_query_num - query_points.shape[1],
-                    1,
-                    device=query_image.device,
-                ) * query_image.shape[-2]],
-                dim=-1,
-                ),
-            ],
-            dim=1,
-        )
+        num_pad = max_query_num - query_points.shape[1]
+        rand_points = torch.rand(1, num_pad, 2, device=query_image.device)
+        rand_points[..., 0] *= query_image.shape[-1]  # width
+        rand_points[..., 1] *= query_image.shape[-2]  # height
+        query_points = torch.cat([query_points, rand_points], dim=1)
         
-
-    # plt.clf()
-    # plt.imshow(query_image[0].cpu().numpy().transpose(1, 2, 0))
-    # plt.scatter(
-    #     query_points[0, :, 0].cpu().numpy(), query_points[0, :, 1].cpu().numpy(), s=1
-    # )
-    # plt.savefig("query_points_sampled.png")
-    # breakpoint()
 
     return query_points # since by default, the query points with have a + 0.5 offset
 
