@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import networkx as nx
 from tqdm import tqdm
@@ -5,6 +6,8 @@ from tqdm import tqdm
 from gluemap.datasets.base_dataset import DemoBaseDataset
 from gluemap.utils.load_fn import calculate_image_shapes
 from gluemap.utils.model_utils import get_query_points
+
+logger = logging.getLogger(__name__)
 
 
 class BaseStarDataset(DemoBaseDataset):
@@ -128,9 +131,9 @@ class BaseStarDataset(DemoBaseDataset):
                         G.add_edge(u, v)
                         neighbors_all[u].add(v)
                         neighbors_all[v].add(u)
-                print(f"Re-added edges to restore connectivity")
+                logger.info("Re-added edges to restore connectivity")
             else:
-                print(f"Graph is already connected after top-{MAX_NEIGHBORS} pruning")
+                logger.info(f"Graph is already connected after top-{MAX_NEIGHBORS} pruning")
         else:
             # Fallback: no scores available, random selection
             for i in range(self.N):

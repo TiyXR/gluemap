@@ -15,12 +15,15 @@ Typical usage:
 """
 
 import glob
+import logging
 import os
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyceres
 import pygluemap
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -249,14 +252,14 @@ def compute_alignment_error(
     pts1, pts2 = pts1[valid], pts2[valid]
 
     if len(pts1) == 0:
-        print("Warning: no valid points for error computation")
+        logger.warning("no valid points for error computation")
         return float("nan")
 
     transformed = apply_sim3(pts2, s, R, t)
     errors = np.linalg.norm(transformed - pts1, axis=1)
 
     mean_e = np.mean(errors)
-    print(
+    logger.info(
         f"Alignment error [{len(errors)} pts]: "
         f"mean={mean_e:.4f}, std={np.std(errors):.4f}, "
         f"median={np.median(errors):.4f}, max={np.max(errors):.4f}"
@@ -335,7 +338,7 @@ def align_point_maps(
     if len(pts1) == 0:
         raise ValueError("No finite point pairs found for alignment")
 
-    print(f"align_point_maps: {len(pts1)} point correspondences")
+    logger.info(f"align_point_maps: {len(pts1)} point correspondences")
     s, R, t = estimate_sim3(pts2, pts1)
     compute_alignment_error(pts1, pts2, s, R, t)
     return s, R, t
@@ -367,7 +370,7 @@ def weighted_align_point_maps(
     if len(pts1) == 0:
         raise ValueError("No finite point pairs found for alignment")
 
-    print(f"weighted_align_point_maps: {len(pts1)} point correspondences")
+    logger.info(f"weighted_align_point_maps: {len(pts1)} point correspondences")
     weights = np.ones(len(pts1), dtype=np.float64)
     s, R, t = robust_weighted_estimate_sim3(pts2, pts1, weights, delta=delta,
                                             max_iters=max_iters, tol=tol)
@@ -439,7 +442,7 @@ def align_star_pair(
     all_pts_A = np.concatenate(all_pts_A, axis=0)
     all_pts_B = np.concatenate(all_pts_B, axis=0)
 
-    print(
+    logger.info(
         f"align_star_pair({idx_star_A}, {idx_star_B}): "
         f"{len(shared)} shared image(s), {len(all_pts_A)} point pairs"
     )
@@ -513,10 +516,10 @@ def align_all_edges(
             sim3_dict[(idx_B, idx_A)] = (s_inv, R_inv, t_inv)
 
         except ValueError as e:
-            print(f"Skipping pair ({idx_A}, {idx_B}): {e}")
+            logger.warning(f"Skipping pair ({idx_A}, {idx_B}): {e}")
 
-    print(f"align_all_edges: estimated {len(star_pairs)} edge(s), "
-          f"{len(sim3_dict)} directional transforms")
+    logger.info(f"align_all_edges: estimated {len(star_pairs)} edge(s), "
+                f"{len(sim3_dict)} directional transforms")
     return sim3_dict
 
 
@@ -572,7 +575,7 @@ def scale_averaging(
 
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
-    print("Scale averaging:", summary.BriefReport())
+    logger.info(f"Scale averaging: {summary.BriefReport()}")
 
     return scales
 
@@ -627,7 +630,7 @@ def rotation_averaging_from_sim3(
 
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
-    print("Rotation averaging (sim3):", summary.BriefReport())
+    logger.info(f"Rotation averaging (sim3): {summary.BriefReport()}")
 
     for i in rotations:
         rotations[i] = quaternion_to_rotation_matrix(rotations[i])
@@ -711,7 +714,7 @@ def similarity_averaging_from_sim3(
 
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
-    print("Similarity averaging (sim3):", summary.BriefReport())
+    logger.info(f"Similarity averaging (sim3): {summary.BriefReport()}")
 
     return global_centers
 
@@ -745,13 +748,13 @@ def motion_averaging(
     if num_stars is None:
         num_stars = len(predictions_dict["indexes"])
 
-    print("=== motion_averaging: Step 1 — rotation averaging ===")
+    logger.info("=== motion_averaging: Step 1 — rotation averaging ===")
     global_rotations_star = rotation_averaging_from_sim3(sim3_dict, num_stars)
 
-    print("=== motion_averaging: Step 2 — scale averaging ===")
+    logger.info("=== motion_averaging: Step 2 — scale averaging ===")
     global_scales = scale_averaging(sim3_dict, num_stars)
 
-    print("=== motion_averaging: Step 3 — translation averaging (fixed scales) ===")
+    logger.info("=== motion_averaging: Step 3 — translation averaging (fixed scales) ===")
     global_centers_star = similarity_averaging_from_sim3(
         sim3_dict,
         global_rotations_star,

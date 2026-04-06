@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import torch
 import networkx as nx
@@ -6,6 +7,8 @@ import networkx as nx
 # from e2esfm.pipeline.tracks_util import *
 from gluemap.datasets.star_dataset import BaseStarDataset
 from gluemap.utils.misc import get_tracks_dict_indexes
+
+logger = logging.getLogger(__name__)
 
 
 def construct_covisibility_graph(pairs, scores, N, threshold=0.8):
@@ -40,7 +43,7 @@ def construct_covisibility_graph(pairs, scores, N, threshold=0.8):
             )
             components = list(nx.connected_components(G))
 
-            print(f"Reducing threshold to {threshold:.2f} to connect components")
+            logger.info(f"Reducing threshold to {threshold:.2f} to connect components")
             valid_edges = np.concatenate(
                 [valid_edges, pairs[index * (scores > threshold)]], axis=0
             )
@@ -80,7 +83,7 @@ def generate_dataset_from_outputs(
         edge_scores[key] = float(scores_np[k])
 
     # Initialize the dataset with the global outputs
-    print("Initializing dataset with valid edges:", valid_edges.shape)
+    logger.info(f"Initializing dataset with valid edges: {valid_edges.shape}")
     dataset.valid_edges = valid_edges
     dataset.edge_scores = edge_scores
     dataset.N = len(dataset_ori.images_list)
@@ -99,7 +102,7 @@ def generate_dataset_from_outputs(
     # Post initialization to set up the star structure
     dataset.__post_init__()
 
-    print("Dataset initialized done.")
+    logger.info("Dataset initialized done.")
 
     return dataset
 

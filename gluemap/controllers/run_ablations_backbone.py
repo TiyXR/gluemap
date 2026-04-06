@@ -1,7 +1,10 @@
+import logging
 import os
 import time
 import torch
 from gluemap.utils.model_loader import load_models
+
+logger = logging.getLogger(__name__)
 
 from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
@@ -55,9 +58,9 @@ def run_backbone_ablation_pipeline(
     # Ensure output directory exists
     os.makedirs(args.curr_path, exist_ok=True)
 
-    print(f"\n[Backbone Ablation] Running with backbone: {backbone}")
-    print(f"  Output suffix: '{args.output_suffix}'")
-    print(f"  Star cache file: {star_file_name}")
+    logger.info(f"[Backbone Ablation] Running with backbone: {backbone}")
+    logger.info(f"  Output suffix: '{args.output_suffix}'")
+    logger.info(f"  Star cache file: {star_file_name}")
 
     # Step 1: Two-view inference (shared across backbones — DG is backbone-independent)
     t0 = time.perf_counter()
@@ -135,14 +138,14 @@ def run_backbone_ablation_pipeline(
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
         # Print summary
-        print(f"\n[Backbone Ablation Profiling] Backbone: {backbone}")
-        print(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+        logger.info(f"[Backbone Ablation Profiling] Backbone: {backbone}")
+        logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
               f"inference={twoview_timing['total']:.2f}s")
-        print(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-        print(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+        logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
+        logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
               f"inference={star_timing['total']:.2f}s")
-        print(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
-        print(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
+        logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
+        logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
         # Save per-dataset timing
         timing_path = os.path.join(args.curr_path, f"pipeline_timing{args.output_suffix}.pth")

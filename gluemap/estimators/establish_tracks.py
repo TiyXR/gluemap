@@ -18,6 +18,10 @@ import pycolmap
 from gluemap.math.union_find import UnionFind
 from gluemap.utils.prepare_prior import establish_keypoints_and_correspondences
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class TrackEstablishmentOptions:
@@ -81,7 +85,7 @@ def establish_tracks(
         root = uf.find(obs)
         track_map[root].append(obs)
 
-    print(f"Established {len(track_map)} tracks from {len(uf.parent)} observations")
+    logger.info(f"Established {len(track_map)} tracks from {len(uf.parent)} observations")
 
     # Step 3: Validate tracks and check consistency
     candidate_points3D = {}
@@ -135,7 +139,7 @@ def establish_tracks(
         track_lengths.append((point3D.track.length(), point3D_id))
         candidate_points3D[point3D_id] = point3D
 
-    print(
+    logger.info(
         f"Kept {len(candidate_points3D)} tracks, discarded {discarded_counter} due to inconsistency"
     )
 
@@ -177,7 +181,7 @@ def establish_tracks(
         if images_left == 0:
             break
 
-    print(
+    logger.info(
         f"Before filtering: {len(candidate_points3D)}, after filtering: {len(final_points3D)}"
     )
 

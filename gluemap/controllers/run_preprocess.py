@@ -1,6 +1,9 @@
+import logging
 import time
 from gluemap.utils.model_loader import load_models
 from gluemap.controllers.pipeline_wrapper import run_salad_retrieval, invalidate_cache_from
+
+logger = logging.getLogger(__name__)
 
 
 def run_preprocessing_pipeline(
@@ -29,7 +32,7 @@ def run_preprocessing_pipeline(
         "total": t2 - t0,
     }
     if rank == 0:
-        print(f"[Profiling] Preprocessing: model_loading={t1-t0:.2f}s, "
+        logger.info(f"[Profiling] Preprocessing: model_loading={t1-t0:.2f}s, "
               f"salad_retrieval={t2-t1:.2f}s, total={t2-t0:.2f}s")
 
     return (models, device), timing
@@ -78,7 +81,7 @@ def run_preprocessing_pipeline_multi(
         "total": t2 - t0,
     }
     if rank == 0:
-        print(f"[Profiling] Preprocessing multi: model_loading={t1-t0:.2f}s, "
+        logger.info(f"[Profiling] Preprocessing multi: model_loading={t1-t0:.2f}s, "
               f"salad_retrieval={sum(retrieval_times.values()):.2f}s, total={t2-t0:.2f}s")
 
     return (models, device), timing

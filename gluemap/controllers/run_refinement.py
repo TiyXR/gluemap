@@ -34,6 +34,9 @@ from gluemap.utils.prepare_prior import (
 )
 from gluemap.utils.viz import draw_covisibility_graph, draw_covisibility_graph_from_predictions
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def create_fisheye_cameras_and_rectify(
     reconstruction: pycolmap.Reconstruction,
@@ -82,7 +85,7 @@ def create_fisheye_cameras_and_rectify(
             new_pt2d = fisheye_cam.img_from_cam(ray)
             image.points2D[pt_idx] = pycolmap.Point2D(new_pt2d)
             num_rectified += 1
-    print(f"Rectified {num_rectified} virtual 2D points to SIMPLE_FISHEYE projection")
+    logger.info(f"Rectified {num_rectified} virtual 2D points to SIMPLE_FISHEYE projection")
 
     # Build fisheye_intrinsics_params list (separate numpy arrays, will be fixed in BA)
     max_camera_id = max(reconstruction.cameras.keys())
@@ -215,7 +218,7 @@ def strip_non_virtual_keypoints(
         new_neg[img_id] = {idx - offset for idx in neg_set if idx >= offset}
 
     total_kp = sum(len(img.points2D) for img in new_recon.images.values())
-    print(
+    logger.info(
         f"Stripped non-virtual keypoints: {num_kept} virtual 3D points kept, "
         f"{num_dropped} dropped, {total_kp} total 2D keypoints remaining"
     )
@@ -452,10 +455,10 @@ def run_refinement_pipeline(
     use_sift = "S" in track_mode
     use_prior = "P" in track_mode
     use_virtual = "V" in track_mode
-    print(f"Track mode: {track_mode} (SIFT={use_sift}, Prior={use_prior}, Virtual={use_virtual})")
+    logger.info(f"Track mode: {track_mode} (SIFT={use_sift}, Prior={use_prior}, Virtual={use_virtual})")
 
     # Step 1: Triangulate 3D points
-    print("Triangulating points with pycolmap...")
+    logger.info("Triangulating points with pycolmap...")
     t0 = time.perf_counter()
     suffix = getattr(args, "output_suffix", "")
     coarse_dir = f"coarse{suffix}"
@@ -477,7 +480,7 @@ def run_refinement_pipeline(
     # Step 1c: Create database with tracks (or empty)
     # Note: poses_rel and poses_rel_scores are only used for prior.txt, not database creation
     # We pass empty dicts since we only need the database
-    print(log_message)
+    logger.info(log_message)
     t0 = time.perf_counter()
     prepare_glomap_prior(
         args.curr_path,
@@ -513,7 +516,7 @@ def run_refinement_pipeline(
     t0 = time.perf_counter()
     merged_db_path = args.curr_path + "/database_merged.db"
     if use_sift:
-        print("Merging SIFT and tracks databases...")
+        logger.info("Merging SIFT and tracks databases...")
         merge_colmap_databases(
             db_path_primary=args.curr_path + "/" + database_name,
             db_path_secondary=args.curr_path + "/database_sift.db",
@@ -521,7 +524,7 @@ def run_refinement_pipeline(
             primary_features_first=False,  # SIFT features should be at the front for correct indexing
         )
     else:
-        print("Copying tracks database (no SIFT merge)...")
+        logger.info("Copying tracks database (no SIFT merge)...")
         shutil.copy2(args.curr_path + "/" + database_name, merged_db_path)
     refinement_timing["merge_databases"] = time.perf_counter() - t0
 
@@ -625,10 +628,9 @@ def run_refinement_pipeline(
 
     iteration_timings = []
     for outer_iter in range(num_refinement_iterations):
-        print()
-        print(f"{'='*60}")
-        print(f"Refinement iteration {outer_iter + 1}/{num_refinement_iterations}")
-        print(f"{'='*60}")
+        logger.info(f"{'='*60}")
+        logger.info(f"Refinement iteration {outer_iter + 1}/{num_refinement_iterations}")
+        logger.info(f"{'='*60}")
         t_iter_start = time.perf_counter()
 
         if outer_iter > 0:
@@ -637,7 +639,7 @@ def run_refinement_pipeline(
                 # reconstruction, original_virtual_point_start
                 reconstruction, virtual_point_start
             )
-            print(
+            logger.info(
                 f"Pruned {num_pruned} non-virtual 3D points, "
                 f"{len(reconstruction.points3D)} virtual points remaining"
             )
@@ -709,7 +711,7 @@ def run_refinement_pipeline(
         # Step 7.5: Filter tracks by angular error before bundle adjustment
         t_filter_start = time.perf_counter()
         if angular_error_threshold_deg > 0:
-            print(
+            logger.info(
                 f"Filtering tracks by angular error "
                 f"(threshold={angular_error_threshold_deg} deg)..."
             )
@@ -727,12 +729,12 @@ def run_refinement_pipeline(
             ]
             if len(all_angular) > 0:
                 all_angular_arr = np.array(all_angular)
-                print(
+                logger.info(
                     f"  Angular errors: mean={np.mean(all_angular_arr):.2f} deg, "
                     f"median={np.median(all_angular_arr):.2f} deg, "
                     f"max={np.max(all_angular_arr):.2f} deg"
                 )
-                print(
+                logger.info(
                     f"  < {angular_error_threshold_deg} deg: "
                     f"{100 * np.sum(all_angular_arr < angular_error_threshold_deg) / len(all_angular_arr):.1f}%"
                 )
@@ -744,11 +746,11 @@ def run_refinement_pipeline(
                 angular_error_threshold_deg,
                 min_track_length=2,
             )
-            print(
+            logger.info(
                 f"  Angular filter: removed {obs_removed} observations, "
                 f"{tracks_removed} tracks"
             )
-            print(
+            logger.info(
                 f"  Points3D: {num_points_before} -> "
                 f"{len(reconstruction.points3D)}"
             )
@@ -766,7 +768,7 @@ def run_refinement_pipeline(
             ids_to_remove = sorted_ids[max_num_tracks:]
             for pid in ids_to_remove:
                 reconstruction.delete_point3D(pid)
-            print(
+            logger.info(
                 f"  Track limit: kept {max_num_tracks}, "
                 f"removed {len(ids_to_remove)} tracks"
             )
@@ -790,7 +792,7 @@ def run_refinement_pipeline(
             "total": t_ba_end - t_iter_start,
         }
         iteration_timings.append(iter_timing)
-        print(f"[Profiling] Iteration {outer_iter+1}: triangulation={iter_timing['triangulation']:.2f}s, "
+        logger.info(f"[Profiling] Iteration {outer_iter+1}: triangulation={iter_timing['triangulation']:.2f}s, "
               f"merge={iter_timing['merge']:.2f}s, filter={iter_timing['filter']:.2f}s, "
               f"ba={iter_timing['ba']:.2f}s, total={iter_timing['total']:.2f}s")
 
@@ -826,19 +828,19 @@ def run_refinement_pipeline(
         for point3D_id in virtual_point3D_ids:
             del reconstruction.points3D[point3D_id]
 
-        print(
+        logger.info(
             f"Removed {len(virtual_point3D_ids)} virtual 3D points, {len(reconstruction.points3D)} real points remaining"
         )
     else:
-        print("No virtual points to remove (track mode has no V).")
+        logger.info("No virtual points to remove (track mode has no V).")
     refinement_timing["remove_virtual"] = time.perf_counter() - t0
 
     # Step 10: Write bundle adjusted results to COLMAP format
     t0 = time.perf_counter()
     suffix = getattr(args, "output_suffix", "")
     file_dir = f"gluemap_aba{suffix}"
-    print(
-        "Writing bundle adjusted reconstruction:", args.curr_path + "/" + file_dir
+    logger.info(
+        "Writing bundle adjusted reconstruction: %s", args.curr_path + "/" + file_dir
     )
     os.makedirs(args.curr_path + "/" + file_dir, exist_ok=True)
     reconstruction.write(args.curr_path + "/" + file_dir)
@@ -847,17 +849,17 @@ def run_refinement_pipeline(
     refinement_timing["iterations"] = iteration_timings
     refinement_timing["total"] = time.perf_counter() - t_refinement_start
 
-    print(f"\n[Profiling] Refinement Summary:")
-    print(f"  Setup: load_coarse={refinement_timing['load_coarse']:.2f}s, "
+    logger.info("[Profiling] Refinement Summary:")
+    logger.info(f"  Setup: load_coarse={refinement_timing['load_coarse']:.2f}s, "
           f"prepare_prior={refinement_timing['prepare_prior']:.2f}s, "
           f"merge_db={refinement_timing['merge_databases']:.2f}s, "
           f"establish_tracks={refinement_timing['establish_tracks']:.2f}s, "
           f"init_points={refinement_timing['initialize_points']:.2f}s, "
           f"build_recon={refinement_timing['build_reconstruction']:.2f}s")
-    print(f"  Iterations: {sum(it['total'] for it in iteration_timings):.2f}s "
+    logger.info(f"  Iterations: {sum(it['total'] for it in iteration_timings):.2f}s "
           f"({len(iteration_timings)} iters)")
-    print(f"  Cleanup: remove_virtual={refinement_timing['remove_virtual']:.2f}s, "
+    logger.info(f"  Cleanup: remove_virtual={refinement_timing['remove_virtual']:.2f}s, "
           f"write={refinement_timing['write_output']:.2f}s")
-    print(f"  Total refinement: {refinement_timing['total']:.2f}s")
+    logger.info(f"  Total refinement: {refinement_timing['total']:.2f}s")
 
     return file_dir, refinement_timing

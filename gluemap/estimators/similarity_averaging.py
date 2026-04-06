@@ -1,4 +1,5 @@
 from collections import defaultdict
+import logging
 import numpy as np
 import torch
 
@@ -9,6 +10,8 @@ from gluemap.estimators.establish_tracks import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
+
+logger = logging.getLogger(__name__)
 MIN_TRI_ANGLE = 1  # Minimum angle (in degrees) for a triangle to be considered valid for scale estimation
 
 
@@ -150,7 +153,7 @@ def similarity_averaging(
     max_num_iterations=50,
     fix_scales=False,
 ):
-    print("Performing similarity averaging...")
+    logger.info("Performing similarity averaging...")
     num_ministar, global_centers, global_scales = initialize_parameters(
         predictions_dict,
         global_rotations,
@@ -189,11 +192,11 @@ def similarity_averaging(
     options.max_num_iterations = max_num_iterations
     options.minimizer_progress_to_stdout = False
 
-    print("Solving the optimization problem...")
+    logger.info("Solving the optimization problem...")
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
 
-    print(summary.BriefReport())
+    logger.info(summary.BriefReport())
 
     update_points3d(
         prob,
@@ -367,9 +370,9 @@ def add_depth_error(
                 costs.append(cost)
                 losses.append(loss)
 
-    print(f"Added {num_constraints} depth consistency constraints")
-    print(f"Added {num_same_cam_constraints} same-camera constraints (from tracks)")
-    print(f"Skipped {num_skipped_same_star} same-star pairs")
+    logger.info(f"Added {num_constraints} depth consistency constraints")
+    logger.info(f"Added {num_same_cam_constraints} same-camera constraints (from tracks)")
+    logger.info(f"Skipped {num_skipped_same_star} same-star pairs")
 
     # Additionally, iterate through pts2d_idx_all to find points with same 2D index
     if pts2d_idx_all is not None:
@@ -452,7 +455,7 @@ def add_depth_error(
                     losses.append(loss)
                     num_same_idx_constraints += 1
 
-        print(f"Added {num_same_idx_constraints} same-2D-index constraints")
+        logger.info(f"Added {num_same_idx_constraints} same-2D-index constraints")
 
 
 def similarity_averaging_with_depth(
@@ -466,7 +469,7 @@ def similarity_averaging_with_depth(
     device="cuda",
     fix_scales=False,
 ):
-    print("Performing similarity averaging with depth...")
+    logger.info("Performing similarity averaging with depth...")
     num_ministar, global_centers, global_scales = initialize_parameters(
         predictions_dict,
         global_rotations,
@@ -495,7 +498,7 @@ def similarity_averaging_with_depth(
         add_virtual_points=add_virtual_points,
         device=device,
     )
-    print(f"Established {len(points3D)} tracks")
+    logger.info(f"Established {len(points3D)} tracks")
 
     prob = pyceres.Problem()
 
@@ -546,11 +549,11 @@ def similarity_averaging_with_depth(
     options.max_num_iterations = max_num_iterations
     options.minimizer_progress_to_stdout = False
 
-    print("Solving the optimization problem...")
+    logger.info("Solving the optimization problem...")
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
 
-    print(summary.BriefReport())
+    logger.info(summary.BriefReport())
 
 
     update_points3d(

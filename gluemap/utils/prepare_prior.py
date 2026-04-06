@@ -1,8 +1,11 @@
+import logging
 import torch
 import pycolmap
 
 import numpy as np
 import os
+
+logger = logging.getLogger(__name__)
 
 # from e2esfm.pipeline.union_find import UnionFind
 # from e2esfm.pipeline.utils import get_tracks_dict_indexes
@@ -97,7 +100,7 @@ def merge_colmap_databases(
     common_names = set(primary_images.keys()) & set(secondary_images.keys())
 
     # Step 1: Write cameras from primary (use primary cameras for common images)
-    print("Writing cameras...")
+    logger.info("Writing cameras...")
     for cam_id, cam in primary_cameras.items():
         new_cam = pycolmap.Camera(
             camera_id=cam_id,
@@ -132,7 +135,7 @@ def merge_colmap_databases(
     primary_offsets = {}   # image_name -> index offset for primary keypoints
     secondary_offsets = {} # image_name -> index offset for secondary keypoints
 
-    print("Writing images and merging keypoints...")
+    logger.info("Writing images and merging keypoints...")
     for name in all_names:
         if name in primary_images:
             pri_img = primary_images[name]
@@ -152,7 +155,7 @@ def merge_colmap_databases(
             name_to_output_image_id[name] = sec_img.image_id
 
     # Step 3: Merge and write keypoints
-    print("Merging and writing keypoints...")
+    logger.info("Merging and writing keypoints...")
     for name in all_names:
         output_image_id = name_to_output_image_id[name]
 
@@ -224,7 +227,7 @@ def merge_colmap_databases(
             all_matches[key] = []
         all_matches[key].append(remapped)
     
-    print("Merging matches from secondary database...")
+    logger.info("Merging matches from secondary database...")
     
     # Read secondary matches (with offset)
     secondary_id_to_name = {img.image_id: name for name, img in secondary_images.items()}
@@ -335,7 +338,7 @@ def merge_colmap_databases(
     db_secondary.close()
     db_output.close()
 
-    print(f"Created merged database with {len(all_names)} images")
+    logger.info(f"Created merged database with {len(all_names)} images")
     return target_path
 
 
@@ -483,7 +486,7 @@ def establish_keypoints_and_correspondences(
         pts2d_idx_virtual_inv = None
 
     # Add the points
-    print("Adding points to dictionary...")
+    logger.info("Adding points to dictionary...")
     for idx in tqdm(indexes):
         scores = tracks_dict["scores"][idx]
         if add_tracks:
@@ -542,7 +545,7 @@ def establish_keypoints_and_correspondences(
     # Build keypoints per image
     keypoints_per_image = {}
 
-    print("Constructing correspondences...")
+    logger.info("Constructing correspondences...")
     for idx in tqdm(range(N)):
         uf_pts2d = UnionFind()
         if len(images_points2d[idx]) == 0 and len(images_points2d_virtual[idx]) == 0:
@@ -600,7 +603,7 @@ def establish_keypoints_and_correspondences(
     correspondences = (
         {}
     )  # key is (image_id1, image_id2), value is a list of (point2d_id1, point2d_id2)
-    print("Concatenating tracks...")
+    logger.info("Concatenating tracks...")
     for idx in tqdm(indexes):
 
         # Note: since in GLOMAP, blind concatenation is used, so we only need to consider the pairs with the center image as one of the image
@@ -770,7 +773,7 @@ def prepare_database_prior(
         database.write_camera(camera)
         cameras_colmap[i] = camera
 
-    print("Write cameras to database done")
+    logger.info("Write cameras to database done")
 
     N = len(images_shape_ori)
 
@@ -794,7 +797,7 @@ def prepare_database_prior(
     )
 
     # Add images
-    print("Add images to database...")
+    logger.info("Add images to database...")
     for idx in tqdm(range(N)):
         image = pycolmap.Image()
         image.camera_id = intrinsics_mapping[idx] + 1
@@ -812,7 +815,7 @@ def prepare_database_prior(
         database.write_keypoints(idx + 1, keypoints)
 
     # For each correspondence, collect into a numpy array and write to the database
-    print("Write matches to database...")
+    logger.info("Write matches to database...")
     for key in tqdm(correspondences.keys()):
         image_id1 = key[0]
         image_id2 = key[1]
@@ -1041,7 +1044,7 @@ def prepare_geom_database(
         keypoints.append(extractor.extract(image_ori[i].unsqueeze(0).to(device)))
 
     # Then for each pair, run the matching
-    print(f"Matching with {matching_method}...")
+    logger.info(f"Matching with {matching_method}...")
     matches_all = {}
     for i in tqdm(range(len(matched_pairs))):
         idx1, idx2 = matched_pairs[i]
@@ -1091,7 +1094,7 @@ def prepare_geom_database(
         + dir_write
         + "/match_pairs.txt"
     )
-    print(cmd)
+    logger.info(cmd)
     os.system(cmd)
     return True
 
@@ -1157,7 +1160,7 @@ def prepare_geom_database_from_inference(
         + dir_write
         + "/match_pairs.txt"
     )
-    print(cmd)
+    logger.info(cmd)
     os.system(cmd)
     return True
 
@@ -1237,7 +1240,7 @@ def prepare_sift_database(
 
         ite_num = 0
         while ite_num < 10:
-            print(cmd)
+            logger.info(cmd)
             status = os.system(cmd)
             if status == 0:
                 break
@@ -1282,18 +1285,18 @@ def run_augumented_glomap(
     # cmd += f' --num_iterative_refinement 2'
     cmd += f" --TrackEstablishment.max_num_tracks 2000000"
 
-    print(cmd)
+    logger.info(cmd)
     if not force_rerun and os.path.exists(
         dir_write + f"/{dir_write_sub}/0/cameras.bin"
     ):
-        print("Already run GLOMAP, skip")
+        logger.info("Already run GLOMAP, skip")
     else:
         value = os.system(cmd)
 
         if value != 0:
             cmd = cmd.replace("use_gpu 1", "use_gpu 0")
-            print("Retrying without GPU...")
-            print(cmd)
+            logger.warning("Retrying without GPU...")
+            logger.info(cmd)
             value = os.system(cmd)
             if value != 0:
                 raise RuntimeError("GLOMAP failed to run")
@@ -1318,18 +1321,18 @@ def run_glomap(dir_write, dir_write_sub, images_list, database_name, force_rerun
     cmd += f" --BundleAdjustment.use_gpu 0"
     cmd += f" --TrackEstablishment.max_num_tracks 3000000"
 
-    print(cmd)
+    logger.info(cmd)
     if not force_rerun and os.path.exists(
         dir_write + f"/{dir_write_sub}/0/cameras.bin"
     ):
-        print("Already run GLOMAP, skip")
+        logger.info("Already run GLOMAP, skip")
     else:
         value = os.system(cmd)
 
         if value != 0:
             # raise RuntimeError("GLOMAP failed to run")
             # instead of raising error, directly return the rconstruction where each image is with identity pose
-            print("GLOMAP failed to run, return identity poses")
+            logger.warning("GLOMAP failed to run, return identity poses")
             global_rotations = {}
             global_centers = {}
             for i, name in enumerate(images_list):
@@ -1357,7 +1360,7 @@ def run_triangulation_and_ba(
     if not force_rerun and os.path.exists(
         dir_write + f"/{dir_write_sub}/0/cameras.bin"
     ):
-        print("Already run GLOMAP, skip")
+        logger.info("Already run GLOMAP, skip")
     else:
         if not skip_triangulation:
             os.makedirs(dir_write + f"/{dir_middle_sub}", exist_ok=True)
@@ -1367,7 +1370,7 @@ def run_triangulation_and_ba(
             cmd += f" --output_path {dir_write}/{dir_middle_sub}"
             cmd += f" --input_path {dir_write}/{dir_input_sub}"
             cmd += f" --image_path ."  # this is not important
-            print(cmd)
+            logger.info(cmd)
             value = os.system(cmd)
 
         # Run bundle adjustler
@@ -1377,7 +1380,7 @@ def run_triangulation_and_ba(
         cmd += f" --image_path ."  # this is not important
         cmd += f" --skip_global_positioning 1"
         # cmd += f" --GlobalPositioning.optimize_positions 0"
-        print(cmd)
+        logger.info(cmd)
         value = os.system(cmd)
 
         if value != 0:

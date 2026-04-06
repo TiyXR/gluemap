@@ -36,6 +36,9 @@ from gluemap.estimators.similarity_alignment import (
     motion_averaging,
 )
 
+import logging
+logger = logging.getLogger(__name__)
+
 MIN_TRI_ANGLE = 1 # degrees, minimum median triangulation angle for reliable scale estimation
 
 
@@ -163,14 +166,14 @@ class GlobalGluer:
                         j_pos = rel_poses[(idx_j, idx_i)][2]
 
                         predictions_dict["pose_scores"][idx_1][0, j_pos] = 0.0
-                        print(
+                        logger.debug(
                             f"Filtered inconsistent edge between {idx_i} and {idx_j}, rotation error: {np.rad2deg(error_r)} degrees, translation error: {np.rad2deg(error_t)} degrees"
                         )
                         counter += 1
                 else:
                     rel_poses[(idx_i, idx_j)] = (poses[0, i].cpu(), idx, i)
 
-        print(f"Total number of inconsistent edges filtered: {counter}")
+        logger.info(f"Total number of inconsistent edges filtered: {counter}")
 
     # TODO: debug this part
     def _collect_valid_edges(self, predictions_dict):
@@ -205,7 +208,7 @@ class GlobalGluer:
         # Find the connected components
         components = list(nx.connected_components(G))
         if (len(components) == 1) and (len(components[0]) == N):
-            print("Edge connectivty of the graph:", nx.edge_connectivity(G))
+            logger.info(f"Edge connectivity of the graph: {nx.edge_connectivity(G)}")
             return
 
         components = [list(x) for x in components]
@@ -230,7 +233,7 @@ class GlobalGluer:
 
                 if image_id_to_cluster_id[idx1] != image_id_to_cluster_id[idx_inner]:
                     predictions_dict["pose_scores"][idx][0, i] += 1e-2
-                    print(idx1, idx_inner, "cross component")
+                    logger.debug(f"{idx1} {idx_inner} cross component")
                     valid_edges.add((idx1, idx_inner))
 
     def _global_structure_estimation(
@@ -303,9 +306,9 @@ class GlobalGluer:
         )
 
         # Check whether all images are estimated
-        print("Number of images:", self.N)
-        print("Number of global rotations:", len(global_rotations))
-        print("Number of global centers:", len(global_centers))
+        logger.info(f"Number of images: {self.N}")
+        logger.info(f"Number of global rotations: {len(global_rotations)}")
+        logger.info(f"Number of global centers: {len(global_centers)}")
         if len(global_rotations) != self.N or len(global_centers) != self.N:
             global_rotations = {
                 i: (
@@ -395,7 +398,7 @@ class GlobalGluer:
             total_valid_virtual_points += (
                 predictions_dict["valid_virtual"][idx].sum().item()
             )
-        print(
+        logger.info(
             f"Total number of valid virtual points after global positioning: {total_valid_virtual_points}"
         )
 
@@ -416,13 +419,13 @@ class GlobalGluer:
         """Estimate global rotations and centers using dense world-point SIM(3) alignment."""
         sim3_save_path = os.path.join(self.pointmap_dir, "..", "sim3_dict.pth")
         if self.force_load and os.path.exists(sim3_save_path):
-            print(f"Loading sim3_dict from {sim3_save_path}")
+            logger.info(f"Loading sim3_dict from {sim3_save_path}")
             sim3_dict = torch.load(sim3_save_path)
         else:
             worldpoints_dict = load_worldpoints_dict(self.pointmap_dir)
             sim3_dict = align_all_edges(worldpoints_dict, predictions_dict)
             torch.save(sim3_dict, sim3_save_path)
-            print(f"Saved sim3_dict to {sim3_save_path}")
+            logger.info(f"Saved sim3_dict to {sim3_save_path}")
 
         num_stars = len(predictions_dict["indexes"])
         global_rotations, global_scales, global_centers = motion_averaging(
@@ -652,7 +655,7 @@ class GlobalGluer:
             predictions_dict["pose_scores"][idx][0, invalid_mask] = 0.0
 
         if num_filtered > 0:
-            print(
+            logger.info(
                 f"Number of filtered edges by the rotation error / total: "
                 f"{num_filtered} / {num_total}"
             )
@@ -738,7 +741,7 @@ class GlobalGluer:
             num_filtered += invalid_mask.sum().item()
 
         if num_filtered > 0:
-            print(
+            logger.info(
                 f"Number of filtered edges by the rotation error / total: "
                 f"{num_filtered} / {num_total}"
             )
@@ -768,7 +771,7 @@ class GlobalGluer:
                 else:
                     predictions_dict["pose_scores"][idx][0, i] /= 1
                     
-        print(f"Boosted {num_boosted} sequential edges by factor {boost_factor}")
+        logger.info(f"Boosted {num_boosted} sequential edges by factor {boost_factor}")
 
     def _initialize_mst_structures(self, predictions_dict, global_rotations):
         indexes = get_tracks_dict_indexes(predictions_dict)

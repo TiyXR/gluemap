@@ -1,8 +1,11 @@
+import logging
 import torch
 import os
 import glob
 import numpy as np
 import faiss
+
+logger = logging.getLogger(__name__)
 
 
 def get_image_list(images_path):
@@ -56,7 +59,7 @@ def establish_neighbors_sequential(image_names, num_neighbors=30, return_raw=Fal
 
 
 def retrieve_global_neighbors(args, neighbors_sequential, descriptors_all):
-    print("Establishing global neighbors...")
+    logger.info("Establishing global neighbors...")
     neighbors_local = [
         x[i].cpu().numpy() for x in neighbors_sequential for i in range(x.shape[0])
     ]

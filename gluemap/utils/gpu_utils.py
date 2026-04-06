@@ -1,11 +1,12 @@
-import builtins
-import datetime
+import logging
 import os
 import torch
 import torch.distributed as dist
 import pickle
 import shutil
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def init_distributed_mode(args):
@@ -15,7 +16,7 @@ def init_distributed_mode(args):
         args.world_size = int(os.environ["WORLD_SIZE"])
         args.gpu = int(os.environ["LOCAL_RANK"])
     else:
-        print("Not using distributed mode")
+        logger.info("Not using distributed mode")
         setup_for_distributed(is_master=True)  # hack
         args.distributed = False
         return
@@ -31,12 +32,7 @@ def init_distributed_mode(args):
     os.environ["NCCL_NET"] = "Socket"
     os.environ["NCCL_IB_DISABLE"] = "1"
 
-    print(
-        "| distributed init (rank {}): {}, gpu {}".format(
-            args.rank, args.dist_url, args.gpu
-        ),
-        flush=True,
-    )
+    logger.info(f"| distributed init (rank {args.rank}): {args.dist_url}, gpu {args.gpu}")
     torch.distributed.init_process_group(
         backend=args.dist_backend,
         init_method=args.dist_url,
@@ -48,20 +44,9 @@ def init_distributed_mode(args):
 
 
 def setup_for_distributed(is_master):
-    """
-    This function disables printing when not in master process
-    """
-    builtin_print = builtins.print
-
-    def print(*args, **kwargs):
-        force = kwargs.pop("force", False)
-        force = force or (get_world_size() > 8)
-        if is_master or force:
-            now = datetime.datetime.now().time()
-            builtin_print("[{}] ".format(now), end="")  # print with time stamp
-            builtin_print(*args, **kwargs)
-
-    builtins.print = print
+    """Suppress info-level logging on non-master processes."""
+    if not is_master:
+        logging.getLogger().setLevel(logging.WARNING)
 
 
 def is_dist_avail_and_initialized():
@@ -108,7 +93,7 @@ def all_gather_object_cpu(  # type: ignore
     # make tmp dir
     # tmpdir = create_tmpdir(rank, tmpdir, use_system_tmp)
     if os.path.exists(tmpdir):
-        print("Warning: tmpdir already exists, removing it.")
+        logger.warning("tmpdir already exists, removing it.")
     else:
         os.makedirs(tmpdir, exist_ok=True)
 

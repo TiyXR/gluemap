@@ -12,6 +12,10 @@ from gluemap.math.geometry import (
     quaternion_to_rotation_matrix,
 )
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def collect_relative_rotations_ministar(prediction_dict):
     poses_rel = {}
@@ -97,7 +101,7 @@ def _mst_init_rotations(prediction_dict, indexes):
 
 
 def rotation_averaging(prediction_dict, init_rotations=None):
-    print("Rotation averaging with ministar ...")
+    logger.info("Rotation averaging with ministar ...")
 
     # Collect all indexes
     indexes = set(
@@ -162,7 +166,7 @@ def rotation_averaging(prediction_dict, init_rotations=None):
     options.max_num_iterations = 200
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
-    print(summary.BriefReport())
+    logger.info(summary.BriefReport())
 
     # Now, we have the estimation result for the community center and the overlapping images
     # We now estimate the rotation for all images
@@ -175,7 +179,7 @@ def rotation_averaging(prediction_dict, init_rotations=None):
 
 def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
     """Rotation averaging using pycolmap's L1+IRLS solver with MST initialization."""
-    print("Rotation averaging with pycolmap ...")
+    logger.info("Rotation averaging with pycolmap ...")
 
     # Collect all image indexes
     indexes = set(
@@ -230,7 +234,7 @@ def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
 
     # Solve
     success = pycolmap.run_rotation_averaging(options, pose_graph, reconstruction, [])
-    print(f"Rotation averaging {'succeeded' if success else 'failed'}")
+    logger.info(f"Rotation averaging {'succeeded' if success else 'failed'}")
 
     # Extract rotations from reconstruction frames
     rotations = {}

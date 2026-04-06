@@ -1,9 +1,12 @@
+import logging
 import os
 from typing import List, Optional
 
 import numpy as np
 import pycolmap
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 def intrinsics_to_colmap_camera(intrinsics_matrix, camera_model="SIMPLE_PINHOLE"):
@@ -136,5 +139,5 @@ def extract_gt_intrinsics(
             gt_intrinsics[cam_id] = torch.tensor(K, dtype=torch.float32).unsqueeze(0)
 
     num_set = sum(1 for x in gt_intrinsics if x is not None)
-    print(f"GT intrinsics loaded: {num_set}/{num_cameras} cameras matched")
+    logger.info(f"GT intrinsics loaded: {num_set}/{num_cameras} cameras matched")
     return gt_intrinsics

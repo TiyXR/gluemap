@@ -1,8 +1,11 @@
+import logging
 import torch
 import numpy as np
 import einops
 
 from gluemap.math.geometry import project, unproject, bilinear_interpolate_value
+
+logger = logging.getLogger(__name__)
 
 
 # Note: the coordinates of camera_points should correspond to extrinsics
@@ -91,7 +94,7 @@ def subsample_virtual_tracks(
 
         selected_idx_all.append(selected_idx)
         if len(invalid_index) > 0:
-            print(f"{len(invalid_index)} / {N-1} images are not covered")
+            logger.info(f"{len(invalid_index)} / {N-1} images are not covered")
 
     selected_idx_all = [list(selected_idx_all[i]) for i in range(B)]
     max_selected_num = max(max_selected_num, sampled_num)
@@ -106,7 +109,7 @@ def subsample_virtual_tracks(
             weights[list(selected_idx_all[i])] = 0
 
             if weights.sum() == 0:
-                print("No valid points to sample")
+                logger.warning("No valid points to sample")
                 continue
 
             selected_idx_all[i] += torch.multinomial(

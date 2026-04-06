@@ -1,9 +1,12 @@
+import logging
 import os
 from collections import defaultdict
 from typing import Dict, Tuple
 
 import networkx as nx
 import pycolmap
+
+logger = logging.getLogger(__name__)
 
 
 def draw_covisibility_graph(
@@ -41,7 +44,7 @@ def draw_covisibility_graph(
             G.add_edge(id_i, id_j, weight=count)
 
     if len(G.edges) == 0:
-        print("No edges in covisibility graph, skipping drawing.")
+        logger.warning("No edges in covisibility graph, skipping drawing.")
         return
 
     # Extract edge weights for visualization
@@ -73,8 +76,8 @@ def draw_covisibility_graph(
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close(fig)
-    print(f"Covisibility graph saved to {save_path}")
-    
+    logger.info(f"Covisibility graph saved to {save_path}")
+
 
 def draw_covisibility_graph_from_predictions(
     predictions_dict: Dict,
@@ -133,7 +136,7 @@ def draw_covisibility_graph_from_predictions(
             G.add_edge(id_i, id_j, weight=score)
 
     if len(G.edges) == 0:
-        print("No edges in covisibility graph, skipping drawing.")
+        logger.warning("No edges in covisibility graph, skipping drawing.")
         return
 
     # Edge weights for width and color
@@ -181,5 +184,5 @@ def draw_covisibility_graph_from_predictions(
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
     plt.close(fig)
-    print(f"Covisibility graph saved to {save_path}")
+    logger.info(f"Covisibility graph saved to {save_path}")
     

@@ -1,3 +1,4 @@
+import logging
 import torch
 import os
 import numpy as np
@@ -5,6 +6,8 @@ import faiss
 import glob
 
 from gluemap.datasets.base_dataset import DemoBaseDataset
+
+logger = logging.getLogger(__name__)
 
 # from gluemap.datasets.twoview_dataset import BaseTwoViewDataset
 from gluemap.datasets.utils import (
@@ -76,7 +79,7 @@ class MultiSequencePairs(DemoBaseDataset):
         descriptors_all = []
         self.sequential_edges = []
         for dataset in datasets:
-            print("Constructing pairs for dataset:", dataset)
+            logger.info(f"Constructing pairs for dataset: {dataset}")
 
             # For each subfolder, load the SALAD descriptors and construct sequential pairs
             img_list_dataset = [

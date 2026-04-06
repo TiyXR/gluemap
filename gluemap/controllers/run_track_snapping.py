@@ -1,5 +1,6 @@
 # from e2esfm.pipeline.tracks_util import track_snapping
 # from e2esfm.models.utils import *
+import logging
 from pathlib import Path
 import pycolmap
 from tqdm import tqdm
@@ -10,6 +11,8 @@ import faiss
 import pyceres
 
 from gluemap.utils.misc import get_tracks_dict_indexes
+
+logger = logging.getLogger(__name__)
 
 
 def track_snapping(tracks_dict, query_points_full, merge_thres=10.0, tolerance=3.0):
@@ -45,7 +48,7 @@ def track_snapping(tracks_dict, query_points_full, merge_thres=10.0, tolerance=3
     indexes = get_tracks_dict_indexes(tracks_dict)
     counter_valid = 0
     tracks_dict["is_close"] = {}
-    print("Indexing and snapping points...")
+    logger.info("Indexing and snapping points...")
     for idx in tqdm(indexes):
         is_close_all = []
         for i, idx_inner in enumerate(tracks_dict["indexes"][idx]):
@@ -81,7 +84,7 @@ def track_snapping(tracks_dict, query_points_full, merge_thres=10.0, tolerance=3
             np.stack(is_close_all, axis=0)
         ).unsqueeze(0)
 
-    print(f"Total points snapped {counter} / {counter_valid}")
+    logger.info(f"Total points snapped {counter} / {counter_valid}")
 
 
 def refine_tracks_database(
@@ -106,7 +109,7 @@ def refine_tracks_database(
             torch.from_numpy(query_keypoints)[:, :2].float().unsqueeze(0)
         )
 
-    print("Finish loading keypoints from the database")
+    logger.info("Finish loading keypoints from the database")
     # print([query_points_full[i].shape for i in range(len(query_points_full))])
 
     snapping_thres_dict = {}
@@ -116,5 +119,5 @@ def refine_tracks_database(
         ) / 1024
         snapping_thres_dict[image_idx] = snapping_thres * scaling_factor
 
-    print("Start track snapping")
+    logger.info("Start track snapping")
     track_snapping(predictions_dict, query_points_full, merge_thres=snapping_thres_dict)

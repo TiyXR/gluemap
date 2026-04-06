@@ -1,5 +1,6 @@
 """Utility functions for loading CO3D data from h5py files and pickle ground truth."""
 
+import logging
 import os
 import pickle
 
@@ -7,6 +8,8 @@ import h5py
 import numpy as np
 import pycolmap
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 def convert_pt3d_RT_to_opencv(Rot, Trans):
@@ -45,7 +48,7 @@ def extract_images_from_h5py(h5py_path, image_names):
     # Check if already extracted
     existing = set(os.listdir(output_dir))
     if all(name in existing for name in image_names):
-        print(f"CO3D images already extracted to {output_dir}")
+        logger.info(f"CO3D images already extracted to {output_dir}")
         return output_dir
 
     # Extract from h5py
@@ -58,7 +61,7 @@ def extract_images_from_h5py(h5py_path, image_names):
             img_array = img_group[name][()]  # uint8 numpy array (H, W, 3)
             Image.fromarray(img_array).save(out_path)
 
-    print(f"Extracted {len(image_names)} CO3D images to {output_dir}")
+    logger.info(f"Extracted {len(image_names)} CO3D images to {output_dir}")
     return output_dir
 
 

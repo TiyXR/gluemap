@@ -1,3 +1,4 @@
+import logging
 import time
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -9,6 +10,8 @@ import numpy as np
 
 
 from gluemap.controllers.run_salad_retrival import SALADRetrieval
+
+logger = logging.getLogger(__name__)
 from gluemap.controllers.run_twoview_inference import BatchInferenceDG
 from gluemap.controllers.run_star_inference import BatchInferenceStar
 from gluemap.utils.gpu_utils import all_gather_object_cpu, synchronize
@@ -35,7 +38,7 @@ def invalidate_cache_from(args, stage):
                 path = os.path.join(args.curr_path, fname)
             if os.path.exists(path):
                 os.remove(path)
-                print(f"[rerun_from={stage}] Deleted {path}")
+                logger.info(f"[rerun_from={stage}] Deleted {path}")
 
 
 def run_salad_retrieval(
@@ -55,7 +58,7 @@ def run_salad_retrieval(
         os.path.join(base_path, file_name)
     ):
         if rank == 0:
-            print("Computing SALAD descriptors...")
+            logger.info("Computing SALAD descriptors...")
             salad_retrieval = SALADRetrieval(model, args, device=device, dtype=dtype)
 
             descriptors = salad_retrieval.main()
@@ -212,7 +215,7 @@ def run_twoview_inference(
             os.makedirs(args.curr_path, exist_ok=True)
             torch.save(global_outputs, os.path.join(args.curr_path, file_name))
     else:
-        print("Loading existing results...")
+        logger.info("Loading existing results...")
         global_outputs = torch.load(os.path.join(args.curr_path, file_name))
 
     twoview_timing = {
@@ -221,7 +224,7 @@ def run_twoview_inference(
         "total": sum(batch_times) if batch_times else 0.0,
     }
     if rank == 0 and batch_times:
-        print(f"[Profiling] Two-view inference: {len(batch_times)} batches, "
+        logger.info(f"[Profiling] Two-view inference: {len(batch_times)} batches, "
               f"total={sum(batch_times):.2f}s, mean={sum(batch_times)/len(batch_times):.3f}s/batch")
 
     return global_outputs, twoview_timing
@@ -342,7 +345,7 @@ def run_star_inference(
             if save_intermediate_results:
                 torch.save(predictions_dict, os.path.join(args.curr_path, file_name))
     else:
-        print("Loading existing results...")
+        logger.info("Loading existing results...")
         predictions_dict = torch.load(os.path.join(args.curr_path, file_name))
 
     star_timing = {
@@ -353,7 +356,7 @@ def run_star_inference(
         "total": sum(batch_times) if batch_times else 0.0,
     }
     if rank == 0 and batch_times:
-        print(f"[Profiling] Star inference: {len(batch_times)} batches, "
+        logger.info(f"[Profiling] Star inference: {len(batch_times)} batches, "
               f"total={sum(batch_times):.2f}s, mean={sum(batch_times)/len(batch_times):.3f}s/batch, "
               f"forward={sum(forward_times):.2f}s, tracking={sum(tracking_times):.2f}s")
 

@@ -1,6 +1,9 @@
 import os
 import time
+import logging
 import torch
+
+logger = logging.getLogger(__name__)
 from gluemap.utils.model_loader import load_models
 from gluemap.utils.colmap_io import write_to_colmap_format
 from gluemap.utils.prepare_prior import (
@@ -126,19 +129,19 @@ def run_inference_pipeline(
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
         # Print summary
-        print(f"\n[Profiling] Pipeline Summary:")
-        print(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
-              f"inference={twoview_timing['total']:.2f}s")
-        print(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-        print(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
-              f"inference={star_timing['total']:.2f}s")
-        print(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
-        print(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
+        logger.info(f"[Profiling] Pipeline Summary:")
+        logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+                     f"inference={twoview_timing['total']:.2f}s")
+        logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
+        logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+                     f"inference={star_timing['total']:.2f}s")
+        logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
+        logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
         # Save per-dataset timing
         timing_path = os.path.join(args.curr_path, "pipeline_timing.pth")
         torch.save(timing, timing_path)
-        print(f"[Profiling] Per-dataset timing saved to: {timing_path}")
+        logger.info(f"[Profiling] Per-dataset timing saved to: {timing_path}")
 
         return pred_dir, timing
 
@@ -202,13 +205,13 @@ def run_postprocessing_pipeline(
         for cam_id in range(len(global_intrinsics)):
             if cam_id < len(gt_intrinsics) and gt_intrinsics[cam_id] is not None:
                 global_intrinsics[cam_id] = gt_intrinsics[cam_id]
-        print(f"Replaced intrinsics with GT from {args.gt_intrinsics_path}")
+        logger.info(f"Replaced intrinsics with GT from {args.gt_intrinsics_path}")
 
     # Write coarse results to COLMAP format
     t0 = time.perf_counter()
     suffix = getattr(args, "output_suffix", "")
     coarse_dir = f"coarse{suffix}"
-    print("write_to_colmap_format:", args.curr_path + "/" + coarse_dir)
+    logger.info("write_to_colmap_format: %s", args.curr_path + "/" + coarse_dir)
     write_to_colmap_format(
         args.curr_path + "/" + coarse_dir,
         dataset_pair.images_shape_ori,
@@ -226,7 +229,7 @@ def run_postprocessing_pipeline(
 
     # Early exit if coarse_only
     if getattr(args, "coarse_only", False):
-        print("Coarse only mode: skipping all refinement steps.")
+        logger.info("Coarse only mode: skipping all refinement steps.")
         timing["total"] = time.perf_counter() - t_postproc_start
         return coarse_dir, timing
 
@@ -309,13 +312,13 @@ def run_postprocessing_pipeline(
 
     timing["total"] = time.perf_counter() - t_postproc_start
 
-    print(f"\n[Profiling] Postprocessing Summary:")
-    print(f"  collect_rotations: {timing['collect_rotations']:.2f}s")
-    print(f"  global_mapping:    {timing['global_mapping']:.2f}s")
-    print(f"  write_coarse:      {timing['write_coarse']:.2f}s")
-    print(f"  sift_database:     {timing.get('sift_database', 0):.2f}s")
-    print(f"  track_snapping:    {timing.get('track_snapping', 0):.2f}s")
-    print(f"  refinement:        {timing.get('refinement', 0):.2f}s")
-    print(f"  total:             {timing['total']:.2f}s")
+    logger.info(f"[Profiling] Postprocessing Summary:")
+    logger.info(f"  collect_rotations: {timing['collect_rotations']:.2f}s")
+    logger.info(f"  global_mapping:    {timing['global_mapping']:.2f}s")
+    logger.info(f"  write_coarse:      {timing['write_coarse']:.2f}s")
+    logger.info(f"  sift_database:     {timing.get('sift_database', 0):.2f}s")
+    logger.info(f"  track_snapping:    {timing.get('track_snapping', 0):.2f}s")
+    logger.info(f"  refinement:        {timing.get('refinement', 0):.2f}s")
+    logger.info(f"  total:             {timing['total']:.2f}s")
 
     return pred_dir, timing

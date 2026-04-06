@@ -13,6 +13,7 @@ Typical usage:
     optimized = optimizer.optimize(sequential_transforms, loop_constraints)
 """
 
+import logging
 import time
 from typing import List, Tuple, Dict, Optional
 
@@ -22,12 +23,14 @@ from scipy.spatial.transform import Rotation as R
 from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import spsolve
 
+logger = logging.getLogger(__name__)
+
 try:
     import pypose as pp
     _PYPOSE_AVAILABLE = True
 except ImportError:
     _PYPOSE_AVAILABLE = False
-    print("PyPose not available — Sim3LoopOptimizer will not function.")
+    logger.warning("PyPose not available — Sim3LoopOptimizer will not function.")
 
 try:
     import sim3solve
@@ -146,7 +149,7 @@ class Sim3LoopOptimizer:
     def __init__(self, device: str = "cpu", solve_system_version: str = "python"):
         self.device = device
         if not _CPP_SOLVER_AVAILABLE and solve_system_version == "cpp":
-            print("sim3solve C++ not available, falling back to Python solver.")
+            logger.warning("sim3solve C++ not available, falling back to Python solver.")
             solve_system_version = "python"
         self.solve_system_version = solve_system_version
 
@@ -311,7 +314,7 @@ class Sim3LoopOptimizer:
             Optimized sequential_transforms (same format as input).
         """
         if not loop_constraints:
-            print("Warning: No loop constraints provided, returning original transforms.")
+            logger.warning("No loop constraints provided, returning original transforms.")
             return sequential_transforms
 
         input_poses = self.sequential_to_absolute_poses(sequential_transforms)
@@ -321,7 +324,7 @@ class Sim3LoopOptimizer:
         lmbda = lambda_init
         residual_history = []
 
-        print(
+        logger.info(
             f"Starting Sim3 loop optimization: {len(sequential_transforms) + 1} poses, "
             f"{len(loop_constraints)} loop constraints"
         )
@@ -332,7 +335,7 @@ class Sim3LoopOptimizer:
             )
 
             if resid.numel() == 0:
-                print("No residuals to optimize.")
+                logger.warning("No residuals to optimize.")
                 break
 
             current_cost = resid.square().mean().item()
@@ -350,7 +353,7 @@ class Sim3LoopOptimizer:
                     )
                 t1 = time.time()
             except Exception as e:
-                print(f"Solver failed at iteration {itr}: {e}")
+                logger.warning(f"Solver failed at iteration {itr}: {e}")
                 break
 
             Ginv_tmp = Ginv + delta_pose
@@ -367,20 +370,20 @@ class Sim3LoopOptimizer:
                 lmbda *= 2
                 status = "rejected"
 
-            print(
+            logger.debug(
                 f"Iter {itr:3d}: cost {current_cost:.8f} -> {new_cost:.8f} ({status}) | "
                 f"solver ({self.solve_system_version}): {(t1 - t0) * 1000:.2f} ms"
             )
 
             if current_cost < 1e-5 and itr >= 4 and len(residual_history) >= 5:
                 if residual_history[-5] / residual_history[-1] < 1.5:
-                    print(f"Converged at iteration {itr}.")
+                    logger.info(f"Converged at iteration {itr}.")
                     break
 
         optimized_absolute = pp.Exp(Ginv).Inv()
         optimized_sequential = self.absolute_to_sequential_transforms(optimized_absolute)
 
         final_cost = residual_history[-1] if residual_history else float("nan")
-        print(f"Sim3 loop optimization done. Final cost: {final_cost:.8f}")
+        logger.info(f"Sim3 loop optimization done. Final cost: {final_cost:.8f}")
 
         return optimized_sequential

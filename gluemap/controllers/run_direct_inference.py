@@ -1,9 +1,12 @@
+import logging
 import os
 import time
 import torch
 import numpy as np
 
 from gluemap.utils.model_loader import load_models
+
+logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
 from gluemap.utils.pi3_utils import get_pi3d_calibration
 from gluemap.utils.mapanything_utils import mapanything_inference
@@ -120,7 +123,7 @@ def run_direct_inference_pipeline(
     cache_file = os.path.join(args.curr_path, f"direct_result_{backbone}.pth")
 
     os.makedirs(args.curr_path, exist_ok=True)
-    print(f"\n[Direct Inference] Running with backbone: {backbone}")
+    logger.info(f"[Direct Inference] Running with backbone: {backbone}")
 
     # Step 1: Load model
     t0 = time.perf_counter()
@@ -133,7 +136,7 @@ def run_direct_inference_pipeline(
 
     # Check cache
     if getattr(args, "force_load", False) and os.path.exists(cache_file):
-        print(f"  Loading cached result from {cache_file}")
+        logger.info(f"  Loading cached result from {cache_file}")
         cached = torch.load(cache_file, map_location="cpu")
         global_rotations = cached["global_rotations"]
         global_centers = cached["global_centers"]
@@ -208,7 +211,7 @@ def run_direct_inference_pipeline(
     if rank == 0:
         t0 = time.perf_counter()
         colmap_dir = os.path.join(args.curr_path, output_dir)
-        print(f"  Writing COLMAP output to: {colmap_dir}")
+        logger.info(f"  Writing COLMAP output to: {colmap_dir}")
 
         write_to_colmap_format(
             colmap_dir,
@@ -226,13 +229,13 @@ def run_direct_inference_pipeline(
         timing["write_colmap"] = time.perf_counter() - t0
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
-        print(f"\n[Direct Inference Profiling] Backbone: {backbone}")
-        print(f"  Model loading:    {timing.get('model_loading', 0):.2f}s")
-        print(f"  Image loading:    {timing.get('image_loading', 0):.2f}s")
-        print(f"  Forward pass:     {timing.get('forward_pass', 0):.2f}s")
-        print(f"  Pose extraction:  {timing.get('pose_extraction', 0):.2f}s")
-        print(f"  Write COLMAP:     {timing.get('write_colmap', 0):.2f}s")
-        print(f"  Total pipeline:   {timing['total_pipeline']:.2f}s")
+        logger.info(f"[Direct Inference Profiling] Backbone: {backbone}")
+        logger.info(f"  Model loading:    {timing.get('model_loading', 0):.2f}s")
+        logger.info(f"  Image loading:    {timing.get('image_loading', 0):.2f}s")
+        logger.info(f"  Forward pass:     {timing.get('forward_pass', 0):.2f}s")
+        logger.info(f"  Pose extraction:  {timing.get('pose_extraction', 0):.2f}s")
+        logger.info(f"  Write COLMAP:     {timing.get('write_colmap', 0):.2f}s")
+        logger.info(f"  Total pipeline:   {timing['total_pipeline']:.2f}s")
 
         # Save timing
         timing_path = os.path.join(args.curr_path, f"pipeline_timing_direct_{backbone}.pth")

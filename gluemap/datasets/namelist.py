@@ -1,5 +1,8 @@
+import logging
 from e2esfm_refactor.datasets.base_dataset import *
 import imagesize
+
+logger = logging.getLogger(__name__)
 
 import h5py
 
@@ -75,7 +78,7 @@ class NameListPairs(DemoBaseTwoViewDataset):
         descriptors_path = os.path.join(args.curr_processed, "salad_descriptors.pt")
         args.num_neighbors = 100
 
-        print("Number of neighbors for retrieval:", args.num_neighbors)
+        logger.info(f"Number of neighbors for retrieval: {args.num_neighbors}")
 
         if os.path.exists(descriptors_path):
             descriptors_db = torch.load(descriptors_path)
@@ -292,9 +295,9 @@ class NameListPairs(DemoBaseTwoViewDataset):
                 self.images_ori
             )
         else:
-            print("images are not preloaded!")
+            logger.warning("images are not preloaded!")
 
-        print("preload image done")
+        logger.info("preload image done")
 
     def _set_camera_model(self, args):
         # if args.dataset_category in ["ETH3D", "co3d"]:
@@ -308,7 +311,7 @@ class NameListPairs(DemoBaseTwoViewDataset):
         #     self.camera_model = "SIMPLE_PINHOLE"
         self.camera_model = "SIMPLE_PINHOLE"
 
-        print("set camera model done")
+        logger.info("set camera model done")
 
     def _get_lamar_result(self, args):
 
@@ -439,7 +442,7 @@ class NameListPairs(DemoBaseTwoViewDataset):
             args.num_neighbors_retrieval + args.num_neighbors + 1,
         )
 
-        print("Retrieval for all images done")
+        logger.info("Retrieval for all images done")
 
         # exclude itself
         # distance_extend = distance_extend[:, 1:]

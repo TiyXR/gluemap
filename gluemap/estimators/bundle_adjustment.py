@@ -22,6 +22,9 @@ from gluemap.utils.colmap_utils import (
     colmap_params_to_intrinsics,
 )
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 def get_camera_model_id(camera_model):
     """Get COLMAP camera model ID from string name."""
@@ -268,11 +271,11 @@ def add_reprojection_error(
         return None
 
     if cam_poses is None:
-        print("Warning: cam_poses not provided")
+        logger.warning("cam_poses not provided")
         return None
 
     if intrinsics_params is None or intrinsics_mapping is None:
-        print("Warning: intrinsics_params/intrinsics_mapping not provided")
+        logger.warning("intrinsics_params/intrinsics_mapping not provided")
         return None
 
     # Get camera model ID for COLMAP cost function
@@ -364,10 +367,10 @@ def add_reprojection_error(
             costs.append(cost)
             num_constraints += 1
 
-    print(f"Added {num_constraints} reprojection error constraints ({num_virtual} virtual)")
-    print(f"Skipped {num_skipped} observations")
-    print(f"Number of None camera parameters skipped: {num_none}")
-    print(f"Number of negative observation: {isnegative_count}")
+    logger.info(f"Added {num_constraints} reprojection error constraints ({num_virtual} virtual)")
+    logger.info(f"Skipped {num_skipped} observations")
+    logger.info(f"Number of None camera parameters skipped: {num_none}")
+    logger.info(f"Number of negative observation: {isnegative_count}")
 
     return first_camera_id
 
@@ -407,7 +410,7 @@ def add_depth_prior_error(
         depth_weight_virtual: Weight (magnitude) for the arctan loss
     """
     if cam_poses is None:
-        print("Warning: cam_poses not provided, skipping depth prior")
+        logger.warning("cam_poses not provided, skipping depth prior")
         return
 
     num_constraints = 0
@@ -454,8 +457,8 @@ def add_depth_prior_error(
             losses.append(loss)
             num_constraints += 1
 
-    print(f"Added {num_constraints} virtual depth prior constraints")
-    print(f"Skipped {num_skipped} observations")
+    logger.info(f"Added {num_constraints} virtual depth prior constraints")
+    logger.info(f"Skipped {num_skipped} observations")
 
 
 def bundle_adjustment_with_depth(
@@ -490,7 +493,7 @@ def bundle_adjustment_with_depth(
     Returns:
         reconstruction: Modified in-place and returned
     """
-    print("Performing bundle adjustment with reprojection error...")
+    logger.info("Performing bundle adjustment with reprojection error...")
 
     # Step 1: Extract data from reconstruction
     (
@@ -508,7 +511,7 @@ def bundle_adjustment_with_depth(
         global_centers,
     )
 
-    print(f"Bundle adjustment with {len(reconstruction.points3D)} tracks")
+    logger.info(f"Bundle adjustment with {len(reconstruction.points3D)} tracks")
 
     # # Step 3: Create duplicate SIMPLE_FISHEYE camera params for virtual points
     # # These are separate numpy arrays (copies) so they are independent parameter blocks
@@ -578,7 +581,7 @@ def bundle_adjustment_with_depth(
         if first_camera_id in cam_poses:
             if prob.has_parameter_block(cam_poses[first_camera_id]):
                 prob.set_parameter_block_constant(cam_poses[first_camera_id])
-                print(f"Fixed rotation and translation gauge: camera {first_camera_id}")
+                logger.info(f"Fixed rotation and translation gauge: camera {first_camera_id}")
 
         # Fix scale: pin the largest translation component of a second camera
         second_camera_id = None
@@ -593,11 +596,11 @@ def bundle_adjustment_with_depth(
             # Create product manifold: full quaternion manifold + subset translation manifold
             scale_gauge_manifold = pygluemap.CreatePoseManifoldWithFixedTransComponent(fixed_idx)
             prob.set_manifold(cam_poses[second_camera_id], scale_gauge_manifold)
-            print(f"Fixed scale gauge: camera {second_camera_id}, translation component {fixed_idx}")
+            logger.info(f"Fixed scale gauge: camera {second_camera_id}, translation component {fixed_idx}")
         else:
-            print("Warning: No second camera available to fix scale gauge")
+            logger.warning("No second camera available to fix scale gauge")
     else:
-        print("Warning: No cameras added to problem, cannot fix gauge")
+        logger.warning("No cameras added to problem, cannot fix gauge")
 
     # Step 9: Solve (solver config matching COLMAP's bundle_adjustment_ceres.cc)
     options = pyceres.SolverOptions()
@@ -625,9 +628,9 @@ def bundle_adjustment_with_depth(
     else:
         options.num_threads = 32
 
-    print(f"Solver: {options.linear_solver_type.name} ({num_images} images, {prob.num_residuals()} residuals)")
+    logger.info(f"Solver: {options.linear_solver_type.name} ({num_images} images, {prob.num_residuals()} residuals)")
 
-    print("Solving the optimization problem...")
+    logger.info("Solving the optimization problem...")
 
     if fix_rotations_first_pass:
         # First pass: Fix quaternion part of all poses (except gauge-fixed camera)
@@ -642,7 +645,7 @@ def bundle_adjustment_with_depth(
         pyceres.solve(options, prob, summary)
         # pygluemap.solve_cuda(options, prob, summary)
 
-        print(summary.BriefReport())
+        logger.info(summary.BriefReport())
 
         # Release rotations for second pass - restore full pose manifold
         for image_id in cam_poses:
@@ -663,7 +666,7 @@ def bundle_adjustment_with_depth(
     # reconstruction.write("results/wrong_init")
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
-    print(summary.BriefReport())
+    logger.info(summary.BriefReport())
 
     # Step 10: Update reconstruction in-place
     update_reconstruction_from_ba_results(

@@ -1,3 +1,4 @@
+import logging
 import torch
 import os
 import numpy as np
@@ -5,6 +6,8 @@ import faiss
 
 from gluemap.datasets.base_dataset import DemoBaseDataset
 from gluemap.datasets.utils import get_image_list
+
+logger = logging.getLogger(__name__)
 
 
 class BaseTwoViewDataset(DemoBaseDataset):
@@ -91,7 +94,7 @@ class BaseTwoViewDataset(DemoBaseDataset):
         descriptors_path = os.path.join(args.curr_processed, "salad_descriptors.pt")
         # args.num_neighbors = 100
 
-        print("Number of neighbors for retrieval:", args.num_neighbors)
+        logger.info(f"Number of neighbors for retrieval: {args.num_neighbors}")
 
         if os.path.exists(descriptors_path) and len(self.images_list) > args.num_neighbors:
             descriptors_db = torch.load(descriptors_path)

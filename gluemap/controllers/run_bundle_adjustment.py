@@ -23,6 +23,8 @@ from gluemap.math.errors import (
 )
 
 from collections import defaultdict
+import logging
+logger = logging.getLogger(__name__)
 
 
 def build_virtual_point_start(pts2d_idx_inv: Dict[int, List]) -> Dict[int, int]:
@@ -299,8 +301,8 @@ def prune_track_outliers(points3D, inlier_mask):
     for point3D_id in points_to_remove:
         del points3D[point3D_id]
 
-    print(f"Pruned {total_outliers_removed} outlier observations")
-    print(f"Removed {len(points_to_remove)} tracks with < 2 inliers")
+    logger.info(f"Pruned {total_outliers_removed} outlier observations")
+    logger.info(f"Removed {len(points_to_remove)} tracks with < 2 inliers")
 
 
 def initialize_world_points(
@@ -454,7 +456,7 @@ def initialize_world_points(
         else:
             inlier_mask[point3D_id] = [False] * len(elements)
 
-    print(f"Average inliers per real track: {total_inlier_count / max(num_initialized_real,1):.2f}")
+    logger.info(f"Average inliers per real track: {total_inlier_count / max(num_initialized_real,1):.2f}")
 
     # ==========================================================================
     # Loop 2: Virtual points - use directly without RANSAC (only pos==0)
@@ -553,16 +555,16 @@ def initialize_world_points(
                     # Mark all as outliers if not enough inliers
                     inlier_mask[point3D_id] = [False] * len(elements)
 
-    print(f"Virtual points: {total_virtual_inlier_count} inliers, {total_virtual_outlier_count} outliers")
+    logger.info(f"Virtual points: {total_virtual_inlier_count} inliers, {total_virtual_outlier_count} outliers")
     if num_initialized_virtual > 0:
-        print(f"Average inliers per virtual track: {total_virtual_inlier_count / num_initialized_virtual:.2f}")
+        logger.info(f"Average inliers per virtual track: {total_virtual_inlier_count / num_initialized_virtual:.2f}")
 
     # Prune outliers from real tracks (modify points3D in place)
     prune_track_outliers(points3D, inlier_mask)
 
-    print(f"Tracks: {num_tracks_before} -> {len(points3D)} after pruning")
-    print(f"Initialized {num_initialized_real} real points (with RANSAC)")
-    print(f"Initialized {num_initialized_virtual} virtual points (direct)")
+    logger.info(f"Tracks: {num_tracks_before} -> {len(points3D)} after pruning")
+    logger.info(f"Initialized {num_initialized_real} real points (with RANSAC)")
+    logger.info(f"Initialized {num_initialized_virtual} virtual points (direct)")
 
     return points3D
 
@@ -662,16 +664,16 @@ def iterative_bundle_adjustment(
                     camera_id=camera_id,
                 )
 
-    print(f"Starting iterative BA with {len(reconstruction.points3D)} tracks")
-    print(f"  Max filter iterations: {options.max_filter_iterations}")
-    print(f"  Normalized reproj threshold: {options.normalized_reproj_threshold}")
-    print(f"  Min track length: {options.min_track_length}")
+    logger.info(f"Starting iterative BA with {len(reconstruction.points3D)} tracks")
+    logger.info(f"  Max filter iterations: {options.max_filter_iterations}")
+    logger.info(f"  Normalized reproj threshold: {options.normalized_reproj_threshold}")
+    logger.info(f"  Min track length: {options.min_track_length}")
 
     # Count initial observations
     total_observations = sum(
         len(list(p.track.elements)) for p in reconstruction.points3D.values()
     )
-    print(f"Initial observations: {total_observations}")
+    logger.info(f"Initial observations: {total_observations}")
 
     # Iterative filtering loop (outer loop runs BA, inner loop tightens threshold)
     iteration = 0
@@ -680,9 +682,9 @@ def iterative_bundle_adjustment(
         scaling = max(3 - iteration, 1)
         current_threshold = scaling * options.normalized_reproj_threshold
 
-        print(f"\n=== Iteration {iteration + 1}/{options.max_filter_iterations} ===")
-        print(f"Tracks: {len(reconstruction.points3D)}")
-        print(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
+        logger.info(f"=== Iteration {iteration + 1}/{options.max_filter_iterations} ===")
+        logger.info(f"Tracks: {len(reconstruction.points3D)}")
+        logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
         # Run BA via bundle_adjustment_with_depth
         # Only fix rotations in first pass on first iteration
@@ -698,7 +700,7 @@ def iterative_bundle_adjustment(
 
         # Inner loop: filter and tighten threshold when too few tracks filtered
         # (matches C++ IterativeBundleAdjustment pattern)
-        print("Filtering tracks by reprojection ...")
+        logger.info("Filtering tracks by reprojection ...")
         total_filtered = 0
         should_stop = True  # Will be set to False if enough tracks are filtered
 
@@ -718,9 +720,9 @@ def iterative_bundle_adjustment(
             # Print error statistics before filtering
             all_errors = [e for errs in errors_per_track.values() for _, _, e in errs if e < float("inf")]
             if len(all_errors) > 0:
-                print(f"Normalized reprojection errors (threshold={current_threshold:.4f}):")
-                print(f"  Mean: {np.mean(all_errors):.6f}, Median: {np.median(all_errors):.6f}")
-                print(f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%")
+                logger.debug(f"Normalized reprojection errors (threshold={current_threshold:.4f}):")
+                logger.debug(f"  Mean: {np.mean(all_errors):.6f}, Median: {np.median(all_errors):.6f}")
+                logger.debug(f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%")
 
             # Filter observations with high errors
             # Note: filter_observations_by_error modifies reconstruction.points3D in-place
@@ -740,7 +742,7 @@ def iterative_bundle_adjustment(
 
             total_filtered += obs_removed
 
-            print(f"Filtered: {obs_removed} observations, {tracks_removed} tracks removed")
+            logger.info(f"Filtered: {obs_removed} observations, {tracks_removed} tracks removed")
 
             # Check if enough tracks were filtered (> 0.1% of points)
             num_points = len(reconstruction.points3D)
@@ -753,11 +755,11 @@ def iterative_bundle_adjustment(
                 # Too few filtered, tighten threshold and filter again without BA
                 iteration += 1
                 if iteration < options.max_filter_iterations:
-                    print(f"Low removal ({total_filtered} total), tightening threshold (iteration -> {iteration + 1})")
+                    logger.debug(f"Low removal ({total_filtered} total), tightening threshold (iteration -> {iteration + 1})")
 
         if should_stop:
             # Max iterations reached during tightening, stop outer loop
-            print("Max iterations reached, stopping")
+            logger.info("Max iterations reached, stopping")
             break
 
         total_observations = sum(
@@ -767,6 +769,6 @@ def iterative_bundle_adjustment(
     total_observations = sum(
         len(list(p.track.elements)) for p in reconstruction.points3D.values()
     )
-    print(f"\nFinal: {len(reconstruction.points3D)} tracks, {total_observations} observations")
+    logger.info(f"Final: {len(reconstruction.points3D)} tracks, {total_observations} observations")
 
     return reconstruction

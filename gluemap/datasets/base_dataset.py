@@ -1,3 +1,4 @@
+import logging
 import torch
 import os
 from tqdm import tqdm
@@ -8,6 +9,8 @@ from gluemap.utils.load_fn import (
     load_and_preprocess_images_inner,
     load_and_preprocess_images,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class DemoBaseDataset:
@@ -129,6 +132,6 @@ class DemoBaseDataset:
                 self.images_ori
             )
         else:
-            print("images are not preloaded!")
+            logger.warning("images are not preloaded!")
 
-        print("preload image done")
+        logger.info("preload image done")

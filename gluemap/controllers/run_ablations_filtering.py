@@ -1,8 +1,11 @@
+import logging
 import os
 import time
 import torch
 from gluemap.utils.model_loader import load_models
 from gluemap.utils.colmap_io import write_to_colmap_format
+
+logger = logging.getLogger(__name__)
 
 from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
@@ -58,7 +61,7 @@ def run_ablation_inference_pipeline(
     # Step 1: Two-view inference (or skip with ablation)
     t0 = time.perf_counter()
     if skip_dg:
-        print("[Ablation] Skipping Doppelgangers: setting all pair scores to 1.0")
+        logger.info("[Ablation] Skipping Doppelgangers: setting all pair scores to 1.0")
         global_outputs = {
             "scores": torch.ones(len(dataset_pair)),
             "pairs": dataset_pair.pairs,
@@ -117,7 +120,7 @@ def run_ablation_inference_pipeline(
 
     # Ablation: override pose_scores to disable back-and-forth filtering
     if skip_bnf:
-        print("[Ablation] Skipping back-and-forth filtering: setting all pose_scores to 1.0")
+        logger.info("[Ablation] Skipping back-and-forth filtering: setting all pose_scores to 1.0")
         for idx in range(len(predictions_dict["pose_scores"])):
             predictions_dict["pose_scores"][idx] = torch.ones_like(
                 predictions_dict["pose_scores"][idx]
@@ -161,14 +164,14 @@ def run_ablation_inference_pipeline(
             ablation_flags.append("skip_doppelgangers")
         if skip_bnf:
             ablation_flags.append("skip_back_and_forth")
-        print(f"\n[Ablation Profiling] Active ablations: {', '.join(ablation_flags)}")
-        print(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+        logger.info(f"[Ablation Profiling] Active ablations: {', '.join(ablation_flags)}")
+        logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
               f"inference={twoview_timing['total']:.2f}s")
-        print(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-        print(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+        logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
+        logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
               f"inference={star_timing['total']:.2f}s")
-        print(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
-        print(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
+        logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
+        logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
         # Save per-dataset timing
         timing_path = os.path.join(args.curr_path, "pipeline_timing.pth")
