@@ -27,7 +27,7 @@ def _extract_poses(predictions, backbone, image_size_hw):
         extrinsics, intrinsics = pose_encoding_to_extri_intri(
             predictions["pose_enc"], image_size_hw=image_size_hw
         )
-    elif backbone in ("map_anything", "map_anything_v1.1"):
+    elif backbone == "map_anything":
         extrinsics = predictions["extrinsics"]
         intrinsics = predictions["intrinsics"]
     else:
@@ -164,7 +164,7 @@ def run_direct_inference_pipeline(
         images_dev = images.to(device).contiguous()
 
         with torch.no_grad():
-            if backbone in ("map_anything", "map_anything_v1.1"):
+            if backbone == "map_anything":
                 predictions = mapanything_inference(model, images_dev, device=device, dtype=dtype)
             else:
                 with torch.cuda.amp.autocast(dtype=dtype):

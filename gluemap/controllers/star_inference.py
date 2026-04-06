@@ -200,7 +200,7 @@ class BatchInferenceStar:
         t_forward_start = time.perf_counter()
 
         if disable_track or not self.model_track is None:
-            if self.model_type in ("map_anything", "map_anything_v1.1"):
+            if self.model_type == "map_anything":
                 predictions = mapanything_inference(
                     self.model, images, device=self.device, dtype=self.dtype
                 )
@@ -291,7 +291,7 @@ class BatchInferenceStar:
             )
         elif self.model_type in ("pi3", "pi3x"):
             extrinsics, intrinsics = get_pi3d_calibration(predictions)
-        elif self.model_type in ("map_anything", "map_anything_v1.1"):
+        elif self.model_type == "map_anything":
             extrinsics = predictions["extrinsics"]
             intrinsics = predictions["intrinsics"]
 

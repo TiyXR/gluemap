@@ -32,8 +32,8 @@ def load_models(args, keys=set()):
         models["vggt"].load_state_dict(
             torch.load(args.path_feedforward, map_location="cpu")
         )
-    elif chosen_model == "map_anything_v1.1" and chosen_model in keys:
-        models["map_anything_v1.1"] = MapAnything.from_pretrained(
+    elif chosen_model == "map_anything" and chosen_model in keys:
+        models["map_anything"] = MapAnything.from_pretrained(
             args.path_feedforward
         )
 

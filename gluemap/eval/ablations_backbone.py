@@ -10,7 +10,7 @@ from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
     run_star_inference,
 )
-from gluemap.controllers.inference import run_postprocessing_pipeline
+from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
 
@@ -21,7 +21,7 @@ def run_backbone_ablation_pipeline(
     """
     Run the inference pipeline for backbone ablation studies.
 
-    Uses args.chosen_model to select the backbone (pi3, vggt, map_anything_v1.1).
+    Uses args.chosen_model to select the backbone (pi3, vggt, map_anything).
     Stores intermediate and final results with backbone-specific names to avoid
     collisions when running multiple backbones on the same scene directory.
 
