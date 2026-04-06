@@ -1,5 +1,5 @@
-from thirdparty.mapanything.utils.image import preprocess_inputs
-from thirdparty.mapanything.utils.geometry import closed_form_pose_inverse
+from mapanything.utils.image import preprocess_inputs
+from mapanything.utils.geometry import closed_form_pose_inverse
 
 import torch
 

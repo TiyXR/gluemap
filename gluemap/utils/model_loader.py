@@ -1,10 +1,10 @@
-from thirdparty.mast3r.model_dg import AsymmetricMASt3R
-from thirdparty.pi3.models.pi3 import Pi3
-from thirdparty.pi3.models.pi3x import Pi3X
-from thirdparty.vggt.models.vggt import VGGT
-from thirdparty.mapanything.models import MapAnything
-from thirdparty.mapanything.models.mapanything.model_v1_1 import MapAnythingV1_1
-from thirdparty.salad.vpr_model import VPRModel
+import thirdparty.path_to_thirdparty  # noqa: F401  (adds all thirdparty submodules to sys.path)
+from mast3r.model import AsymmetricMASt3R
+from pi3.models.pi3 import Pi3
+from pi3.models.pi3x import Pi3X
+from vggt.models.vggt import VGGT
+from mapanything.models.mapanything.model import MapAnything
+from vpr_model import VPRModel
 from thirdparty.vggsfm.vggsfm_tracker import TrackerPredictor
 
 import numpy as np
@@ -32,10 +32,8 @@ def load_models(args, keys=set()):
         models["vggt"].load_state_dict(
             torch.load(args.path_vggt, map_location="cpu")
         )
-    elif chosen_model == "map_anything" and chosen_model in keys:
-        models["map_anything"] = MapAnything.from_pretrained(args.path_map_anything)
     elif chosen_model == "map_anything_v1.1" and chosen_model in keys:
-        models["map_anything_v1.1"] = MapAnythingV1_1.from_pretrained(
+        models["map_anything_v1.1"] = MapAnything.from_pretrained(
             args.path_map_anything_v1_1
         )
 

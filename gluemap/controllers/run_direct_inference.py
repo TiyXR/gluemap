@@ -20,7 +20,7 @@ def _extract_poses(predictions, backbone, image_size_hw):
     if backbone in ("pi3", "pi3x"):
         extrinsics, intrinsics = get_pi3d_calibration(predictions)
     elif backbone == "vggt":
-        from thirdparty.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+        from vggt.utils.pose_enc import pose_encoding_to_extri_intri
         extrinsics, intrinsics = pose_encoding_to_extri_intri(
             predictions["pose_enc"], image_size_hw=image_size_hw
         )

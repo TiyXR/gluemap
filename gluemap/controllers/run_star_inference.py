@@ -285,7 +285,7 @@ class BatchInferenceStar:
     ):
         # Extract extrinsics and intrinsics based on model type
         if self.model_type == "vggt":
-            from thirdparty.vggt.utils.pose_enc import pose_encoding_to_extri_intri
+            from vggt.utils.pose_enc import pose_encoding_to_extri_intri
             extrinsics, intrinsics = pose_encoding_to_extri_intri(
                 predictions["pose_enc"], image_size_hw=image_size_hw
             )
