@@ -22,13 +22,11 @@ import numpy as np
 
 
 class BatchInferenceDG:
-    def __init__(self, model, store_dense=False, device="cuda", dtype=torch.bfloat16):
+    def __init__(self, model, device="cuda", dtype=torch.bfloat16):
 
         self.model = model
         self.device = device
         self.dtype = dtype
-
-        self.store_dense = store_dense
 
     def main(self, batch):
         images = batch["images"].to(self.device)
@@ -36,7 +34,7 @@ class BatchInferenceDG:
         view1 = {"img": images[:, 0], "instance": [i for i in range(images.shape[0])]}
         view2 = {"img": images[:, 1], "instance": [i for i in range(images.shape[0])]}
 
-        res, pred1, pred2 = self.model(view1, view2, predict_extra=self.store_dense)
+        res1, res2, pred1, pred2 = self.model(view1, view2)
 
         if isinstance(pred1, list):
             pred1 = torch.stack(pred1, dim=0)
@@ -73,24 +71,5 @@ class BatchInferenceDG:
         result_dict = {
             "scores": torch.from_numpy(score),
         }
-
-        if self.store_dense:
-            for i in range(4):
-                for key in res[i].keys():
-                    res[i][key] = res[i][key].cpu()
-            # result_dict["res"] = res
-            # a list of sublist, sublist has 4 dicts
-            # each dict has keys 'pts3d', 'conf', 'desc', 'desc_conf'
-            batch_size = images.shape[0]
-            result_dict["res"] = [
-                [
-                    {
-                        key: res[idx_tuple][key][idx_entry : idx_entry + 1]
-                        for key in res[0].keys()
-                    }
-                    for idx_tuple in range(4)
-                ]
-                for idx_entry in range(batch_size)
-            ]
 
         return result_dict

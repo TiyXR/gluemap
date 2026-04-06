@@ -101,7 +101,7 @@ def run_twoview_inference(
     )
 
     two_view_inference = BatchInferenceDG(
-        model, device=device, dtype=dtype, store_dense=False
+        model, device=device, dtype=dtype
     )
 
     # 7. Storage for results (adjust based on your needs)
