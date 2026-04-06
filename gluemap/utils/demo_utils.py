@@ -22,7 +22,7 @@ from gluemap.eval.ablations_backbone import (
 from gluemap.eval.ablations_tracks import (
     run_track_ablation_pipeline,
 )
-from gluemap.controllers.direct_inference import (
+from gluemap.eval.ablations_pure_feedforward import (
     run_direct_inference_pipeline,
 )
 
