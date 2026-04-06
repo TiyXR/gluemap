@@ -1,4 +1,6 @@
 import argparse
+
+import yaml
 import torch
 
 from gluemap.utils import gpu_utils
@@ -9,7 +11,7 @@ from gluemap.controllers.preprocess import (
     run_preprocessing_pipeline,
     run_preprocessing_pipeline_multi,
 )
-from gluemap.controllers.inference import (
+from gluemap.controllers.gluemap_impl import (
     run_inference_pipeline,
     run_postprocessing_pipeline,
 )
@@ -51,25 +53,16 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--path_pi3", default="", type=str, help="path to the pi3 model"
+        "--path_feedforward",
+        default="",
+        type=str,
+        help="path to the chosen feedforward model checkpoint",
     )
     parser.add_argument(
-        "--path_pi3x", default="", type=str, help="path to the pi3x model"
+        "--path_retrieval", default="", type=str, help="path to the retrieval model"
     )
     parser.add_argument(
-        "--path_vggt", default="", type=str, help="path to the vggt model"
-    )
-    parser.add_argument(
-        "--path_map_anything", default="", type=str, help="path to the map_anything model"
-    )
-    parser.add_argument(
-        "--path_map_anything_v1_1", default="", type=str, help="path to the map_anything v1.1 model"
-    )
-    parser.add_argument(
-        "--path_salad", default="", type=str, help="path to the salad model"
-    )
-    parser.add_argument(
-        "--path_vggsfm_tracker", default="", type=str, help="path to the vggsfm tracker"
+        "--path_tracker", default="", type=str, help="path to the tracker model"
     )
     parser.add_argument(
         "--path_dg", default="", type=str, help="path to the doppelganger model"
@@ -222,4 +215,27 @@ def get_args_parser():
         help="Ablation: set all pose_scores to 1.0 after star inference, disabling consistency filtering",
     )
 
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="path to a YAML configuration file (CLI arguments override YAML values)",
+    )
+
     return parser
+
+
+def parse_args_with_config(parser):
+    """Parse arguments with optional YAML config support.
+
+    If --config is provided, YAML values are used as defaults;
+    CLI arguments take precedence over YAML values.
+    """
+    args, _ = parser.parse_known_args()
+
+    if args.config:
+        with open(args.config) as f:
+            yaml_config = yaml.safe_load(f) or {}
+        parser.set_defaults(**yaml_config)
+
+    return parser.parse_args()

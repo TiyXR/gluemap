@@ -3,6 +3,7 @@ from gluemap.datasets.sequential_twoview_dataset import SequentialTwoViewDataset
 
 from gluemap.utils.demo_utils import (
     get_args_parser,
+    parse_args_with_config,
     init_distributed,
     run_preprocessing_pipeline,
     run_inference_pipeline,
@@ -41,5 +42,5 @@ if __name__ == "__main__":
         default=1,
         help="frequency to sample images if sequential",
     )
-    args = parser.parse_args()
+    args = parse_args_with_config(parser)
     main(args)

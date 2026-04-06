@@ -5,6 +5,7 @@ from gluemap.datasets.multi_sequence_twoview_dataset import MultiSequencePairs
 
 from gluemap.utils.demo_utils import (
     get_args_parser,
+    parse_args_with_config,
     init_distributed,
     run_preprocessing_pipeline_multi,
     run_inference_pipeline,
@@ -35,5 +36,5 @@ def main(args):
 
 if __name__ == "__main__":
     parser = get_args_parser()
-    args = parser.parse_args()
+    args = parse_args_with_config(parser)
     main(args)

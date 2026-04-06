@@ -23,18 +23,18 @@ def load_models(args, keys=set()):
     # Load the chosen multi-view model
     if chosen_model == "pi3" and chosen_model in keys:
         models["pi3"] = Pi3()
-        models["pi3"].load_state_dict(load_file(args.path_pi3))
+        models["pi3"].load_state_dict(load_file(args.path_feedforward))
     elif chosen_model == "pi3x" and chosen_model in keys:
         models["pi3x"] = Pi3X(use_multimodal=False)
-        models["pi3x"].load_state_dict(load_file(args.path_pi3x), strict=False)
+        models["pi3x"].load_state_dict(load_file(args.path_feedforward), strict=False)
     elif chosen_model == "vggt" and chosen_model in keys:
         models["vggt"] = VGGT()
         models["vggt"].load_state_dict(
-            torch.load(args.path_vggt, map_location="cpu")
+            torch.load(args.path_feedforward, map_location="cpu")
         )
     elif chosen_model == "map_anything_v1.1" and chosen_model in keys:
         models["map_anything_v1.1"] = MapAnything.from_pretrained(
-            args.path_map_anything_v1_1
+            args.path_feedforward
         )
 
     # Load Doppelganger++
@@ -65,7 +65,7 @@ def load_models(args, keys=set()):
     if "vggsfm" in keys:
         models["vggsfm"] = TrackerPredictor()
         models["vggsfm"].load_state_dict(
-            torch.load(args.path_vggsfm_tracker, map_location="cpu")
+            torch.load(args.path_tracker, map_location="cpu")
         )
 
     # Load SALAD
@@ -87,7 +87,7 @@ def load_models(args, keys=set()):
         )
 
         models["salad"].load_state_dict(
-            torch.load(args.path_salad, map_location="cpu"), strict=False
+            torch.load(args.path_retrieval, map_location="cpu"), strict=False
         )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
