@@ -13,13 +13,13 @@ from gluemap.controllers.inference import (
     run_inference_pipeline,
     run_postprocessing_pipeline,
 )
-from gluemap.controllers.ablations_filtering import (
+from gluemap.eval.ablations_filtering import (
     run_ablation_inference_pipeline,
 )
-from gluemap.controllers.ablations_backbone import (
+from gluemap.eval.ablations_backbone import (
     run_backbone_ablation_pipeline,
 )
-from gluemap.controllers.ablations_tracks import (
+from gluemap.eval.ablations_tracks import (
     run_track_ablation_pipeline,
 )
 from gluemap.controllers.direct_inference import (
