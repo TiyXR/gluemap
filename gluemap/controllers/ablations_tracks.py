@@ -10,8 +10,8 @@ from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
     run_star_inference,
 )
-from gluemap.controllers.run_inference import run_postprocessing_pipeline
-from gluemap.controllers.run_results_collection import generate_dataset_from_outputs
+from gluemap.controllers.inference import run_postprocessing_pipeline
+from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
 
 def run_track_ablation_pipeline(

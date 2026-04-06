@@ -5,24 +5,24 @@ from gluemap.utils import gpu_utils
 from gluemap.utils.model_loader import load_models
 
 # Re-export pipeline functions for convenience
-from gluemap.controllers.run_preprocess import (
+from gluemap.controllers.preprocess import (
     run_preprocessing_pipeline,
     run_preprocessing_pipeline_multi,
 )
-from gluemap.controllers.run_inference import (
+from gluemap.controllers.inference import (
     run_inference_pipeline,
     run_postprocessing_pipeline,
 )
-from gluemap.controllers.run_ablations_filtering import (
+from gluemap.controllers.ablations_filtering import (
     run_ablation_inference_pipeline,
 )
-from gluemap.controllers.run_ablations_backbone import (
+from gluemap.controllers.ablations_backbone import (
     run_backbone_ablation_pipeline,
 )
-from gluemap.controllers.run_ablations_tracks import (
+from gluemap.controllers.ablations_tracks import (
     run_track_ablation_pipeline,
 )
-from gluemap.controllers.run_direct_inference import (
+from gluemap.controllers.direct_inference import (
     run_direct_inference_pipeline,
 )
 

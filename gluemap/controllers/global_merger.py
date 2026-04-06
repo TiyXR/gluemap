@@ -15,7 +15,7 @@ from gluemap.estimators.bundle_adjustment import (
     bundle_adjustment_with_depth,
     intrinsics_to_colmap_params,
 )
-from gluemap.controllers.run_bundle_adjustment import initialize_world_points
+from gluemap.controllers.bundle_adjustment import initialize_world_points
 from gluemap.estimators.establish_tracks import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,

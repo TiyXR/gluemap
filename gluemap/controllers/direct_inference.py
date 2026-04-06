@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
 from gluemap.utils.pi3_utils import get_pi3d_calibration
 from gluemap.utils.mapanything_utils import mapanything_inference
-from gluemap.controllers.run_restore_imagesize import restore_intrinsics
+from gluemap.controllers.restore_imagesize import restore_intrinsics
 
 
 def _extract_poses(predictions, backbone, image_size_hw):

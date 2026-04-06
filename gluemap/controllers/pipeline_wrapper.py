@@ -9,11 +9,11 @@ import os
 import numpy as np
 
 
-from gluemap.controllers.run_salad_retrival import SALADRetrieval
+from gluemap.controllers.salad_retrival import SALADRetrieval
 
 logger = logging.getLogger(__name__)
-from gluemap.controllers.run_twoview_inference import BatchInferenceDG
-from gluemap.controllers.run_star_inference import BatchInferenceStar
+from gluemap.controllers.twoview_inference import BatchInferenceDG
+from gluemap.controllers.star_inference import BatchInferenceStar
 from gluemap.utils.gpu_utils import all_gather_object_cpu, synchronize
 
 

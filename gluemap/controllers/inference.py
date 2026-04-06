@@ -16,11 +16,11 @@ from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
     run_star_inference,
 )
-from gluemap.controllers.run_global_merger import GlobalGluer
-from gluemap.controllers.run_refinement import run_refinement_pipeline
-from gluemap.controllers.run_track_snapping import refine_tracks_database
-from gluemap.controllers.run_restore_imagesize import restore_image_shape
-from gluemap.controllers.run_results_collection import generate_dataset_from_outputs
+from gluemap.controllers.global_merger import GlobalGluer
+from gluemap.controllers.refinement import run_refinement_pipeline
+from gluemap.controllers.track_snapping import refine_tracks_database
+from gluemap.controllers.restore_imagesize import restore_image_shape
+from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
 from gluemap.estimators.rotation_averaging import collect_relative_rotations_ministar
 

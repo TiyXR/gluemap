@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import pycolmap
 
-from gluemap.controllers.run_bundle_adjustment import (
+from gluemap.controllers.bundle_adjustment import (
     iterative_bundle_adjustment,
     IterativeBAOptions,
     initialize_world_points,

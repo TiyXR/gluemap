@@ -3,7 +3,6 @@ import os
 import time
 import torch
 from gluemap.utils.model_loader import load_models
-from gluemap.utils.colmap_io import write_to_colmap_format
 
 logger = logging.getLogger(__name__)
 
@@ -11,24 +10,26 @@ from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
     run_star_inference,
 )
-from gluemap.controllers.run_inference import run_postprocessing_pipeline
-from gluemap.controllers.run_results_collection import generate_dataset_from_outputs
+from gluemap.controllers.inference import run_postprocessing_pipeline
+from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
 
-def run_ablation_inference_pipeline(
+def run_backbone_ablation_pipeline(
     args, dataset_pair, world_size, rank, device, dtype, pairs=None, device_id="0",
     models=None,
 ):
     """
-    Run the inference pipeline with ablation options for filtering studies.
+    Run the inference pipeline for backbone ablation studies.
 
-    Supports two ablation flags:
-    - skip_doppelgangers: Skip DG model, set all pair scores to 1.0
-    - skip_back_and_forth: Set all pose_scores to 1.0 after star inference,
-      disabling the two-way consistency filtering in GlobalGluer
+    Uses args.chosen_model to select the backbone (pi3, vggt, map_anything_v1.1).
+    Stores intermediate and final results with backbone-specific names to avoid
+    collisions when running multiple backbones on the same scene directory.
+
+    - pi3 (default): no suffix (coarse/, gluemap_aba/, star_result.pth)
+    - others: suffix added (coarse_{backbone}/, gluemap_aba_{backbone}/, star_result_{backbone}.pth)
 
     Args:
-        args: Argument namespace (must include skip_doppelgangers, skip_back_and_forth)
+        args: Argument namespace (must include chosen_model)
         dataset_pair: The dataset pair object
         world_size: Number of distributed processes
         rank: Current process rank
@@ -44,49 +45,43 @@ def run_ablation_inference_pipeline(
     timing = {}
     t_pipeline_start = time.perf_counter()
 
-    skip_dg = getattr(args, "skip_doppelgangers", False)
-    skip_bnf = getattr(args, "skip_back_and_forth", False)
+    backbone = getattr(args, "chosen_model", "pi3")
 
-    # Ensure output directory exists (normally created by twoview save path)
+    # pi3 is the baseline — no suffix for backward compatibility
+    if backbone == "pi3":
+        args.output_suffix = ""
+        star_file_name = "star_result.pth"
+    else:
+        args.output_suffix = f"_{backbone}"
+        star_file_name = f"star_result_{backbone}.pth"
+
+    # Ensure output directory exists
     os.makedirs(args.curr_path, exist_ok=True)
 
-    # Build ablation-specific cache filename to avoid collisions with normal pipeline.
-    # When only skip_back_and_forth is set (no skip_doppelgangers), the twoview and
-    # star inputs are identical to the normal pipeline, so reuse star_result.pth.
-    if skip_dg:
-        star_file_name = "star_result_nodg.pth"
-    else:
-        star_file_name = "star_result.pth"
+    logger.info(f"[Backbone Ablation] Running with backbone: {backbone}")
+    logger.info(f"  Output suffix: '{args.output_suffix}'")
+    logger.info(f"  Star cache file: {star_file_name}")
 
-    # Step 1: Two-view inference (or skip with ablation)
+    # Step 1: Two-view inference (shared across backbones — DG is backbone-independent)
     t0 = time.perf_counter()
-    if skip_dg:
-        logger.info("[Ablation] Skipping Doppelgangers: setting all pair scores to 1.0")
-        global_outputs = {
-            "scores": torch.ones(len(dataset_pair)),
-            "pairs": dataset_pair.pairs,
-        }
-        twoview_timing = {"batch_times": [], "num_batches": 0, "total": 0.0}
+    if models is not None and "dg" in models:
+        dg_model = models["dg"]
     else:
-        if models is not None and "dg" in models:
-            dg_model = models["dg"]
-        else:
-            loaded, device = load_models(args, keys=set({"dg"}))
-            dg_model = loaded["dg"]
-        t_model_load = time.perf_counter() - t0
+        loaded, device = load_models(args, keys=set({"dg"}))
+        dg_model = loaded["dg"]
+    t_model_load = time.perf_counter() - t0
 
-        global_outputs, twoview_timing = run_twoview_inference(
-            dg_model,
-            args,
-            dataset_pair,
-            world_size,
-            rank,
-            file_name="twoview_result.pth",
-            save_intermediate_results=True,
-            device=device,
-        )
-        twoview_timing["model_loading"] = t_model_load
-
+    global_outputs, twoview_timing = run_twoview_inference(
+        dg_model,
+        args,
+        dataset_pair,
+        world_size,
+        rank,
+        file_name="twoview_result.pth",
+        save_intermediate_results=True,
+        device=device,
+    )
+    twoview_timing["model_loading"] = t_model_load
     timing["twoview_inference"] = twoview_timing
 
     # Step 2: Generate dataset from outputs
@@ -96,12 +91,12 @@ def run_ablation_inference_pipeline(
     )
     timing["dataset_generation"] = time.perf_counter() - t0
 
-    # Step 3: Star inference
+    # Step 3: Star inference with chosen backbone
     t0 = time.perf_counter()
-    if models is not None and "pi3" in models:
+    if models is not None and backbone in models:
         star_models = models
     else:
-        model_keys = {"pi3"} if getattr(args, "disable_tracking", False) else {"pi3", "vggsfm"}
+        model_keys = {backbone} if getattr(args, "disable_tracking", False) else {backbone, "vggsfm"}
         star_models, device = load_models(args, keys=model_keys)
     t_model_load = time.perf_counter() - t0
 
@@ -118,14 +113,6 @@ def run_ablation_inference_pipeline(
     star_timing["model_loading"] = t_model_load
     timing["star_inference"] = star_timing
 
-    # Ablation: override pose_scores to disable back-and-forth filtering
-    if skip_bnf:
-        logger.info("[Ablation] Skipping back-and-forth filtering: setting all pose_scores to 1.0")
-        for idx in range(len(predictions_dict["pose_scores"])):
-            predictions_dict["pose_scores"][idx] = torch.ones_like(
-                predictions_dict["pose_scores"][idx]
-            )
-
     # Move predictions_dict tensors to CPU to free GPU memory before postprocessing
     for key, value in predictions_dict.items():
         if isinstance(value, torch.Tensor):
@@ -135,14 +122,6 @@ def run_ablation_inference_pipeline(
                 v.cpu() if isinstance(v, torch.Tensor) else v for v in value
             ]
     torch.cuda.empty_cache()
-
-    # Set output suffix so coarse results go to coarse_nodg/ or coarse_novo/
-    suffix_parts = []
-    if skip_dg:
-        suffix_parts.append("nodg")
-    if skip_bnf:
-        suffix_parts.append("novo")
-    args.output_suffix = "_" + "_".join(suffix_parts) if suffix_parts else ""
 
     # Steps 4-5: Global mapping and refinement (rank 0 only)
     if rank == 0:
@@ -159,12 +138,7 @@ def run_ablation_inference_pipeline(
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
         # Print summary
-        ablation_flags = []
-        if skip_dg:
-            ablation_flags.append("skip_doppelgangers")
-        if skip_bnf:
-            ablation_flags.append("skip_back_and_forth")
-        logger.info(f"[Ablation Profiling] Active ablations: {', '.join(ablation_flags)}")
+        logger.info(f"[Backbone Ablation Profiling] Backbone: {backbone}")
         logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
               f"inference={twoview_timing['total']:.2f}s")
         logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
@@ -174,7 +148,7 @@ def run_ablation_inference_pipeline(
         logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
         # Save per-dataset timing
-        timing_path = os.path.join(args.curr_path, "pipeline_timing.pth")
+        timing_path = os.path.join(args.curr_path, f"pipeline_timing{args.output_suffix}.pth")
         torch.save(timing, timing_path)
 
         return pred_dir, timing
