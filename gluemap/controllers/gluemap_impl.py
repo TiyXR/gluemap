@@ -4,7 +4,6 @@ import logging
 import torch
 
 logger = logging.getLogger(__name__)
-from gluemap.utils.model_loader import load_models
 from gluemap.utils.colmap_io import write_to_colmap_format
 from gluemap.utils.prepare_prior import (
     prepare_sift_database,
@@ -60,16 +59,7 @@ class GlueMapPipeline:
         t_pipeline_start = time.perf_counter()
 
         # Step 1: Two-view inference
-        t0 = time.perf_counter()
-        if models is not None and "dg" in models:
-            dg_model = models["dg"]
-        else:
-            loaded, device = load_models(args, keys=set({"dg"}))
-            dg_model = loaded["dg"]
-        t_model_load = time.perf_counter() - t0
-
         global_outputs, twoview_timing = run_twoview_inference(
-            dg_model,
             args,
             dataset_pair,
             world_size,
@@ -77,8 +67,8 @@ class GlueMapPipeline:
             file_name="twoview_result.pth",
             save_intermediate_results=True,
             device=device,
+            preloaded_models=models,
         )
-        twoview_timing["model_loading"] = t_model_load
         timing["twoview_inference"] = twoview_timing
 
         # Step 2: Generate dataset from outputs
@@ -89,17 +79,7 @@ class GlueMapPipeline:
         timing["dataset_generation"] = time.perf_counter() - t0
 
         # Step 3: Star inference
-        t0 = time.perf_counter()
-        chosen = getattr(args, "chosen_model", "pi3")
-        if models is not None and chosen in models:
-            star_models = models
-        else:
-            model_keys = {chosen} if getattr(args, "disable_tracking", False) else {chosen, "vggsfm"}
-            star_models, device = load_models(args, keys=model_keys)
-        t_model_load = time.perf_counter() - t0
-
         predictions_dict, star_timing = run_star_inference(
-            star_models,
             args,
             dataset,
             world_size,
@@ -107,8 +87,8 @@ class GlueMapPipeline:
             file_name="star_result.pth",
             save_intermediate_results=True,
             device=device,
+            preloaded_models=models,
         )
-        star_timing["model_loading"] = t_model_load
         timing["star_inference"] = star_timing
 
         # Move predictions_dict tensors to CPU to free GPU memory before postprocessing
@@ -136,11 +116,15 @@ class GlueMapPipeline:
 
             # Print summary
             logger.info(f"[Profiling] Pipeline Summary:")
-            logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
-                         f"inference={twoview_timing['total']:.2f}s")
+            logger.info(
+                f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+                f"inference={twoview_timing['total']:.2f}s"
+            )
             logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-            logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
-                         f"inference={star_timing['total']:.2f}s")
+            logger.info(
+                f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+                f"inference={star_timing['total']:.2f}s"
+            )
             logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
             logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
@@ -173,7 +157,9 @@ class GlueMapPipeline:
         matching_pairs = pairs if pairs is not None else dataset.pairs
 
         t0 = time.perf_counter()
-        poses_rel, poses_rel_scores = collect_relative_rotations_ministar(predictions_dict)
+        poses_rel, poses_rel_scores = collect_relative_rotations_ministar(
+            predictions_dict
+        )
         timing["collect_rotations"] = time.perf_counter() - t0
 
         # Step 4: Global mapping
@@ -182,10 +168,14 @@ class GlueMapPipeline:
             predictions_dict, dataset.images_change, dataset.images_shape_ori
         )
 
-        predictions_dict["image_index_to_star_index"] = dataset.image_index_to_star_index
+        predictions_dict["image_index_to_star_index"] = (
+            dataset.image_index_to_star_index
+        )
 
         global_gluer = GlobalGluer(args)
-        global_gluer.sequential_edges = set(getattr(dataset_pair, "sequential_edges", []))
+        global_gluer.sequential_edges = set(
+            getattr(dataset_pair, "sequential_edges", [])
+        )
         (
             global_rotations,
             global_centers,
@@ -203,6 +193,7 @@ class GlueMapPipeline:
         # Override with GT intrinsics if requested (after global mapping)
         if getattr(args, "gt_intrinsics_path", None):
             from gluemap.utils.colmap_utils import extract_gt_intrinsics
+
             gt_intrinsics = extract_gt_intrinsics(
                 args.gt_intrinsics_path,
                 dataset_pair.images_list,
@@ -253,7 +244,7 @@ class GlueMapPipeline:
                 extraction_method="sift",
                 camera_model=dataset_pair.camera_model,
                 skip_matching=False,
-                remove_existing=True
+                remove_existing=True,
             )
         timing["sift_database"] = time.perf_counter() - t0
 
@@ -301,7 +292,14 @@ class GlueMapPipeline:
 # Backward-compatible module-level wrapper functions
 
 def run_inference_pipeline(
-    args, dataset_pair, world_size, rank, device, dtype, pairs=None, device_id="0",
+    args,
+    dataset_pair,
+    world_size,
+    rank,
+    device,
+    dtype,
+    pairs=None,
+    device_id="0",
     models=None,
 ):
     """Backward-compatible wrapper for GlueMapPipeline.run()."""

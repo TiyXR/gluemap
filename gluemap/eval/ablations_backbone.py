@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import torch
-from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
 
@@ -63,16 +62,7 @@ def run_backbone_ablation_pipeline(
     logger.info(f"  Star cache file: {star_file_name}")
 
     # Step 1: Two-view inference (shared across backbones — DG is backbone-independent)
-    t0 = time.perf_counter()
-    if models is not None and "dg" in models:
-        dg_model = models["dg"]
-    else:
-        loaded, device = load_models(args, keys=set({"dg"}))
-        dg_model = loaded["dg"]
-    t_model_load = time.perf_counter() - t0
-
     global_outputs, twoview_timing = run_twoview_inference(
-        dg_model,
         args,
         dataset_pair,
         world_size,
@@ -80,8 +70,8 @@ def run_backbone_ablation_pipeline(
         file_name="twoview_result.pth",
         save_intermediate_results=True,
         device=device,
+        preloaded_models=models,
     )
-    twoview_timing["model_loading"] = t_model_load
     timing["twoview_inference"] = twoview_timing
 
     # Step 2: Generate dataset from outputs
@@ -92,16 +82,7 @@ def run_backbone_ablation_pipeline(
     timing["dataset_generation"] = time.perf_counter() - t0
 
     # Step 3: Star inference with chosen backbone
-    t0 = time.perf_counter()
-    if models is not None and backbone in models:
-        star_models = models
-    else:
-        model_keys = {backbone} if getattr(args, "disable_tracking", False) else {backbone, "vggsfm"}
-        star_models, device = load_models(args, keys=model_keys)
-    t_model_load = time.perf_counter() - t0
-
     predictions_dict, star_timing = run_star_inference(
-        star_models,
         args,
         dataset,
         world_size,
@@ -109,8 +90,8 @@ def run_backbone_ablation_pipeline(
         file_name=star_file_name,
         save_intermediate_results=True,
         device=device,
+        preloaded_models=models,
     )
-    star_timing["model_loading"] = t_model_load
     timing["star_inference"] = star_timing
 
     # Move predictions_dict tensors to CPU to free GPU memory before postprocessing

@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import torch
-from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +9,7 @@ from gluemap.controllers.pipeline_wrapper import (
     run_twoview_inference,
     run_star_inference,
 )
-from gluemap.controllers.inference import run_postprocessing_pipeline
+from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
 
@@ -54,16 +53,7 @@ def run_track_ablation_pipeline(
     os.makedirs(args.curr_path, exist_ok=True)
 
     # Step 1: Two-view inference (once for all modes)
-    t0 = time.perf_counter()
-    if models is not None and "dg" in models:
-        dg_model = models["dg"]
-    else:
-        loaded, device = load_models(args, keys=set({"dg"}))
-        dg_model = loaded["dg"]
-    t_model_load = time.perf_counter() - t0
-
     global_outputs, twoview_timing = run_twoview_inference(
-        dg_model,
         args,
         dataset_pair,
         world_size,
@@ -71,8 +61,8 @@ def run_track_ablation_pipeline(
         file_name="twoview_result.pth",
         save_intermediate_results=True,
         device=device,
+        preloaded_models=models,
     )
-    twoview_timing["model_loading"] = t_model_load
     timing["twoview_inference"] = twoview_timing
 
     # Step 2: Generate dataset from outputs
@@ -83,16 +73,7 @@ def run_track_ablation_pipeline(
     timing["dataset_generation"] = time.perf_counter() - t0
 
     # Step 3: Star inference (once for all modes)
-    t0 = time.perf_counter()
-    if models is not None and "pi3" in models:
-        star_models = models
-    else:
-        model_keys = {"pi3"} if getattr(args, "disable_tracking", False) else {"pi3", "vggsfm"}
-        star_models, device = load_models(args, keys=model_keys)
-    t_model_load = time.perf_counter() - t0
-
     predictions_dict, star_timing = run_star_inference(
-        star_models,
         args,
         dataset,
         world_size,
@@ -100,8 +81,8 @@ def run_track_ablation_pipeline(
         file_name="star_result.pth",
         save_intermediate_results=True,
         device=device,
+        preloaded_models=models,
     )
-    star_timing["model_loading"] = t_model_load
     timing["star_inference"] = star_timing
 
     # Move predictions_dict tensors to CPU to free GPU memory before postprocessing

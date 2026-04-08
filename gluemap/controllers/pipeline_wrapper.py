@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 from gluemap.controllers.twoview_inference import BatchInferenceDG
 from gluemap.controllers.star_inference import BatchInferenceStar
 from gluemap.utils.gpu_utils import all_gather_object_cpu, synchronize
+from gluemap.utils.model_loader import load_models
 
 
 STAGE_FILES = {
@@ -23,6 +24,13 @@ STAGE_FILES = {
     "star": ["star_result.pth"],
 }
 STAGE_ORDER = ["retrieval", "twoview", "star"]
+
+
+def is_stage_cached(args, file_name):
+    """Return True if force_load is enabled and the cached result file exists."""
+    return args.force_load and os.path.exists(
+        os.path.join(args.curr_path, file_name)
+    )
 
 
 def invalidate_cache_from(args, stage):
@@ -73,7 +81,6 @@ def run_salad_retrieval(
 
 
 def run_twoview_inference(
-    model,
     args,
     dataset_pair,
     world_size,
@@ -82,6 +89,7 @@ def run_twoview_inference(
     save_intermediate_results=True,
     device="cuda",
     dtype=torch.bfloat16,
+    preloaded_models=None,
 ):
     # TODO: write function for generating sampler and dataloader
     if args.distributed:
@@ -103,19 +111,25 @@ def run_twoview_inference(
         drop_last=False,
     )
 
-    two_view_inference = BatchInferenceDG(
-        model, device=device, dtype=dtype
-    )
-
     # 7. Storage for results (adjust based on your needs)
     all_outputs = []
     all_indices = []
     batch_times = []
 
     # 8. Run inference
-    if not args.force_load or not os.path.exists(
-        os.path.join(args.curr_path, file_name)
-    ):
+    t_model_load = 0.0
+    if not is_stage_cached(args, file_name):
+        # Lazy load: resolve the model only when inference is needed
+        t0_load = time.perf_counter()
+        if preloaded_models is not None and "dg" in preloaded_models:
+            model = preloaded_models["dg"]
+        else:
+            loaded, device = load_models(args, keys={"dg"})
+            model = loaded["dg"]
+        t_model_load = time.perf_counter() - t0_load
+        two_view_inference = BatchInferenceDG(
+            model, device=device, dtype=dtype
+        )
         with torch.no_grad():
             for batch in tqdm(
                 data_loader, desc=f"Inference (Rank {rank})", disable=rank != 0
@@ -216,12 +230,13 @@ def run_twoview_inference(
             torch.save(global_outputs, os.path.join(args.curr_path, file_name))
     else:
         logger.info("Loading existing results...")
-        global_outputs = torch.load(os.path.join(args.curr_path, file_name))
+        global_outputs = torch.load(os.path.join(args.curr_path, file_name), weights_only=False)
 
     twoview_timing = {
         "batch_times": batch_times,
         "num_batches": len(batch_times),
         "total": sum(batch_times) if batch_times else 0.0,
+        "model_loading": t_model_load,
     }
     if rank == 0 and batch_times:
         logger.info(f"[Profiling] Two-view inference: {len(batch_times)} batches, "
@@ -231,7 +246,6 @@ def run_twoview_inference(
 
 
 def run_star_inference(
-    models,
     args,
     dataset,
     world_size,
@@ -240,6 +254,7 @@ def run_star_inference(
     save_intermediate_results=True,
     device="cuda",
     dtype=torch.bfloat16,
+    preloaded_models=None,
 ):
 
     # TODO: write function for generating samper and dataloader
@@ -269,15 +284,22 @@ def run_star_inference(
     forward_times = []
     tracking_times = []
     chosen_model = getattr(args, "chosen_model", "pi3")
-    star_inferece = BatchInferenceStar(
-        models[chosen_model], chosen_model, models.get("vggsfm"), device=device, dtype=dtype,
-        pointmap_dir=os.path.join(args.curr_path, "pointmap"),
-        repredict_verified=getattr(args, "repredict_verified", False),
-        repredict_threshold=getattr(args, "repredict_threshold", 0.05),
-    )
-    if not args.force_load or not os.path.exists(
-        os.path.join(args.curr_path, file_name)
-    ):
+    t_model_load = 0.0
+    if not is_stage_cached(args, file_name):
+        # Lazy load: resolve models only when inference is needed
+        t0_load = time.perf_counter()
+        if preloaded_models is not None and chosen_model in preloaded_models:
+            models = preloaded_models
+        else:
+            model_keys = {chosen_model} if getattr(args, "disable_tracking", False) else {chosen_model, "vggsfm"}
+            models, device = load_models(args, keys=model_keys)
+        t_model_load = time.perf_counter() - t0_load
+        star_inferece = BatchInferenceStar(
+            models[chosen_model], chosen_model, models.get("vggsfm"), device=device, dtype=dtype,
+            pointmap_dir=os.path.join(args.curr_path, "pointmap"),
+            repredict_verified=getattr(args, "repredict_verified", False),
+            repredict_threshold=getattr(args, "repredict_threshold", 0.05),
+        )
         with torch.no_grad():
             for batch in tqdm(
                 data_loader, desc=f"Inference (Rank {rank})", disable=rank != 0
@@ -346,7 +368,7 @@ def run_star_inference(
                 torch.save(predictions_dict, os.path.join(args.curr_path, file_name))
     else:
         logger.info("Loading existing results...")
-        predictions_dict = torch.load(os.path.join(args.curr_path, file_name))
+        predictions_dict = torch.load(os.path.join(args.curr_path, file_name), weights_only=False)
 
     star_timing = {
         "batch_times": batch_times,
@@ -354,6 +376,7 @@ def run_star_inference(
         "tracking_times": tracking_times,
         "num_batches": len(batch_times),
         "total": sum(batch_times) if batch_times else 0.0,
+        "model_loading": t_model_load,
     }
     if rank == 0 and batch_times:
         logger.info(f"[Profiling] Star inference: {len(batch_times)} batches, "
