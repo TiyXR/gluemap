@@ -9,8 +9,6 @@ import os
 import numpy as np
 
 
-from gluemap.controllers.salad_retrival import SALADRetrieval
-
 logger = logging.getLogger(__name__)
 from gluemap.controllers.twoview_inference import BatchInferenceDG
 from gluemap.controllers.star_inference import BatchInferenceStar
@@ -47,37 +45,6 @@ def invalidate_cache_from(args, stage):
             if os.path.exists(path):
                 os.remove(path)
                 logger.info(f"[rerun_from={stage}] Deleted {path}")
-
-
-def run_salad_retrieval(
-    model,
-    args,
-    world_size,
-    rank,
-    file_name="salad_descriptors.pt",
-    device="cuda",
-    dtype=torch.bfloat16,
-):
-
-    base_path = args.curr_path
-    if args.curr_processed:
-        base_path = args.curr_processed
-    if not args.force_load or not os.path.exists(
-        os.path.join(base_path, file_name)
-    ):
-        if rank == 0:
-            logger.info("Computing SALAD descriptors...")
-            salad_retrieval = SALADRetrieval(model, args, device=device, dtype=dtype)
-
-            descriptors = salad_retrieval.main()
-
-            os.makedirs(base_path, exist_ok=True)
-            torch.save(descriptors, os.path.join(base_path, file_name))
-
-        if args.distributed:
-            synchronize()
-
-    return
 
 
 def run_twoview_inference(

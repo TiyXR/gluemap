@@ -7,7 +7,7 @@ from gluemap.utils import gpu_utils
 from gluemap.utils.model_loader import load_models
 
 # Re-export pipeline functions for convenience
-from gluemap.controllers.preprocess import (
+from gluemap.controllers.salad_retrieval import (
     run_preprocessing_pipeline,
     run_preprocessing_pipeline_multi,
 )
