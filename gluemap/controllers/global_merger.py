@@ -10,7 +10,7 @@ from gluemap.estimators.similarity_averaging import (
     similarity_averaging_with_depth,
 )
 from gluemap.estimators.bundle_adjustment import (
-    bundle_adjustment_with_depth,
+    bundle_adjustment,
     intrinsics_to_colmap_params,
 )
 from gluemap.controllers.bundle_adjustment import initialize_world_points
@@ -331,7 +331,7 @@ class GlobalGluer:
         #     reproj_threshold=10.0,
         # )
 
-        # global_rotations, global_centers, global_intrinsics, points3D = bundle_adjustment_with_depth(
+        # global_rotations, global_centers, global_intrinsics, points3D = bundle_adjustment(
         #     predictions_dict,
         #     global_rotations,
         #     global_centers,

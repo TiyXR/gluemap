@@ -12,7 +12,7 @@ import numpy as np
 import pycolmap
 
 from gluemap.estimators.bundle_adjustment import (
-    bundle_adjustment_with_depth,
+    bundle_adjustment,
     intrinsics_to_colmap_params,
     extract_ba_data_from_reconstruction,
 )
@@ -686,10 +686,10 @@ def iterative_bundle_adjustment(
         logger.info(f"Tracks: {len(reconstruction.points3D)}")
         logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
-        # Run BA via bundle_adjustment_with_depth
+        # Run BA via bundle_adjustment
         # Only fix rotations in first pass on first iteration
         fix_rot = options.fix_rotations_first_pass and iteration == 0
-        reconstruction = bundle_adjustment_with_depth(
+        reconstruction = bundle_adjustment(
             reconstruction,
             negative_depth_observations,
             virtual_point_start,

@@ -304,7 +304,6 @@ def add_reprojection_error(
             num_none += 1
             continue
         elements = list(point3D.track.elements)
-        
 
         for elem in elements:
             image_id, pt_idx = elem.image_id, elem.point2D_idx
@@ -321,7 +320,9 @@ def add_reprojection_error(
 
             # Determine if this is a virtual point
             # Virtual points start at virtual_point_start[image_id] in the points2D list
-            vp_start = virtual_point_start.get(image_id, len(keypoints_per_image.get(image_id, [])))
+            vp_start = virtual_point_start.get(
+                image_id, len(keypoints_per_image.get(image_id, []))
+            )
             is_virtual_point = pt_idx >= vp_start
 
             # Virtual points use duplicate SIMPLE_FISHEYE camera (fixed params)
@@ -345,7 +346,7 @@ def add_reprojection_error(
                 )
                 isnegative_count += 1
             else:
-                cost = pycolmap.cost_functions.ReprojErrorCost(active_model_id, point2D)
+                cost = pygluemap.ReprojErrorCost(active_model_id, point2D)
 
             # Choose loss function: Arctan for virtual points, Huber for real points
             if is_virtual_point:
@@ -367,7 +368,9 @@ def add_reprojection_error(
             costs.append(cost)
             num_constraints += 1
 
-    logger.info(f"Added {num_constraints} reprojection error constraints ({num_virtual} virtual)")
+    logger.info(
+        f"Added {num_constraints} reprojection error constraints ({num_virtual} virtual)"
+    )
     logger.info(f"Skipped {num_skipped} observations")
     logger.info(f"Number of None camera parameters skipped: {num_none}")
     logger.info(f"Number of negative observation: {isnegative_count}")
@@ -375,93 +378,7 @@ def add_reprojection_error(
     return first_camera_id
 
 
-
-def add_depth_prior_error(
-    prob,
-    reconstruction,
-    virtual_point_start,
-    negative_depth_observations,
-    cam_poses,
-    costs,
-    losses,
-    depth_weight_virtual=1e-3
-):
-    """
-    Add depth prior error for virtual points in the reconstruction.
-
-    For each virtual point track observation, computes the initial depth from
-    the current reconstruction state and adds a DepthRegularizationCost to
-    penalize deviations during optimization.
-
-    Observations are skipped if the sign of the computed depth is inconsistent
-    with negative_depth_observations (i.e., positive depth but flagged as
-    negative, or negative depth but not flagged).
-
-    Args:
-        prob: pyceres.Problem instance
-        reconstruction: pycolmap.Reconstruction with cameras, images, points3D
-        virtual_point_start: Dict[image_id, int] - index where virtual points
-            start in each image's points2D list
-        negative_depth_observations: Dict[image_id, Set[pt_idx]] - observations
-            where depth is expected to be negative
-        cam_poses: Dict[image_id, np.ndarray(7,)] - concatenated quat+trans
-        costs: List to append cost functions to
-        losses: List to append loss functions to
-        depth_weight_virtual: Weight (magnitude) for the arctan loss
-    """
-    if cam_poses is None:
-        logger.warning("cam_poses not provided, skipping depth prior")
-        return
-
-    num_constraints = 0
-    num_skipped = 0
-
-    depth_ori = []
-    for point3D_id, point3D in reconstruction.points3D.items():
-        world_point = point3D.xyz
-        if world_point is None or np.all(world_point == 0):
-            continue
-
-        for elem in point3D.track.elements:
-            image_id, pt_idx = elem.image_id, elem.point2D_idx
-
-            if image_id not in cam_poses:
-                num_skipped += 1
-                continue
-
-            image = reconstruction.images[image_id]
-            vp_start = virtual_point_start.get(image_id, len(image.points2D))
-            if pt_idx < vp_start:
-                break  # not a virtual point
-
-            cam_pose = cam_poses[image_id]
-
-            # Compute initial depth from current reconstruction state
-
-            initial_depth = np.linalg.norm(image.cam_from_world() * world_point)
-
-            # Skip degenerate depth
-            if abs(initial_depth) < 0.1:
-                num_skipped += 1
-                continue
-
-            loss = pyceres.LossFunction(
-                {"name": "arctan", "params": [1.0], "magnitude": depth_weight_virtual}
-            )
-            cost = pygluemap.DepthRegularizationCost(initial_depth)
-            prob.add_residual_block(cost, loss, [world_point, cam_pose])
-            
-            depth_ori.append(initial_depth)
-
-            costs.append(cost)
-            losses.append(loss)
-            num_constraints += 1
-
-    logger.info(f"Added {num_constraints} virtual depth prior constraints")
-    logger.info(f"Skipped {num_skipped} observations")
-
-
-def bundle_adjustment_with_depth(
+def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     negative_depth_observations,
     virtual_point_start,
@@ -513,16 +430,6 @@ def bundle_adjustment_with_depth(
 
     logger.info(f"Bundle adjustment with {len(reconstruction.points3D)} tracks")
 
-    # # Step 3: Create duplicate SIMPLE_FISHEYE camera params for virtual points
-    # # These are separate numpy arrays (copies) so they are independent parameter blocks
-    # if fisheye_intrinsics_params is None:
-    #     fisheye_intrinsics_params = []
-    #     for params in intrinsics_params:
-    #         if params is not None:
-    #             fisheye_intrinsics_params.append(np.array(params, dtype=np.float64))
-    #         else:
-    #             fisheye_intrinsics_params.append(None)
-
     # Step 4: Build problem
     prob = pyceres.Problem()
     costs = []
@@ -544,18 +451,7 @@ def bundle_adjustment_with_depth(
         fisheye_intrinsics_params=fisheye_intrinsics_params,
     )
 
-    # # Step 6: Add depth prior constraints for virtual points
-    # add_depth_prior_error(
-    #     prob,
-    #     reconstruction,
-    #     virtual_point_start=virtual_point_start,
-    #     negative_depth_observations=negative_depth_observations,
-    #     cam_poses=cam_poses,
-    #     costs=costs,
-    #     losses=losses,
-    # )
-
-    # Step 7: Set manifolds
+    # Step 6: Set manifolds
     # Use product manifold for 7D pose: quaternion (4D, 3D tangent) + translation (3D, 3D tangent)
     for image_id in cam_poses:
         if prob.has_parameter_block(cam_poses[image_id]):
@@ -575,18 +471,22 @@ def bundle_adjustment_with_depth(
             if params is not None and prob.has_parameter_block(params):
                 prob.set_parameter_block_constant(params)
 
-    # Step 8: Fix gauge freedom
+    # Step 7: Fix gauge freedom
     if first_camera_id is not None:
         # Fix both rotation and translation of first camera
         if first_camera_id in cam_poses:
             if prob.has_parameter_block(cam_poses[first_camera_id]):
                 prob.set_parameter_block_constant(cam_poses[first_camera_id])
-                logger.info(f"Fixed rotation and translation gauge: camera {first_camera_id}")
+                logger.info(
+                    f"Fixed rotation and translation gauge: camera {first_camera_id}"
+                )
 
         # Fix scale: pin the largest translation component of a second camera
         second_camera_id = None
         for image_id in cam_poses:
-            if image_id != first_camera_id and prob.has_parameter_block(cam_poses[image_id]):
+            if image_id != first_camera_id and prob.has_parameter_block(
+                cam_poses[image_id]
+            ):
                 second_camera_id = image_id
                 break
         if second_camera_id is not None:
@@ -594,9 +494,13 @@ def bundle_adjustment_with_depth(
             t2 = cam_poses[second_camera_id][4:]
             fixed_idx = int(np.argmax(np.abs(t2)))
             # Create product manifold: full quaternion manifold + subset translation manifold
-            scale_gauge_manifold = pygluemap.CreatePoseManifoldWithFixedTransComponent(fixed_idx)
+            scale_gauge_manifold = pygluemap.CreatePoseManifoldWithFixedTransComponent(
+                fixed_idx
+            )
             prob.set_manifold(cam_poses[second_camera_id], scale_gauge_manifold)
-            logger.info(f"Fixed scale gauge: camera {second_camera_id}, translation component {fixed_idx}")
+            logger.info(
+                f"Fixed scale gauge: camera {second_camera_id}, translation component {fixed_idx}"
+            )
         else:
             logger.warning("No second camera available to fix scale gauge")
     else:
@@ -604,23 +508,23 @@ def bundle_adjustment_with_depth(
 
     # Step 9: Solve (solver config matching COLMAP's bundle_adjustment_ceres.cc)
     options = pyceres.SolverOptions()
-    # options.function_tolerance = 0.0
-    # options.gradient_tolerance = 1e-4
-    # options.parameter_tolerance = 0.0
     options.max_num_iterations = max_num_iterations
-    # options.max_linear_solver_iterations = 200
     options.max_num_consecutive_invalid_steps = 10
-    # options.max_consecutive_nonmonotonic_steps = 10
     options.minimizer_progress_to_stdout = prob.num_residuals() > 5_000_000
 
-    # Adaptive solver selection based on problem size (matching COLMAP thresholds)
+    # Use SPARSE_NORMAL_CHOLESKY to avoid Schur ordering issues with custom manifolds
     num_images = len(cam_poses)
-    if num_images <= 200:
-        options.linear_solver_type = pyceres.LinearSolverType.DENSE_SCHUR
-    elif num_images <= 1000:
-        options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
-    else:
-        options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
+    options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+
+    # TODO: SPARSE_SCHUR / DENSE_SCHUR somehow gives error.
+    # Need to debug this.
+    # if num_images <= 200:
+    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
+    #     # options.linear_solver_type = pyceres.LinearSolverType.DENSE_SCHUR
+    # elif num_images <= 1000:
+    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
+    # else:
+    #     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
 
     # Adaptive threading based on problem size (matching COLMAP)
     if prob.num_residuals() < 50000:
@@ -628,7 +532,10 @@ def bundle_adjustment_with_depth(
     else:
         options.num_threads = 32
 
-    logger.info(f"Solver: {options.linear_solver_type.name} ({num_images} images, {prob.num_residuals()} residuals)")
+    logger.info(
+        f"Solver: {options.linear_solver_type.name} ({num_images} images, "
+        f"{prob.num_residuals()} residuals)"
+    )
 
     logger.info("Solving the optimization problem...")
 
@@ -638,7 +545,9 @@ def bundle_adjustment_with_depth(
         for image_id in cam_poses:
             if image_id != first_camera_id:
                 if prob.has_parameter_block(cam_poses[image_id]):
-                    translation_only_manifold = pygluemap.CreateTranslationOnlyManifold()
+                    translation_only_manifold = (
+                        pygluemap.CreateTranslationOnlyManifold()
+                    )
                     prob.set_manifold(cam_poses[image_id], translation_only_manifold)
 
         summary = pyceres.SolverSummary()
@@ -656,7 +565,11 @@ def bundle_adjustment_with_depth(
                         # Restore scale gauge manifold for second camera
                         t2 = cam_poses[second_camera_id][4:]
                         fixed_idx = int(np.argmax(np.abs(t2)))
-                        scale_gauge_manifold = pygluemap.CreatePoseManifoldWithFixedTransComponent(fixed_idx)
+                        scale_gauge_manifold = (
+                            pygluemap.CreatePoseManifoldWithFixedTransComponent(
+                                fixed_idx
+                            )
+                        )
                         prob.set_manifold(cam_poses[image_id], scale_gauge_manifold)
                     else:
                         # Restore standard pose manifold
