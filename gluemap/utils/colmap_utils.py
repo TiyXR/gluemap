@@ -9,56 +9,44 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-def intrinsics_to_colmap_camera(intrinsics_matrix, camera_model="SIMPLE_PINHOLE"):
+def camera_from_intrinsics_matrix(
+    intrinsics_matrix, camera_model="SIMPLE_PINHOLE", width=None, height=None, camera_id=0
+):
     """
-    Convert 3x3 intrinsics matrix to a pycolmap.Camera.
+    Create a pycolmap.Camera from a 3x3 intrinsics matrix.
 
     Args:
         intrinsics_matrix: 3x3 numpy array or torch tensor
         camera_model: Camera model string
+        width: Image width (defaults to 2 * cx)
+        height: Image height (defaults to 2 * cy)
+        camera_id: Camera ID
 
     Returns:
         pycolmap.Camera
     """
-    params = intrinsics_to_colmap_params(intrinsics_matrix, camera_model)
-    return pycolmap.Camera(
-        camera_id=0, model=camera_model, width=1, height=1, params=params
-    )
-
-
-def intrinsics_to_colmap_params(intrinsics_matrix, camera_model="SIMPLE_PINHOLE"):
-    """
-    Convert 3x3 intrinsics matrix to COLMAP camera parameter array.
-
-    Args:
-        intrinsics_matrix: 3x3 numpy array or torch tensor
-        camera_model: Camera model string
-
-    Returns:
-        numpy array of camera parameters
-    """
     if torch.is_tensor(intrinsics_matrix):
         intrinsics_matrix = intrinsics_matrix.cpu().numpy()
 
-    fx = intrinsics_matrix[0, 0]
-    fy = intrinsics_matrix[1, 1]
-    cx = intrinsics_matrix[0, 2]
-    cy = intrinsics_matrix[1, 2]
+    fx, fy = float(intrinsics_matrix[0, 0]), float(intrinsics_matrix[1, 1])
+    cx, cy = float(intrinsics_matrix[0, 2]), float(intrinsics_matrix[1, 2])
 
-    if camera_model in ("SIMPLE_RADIAL", "SIMPLE_PINHOLE"):
-        # params: f, cx, cy (+ k for SIMPLE_RADIAL)
-        f = (fx + fy) / 2
-        params = [f, cx, cy]
-    elif camera_model in ("PINHOLE", "RADIAL"):
-        # params: fx, fy, cx, cy (+ k for RADIAL)
-        params = [fx, fy, cx, cy]
+    if width is None:
+        width = int(2 * cx)
+    if height is None:
+        height = int(2 * cy)
+
+    camera = pycolmap.Camera.create_from_model_id(
+        camera_id, pycolmap.CameraModelId(camera_model), 1.0, width, height
+    )
+    if len(camera.focal_length_idxs()) == 2:
+        camera.focal_length_x = fx
+        camera.focal_length_y = fy
     else:
-        raise NotImplementedError(f"Camera model {camera_model} not supported")
-
-    if "RADIAL" in camera_model:
-        params.append(0.0)
-
-    return np.array(params, dtype=np.float64)
+        camera.focal_length = (fx + fy) / 2
+    camera.principal_point_x = cx
+    camera.principal_point_y = cy
+    return camera
 
 
 

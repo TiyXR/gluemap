@@ -9,10 +9,7 @@ from gluemap.estimators.similarity_averaging import (
     similarity_averaging,
     similarity_averaging_with_depth,
 )
-from gluemap.estimators.bundle_adjustment import (
-    bundle_adjustment,
-    intrinsics_to_colmap_params,
-)
+from gluemap.estimators.bundle_adjustment import bundle_adjustment
 from gluemap.controllers.bundle_adjustment import initialize_world_points
 from gluemap.estimators.establish_tracks import (
     establish_tracks_from_tracks_dict,
@@ -313,11 +310,6 @@ class GlobalGluer:
         # )
 
         # # Initialize 3D world points
-        # intrinsics_params = [
-        #     intrinsics_to_colmap_params(intr[0], camera_model)
-        #     if intr is not None else None
-        #     for intr in global_intrinsics
-        # ]
         # points3D = initialize_world_points(
         #     predictions_dict,
         #     global_rotations,

@@ -4,7 +4,7 @@ import numpy as np
 
 
 from gluemap.utils.misc import get_tracks_dict_indexes
-from gluemap.utils.colmap_utils import intrinsics_to_colmap_params
+from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 
 
 def convert_to_colmap_format(
@@ -34,13 +34,8 @@ def convert_to_colmap_format(
         if global_intrinsics[i] is None:
             continue
         model = camera_type if camera_type is not None else "PINHOLE"
-        params = intrinsics_to_colmap_params(global_intrinsics[i][0], model)
-        camera = pycolmap.Camera(
-            camera_id=i + 1,
-            model=model,
-            width=camera_sizes[i][-1],
-            height=camera_sizes[i][0],
-            params=params,
+        camera = camera_from_intrinsics_matrix(
+            global_intrinsics[i][0], model, camera_sizes[i][-1], camera_sizes[i][0], i + 1
         )
         reconstruction.add_camera_with_trivial_rig(camera)
 

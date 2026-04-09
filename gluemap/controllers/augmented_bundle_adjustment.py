@@ -27,7 +27,7 @@ from gluemap.estimators.establish_tracks import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
-from gluemap.utils.colmap_utils import intrinsics_to_colmap_camera
+from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 from gluemap.utils.prepare_prior import (
     prepare_glomap_prior,
     merge_colmap_databases,
@@ -567,7 +567,7 @@ def run_refinement_pipeline(
     t0 = time.perf_counter()
     cameras = [
         (
-            intrinsics_to_colmap_camera(intr[0], dataset_pair.camera_model)
+            camera_from_intrinsics_matrix(intr[0], dataset_pair.camera_model)
             if intr is not None
             else None
         )

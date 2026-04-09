@@ -11,10 +11,8 @@ from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pycolmap
 
-from gluemap.estimators.bundle_adjustment import (
-    bundle_adjustment,
-    intrinsics_to_colmap_params,
-)
+from gluemap.estimators.bundle_adjustment import bundle_adjustment
+from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 from gluemap.math.errors import (
     compute_point_error,
     compute_all_errors_from_reconstruction,
@@ -109,14 +107,10 @@ def build_reconstruction_for_ba(
     """
     reconstruction = pycolmap.Reconstruction()
 
-    # Build camera model ID
-    camera_model_id = pycolmap.CameraModelId(camera_model)
-
     # Add cameras
     for camera_id, intrinsics in enumerate(global_intrinsics):
         if intrinsics is None:
             continue
-        params = intrinsics_to_colmap_params(intrinsics[0], camera_model)
 
         # Find image size for this camera (use first image with this camera_id)
         width, height = None, None
@@ -126,19 +120,9 @@ def build_reconstruction_for_ba(
                     height, width = image_sizes[img_id]
                     break
 
-        # If width/height not found, use 2x principal point as default
-        if width is None or height is None:
-            # params = [f, cx, cy, ...] for SIMPLE_PINHOLE
-            cx, cy = params[1], params[2]
-            width = int(2 * cx)
-            height = int(2 * cy)
-
-        camera = pycolmap.Camera(
-            model=camera_model_id,
-            width=width,
-            height=height,
-            params=params,
-            camera_id=camera_id,
+        # Note that there is an extra dimension in intrinsics, so we take intrinsics[0]
+        camera = camera_from_intrinsics_matrix(
+            intrinsics[0], camera_model, width, height, camera_id
         )
         reconstruction.add_camera_with_trivial_rig(camera)
 

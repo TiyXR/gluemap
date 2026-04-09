@@ -5,9 +5,6 @@ import pyceres
 
 import pycolmap
 
-from gluemap.utils.colmap_utils import (
-    intrinsics_to_colmap_params,
-)
 
 import logging
 logger = logging.getLogger(__name__)

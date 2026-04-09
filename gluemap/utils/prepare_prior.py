@@ -29,7 +29,7 @@ from scipy.spatial import cKDTree
 
 from gluemap.utils.misc import get_tracks_dict_indexes
 from gluemap.math.union_find import UnionFind
-from gluemap.utils.colmap_utils import intrinsics_to_colmap_params
+from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 
 
 # COLMAP pair ID encoding constant (2^31 - 1)
@@ -761,13 +761,8 @@ def prepare_database_prior(
         if global_intrinsics[i] is None:
             continue
 
-        params = intrinsics_to_colmap_params(global_intrinsics[i][0], camera_model)
-        camera = pycolmap.Camera(
-            camera_id=i + 1,
-            model=camera_model,
-            params=np.array(params),
-            width=camera_sizes[i][-1],
-            height=camera_sizes[i][0],
+        camera = camera_from_intrinsics_matrix(
+            global_intrinsics[i][0], camera_model, camera_sizes[i][-1], camera_sizes[i][0], i + 1
         )
 
         database.write_camera(camera)
