@@ -24,8 +24,6 @@ class BatchInferenceStar:
         device="cuda",
         dtype=torch.bfloat16,
         pointmap_dir=None,
-        repredict_verified=False,
-        repredict_threshold=0.05,
     ):
         self.model = model
         self.model_type = model_type
@@ -34,15 +32,10 @@ class BatchInferenceStar:
         self.dtype = dtype
         self.pointmap_dir = pointmap_dir
 
-        self.repredict_verified = repredict_verified
-        self.repredict_threshold = repredict_threshold
         self.include_track = True
         self.check_consistency = False
 
     def main(self, batch, disable_track=False, include_track=True):
-        if self.repredict_verified:
-            return self._main_repredict(batch, include_track=include_track)
-
         predictions, images, forward_time, track_time = self._predict_images(
             batch, disable_track=disable_track, include_track=include_track
         )
@@ -81,107 +74,6 @@ class BatchInferenceStar:
             result_dict["tracks"] = predictions["track"].cpu()
             result_dict["vis"] = predictions["vis"].cpu()
             result_dict["conf"] = predictions["conf"].cpu()
-
-        return result_dict
-
-    def _main_repredict(self, batch, include_track=True):
-        # Round 1: full prediction with tracks
-        predictions, images, forward_time, track_time = self._predict_images(
-            batch, disable_track=False, include_track=include_track
-        )
-
-        (
-            extrinsics,
-            intrinsics,
-            scores,
-            tracks_virtual,
-            points3d_virtual,
-            valid_virtual,
-            cam_points,
-            cam_points_conf,
-            depth_transformed,
-        ) = self._covisiblity_extraction(
-            predictions,
-            images.shape[-2:],
-            batch["indexes"],
-            batch["images_change"],
-            batch["images_shape_ori"],
-        )
-
-        # Select verified views (always include center view at index 0)
-        verified_mask = scores[0] > self.repredict_threshold
-        verified_mask[0] = True
-        verified_indices = torch.where(verified_mask)[0]
-        num_views = scores.shape[1]
-
-        # If all views pass or only center survives, return round 1 as-is
-        if verified_indices.numel() >= num_views or verified_indices.numel() < 2:
-            result_dict = {
-                "indexes": batch["indexes"][0].tolist(),
-                "extrinsics": extrinsics,
-                "intrinsics": intrinsics,
-                "pose_scores": scores,
-                "tracks_virtual": tracks_virtual,
-                "points3d_virtual": points3d_virtual,
-                "valid_virtual": valid_virtual,
-                "_forward_time": forward_time,
-                "_track_time": track_time,
-            }
-            if include_track:
-                result_dict["tracks"] = predictions["track"].cpu()
-                result_dict["vis"] = predictions["vis"].cpu()
-                result_dict["conf"] = predictions["conf"].cpu()
-            return result_dict
-
-        # Round 2: re-predict geometry with only verified views (skip tracks)
-        vi = verified_indices
-        subset_batch = {
-            "images": batch["images"][:, vi],
-            "indexes": batch["indexes"][:, vi],
-            "images_change": batch["images_change"][:, vi],
-            "images_shape_ori": batch["images_shape_ori"][:, vi],
-        }
-
-        predictions2, images2, forward_time2, _ = self._predict_images(
-            subset_batch, disable_track=True, include_track=False
-        )
-        forward_time += forward_time2
-
-        (
-            extrinsics2,
-            intrinsics2,
-            scores2,
-            tracks_virtual2,
-            points3d_virtual2,
-            valid_virtual2,
-            cam_points2,
-            cam_points_conf2,
-            depth_transformed2,
-        ) = self._covisiblity_extraction(
-            predictions2,
-            images2.shape[-2:],
-            subset_batch["indexes"],
-            subset_batch["images_change"],
-            subset_batch["images_shape_ori"],
-        )
-
-        result_dict = {
-            "indexes": subset_batch["indexes"][0].tolist(),
-            "extrinsics": extrinsics2,
-            "intrinsics": intrinsics2,
-            "pose_scores": scores2,
-            "tracks_virtual": tracks_virtual2,
-            "points3d_virtual": points3d_virtual2,
-            "valid_virtual": valid_virtual2,
-            "_forward_time": forward_time,
-            "_track_time": track_time,
-        }
-
-        # Subsample tracks from round 1 to match verified views
-        if include_track:
-            result_dict["tracks"] = predictions["track"][:, vi].cpu()
-            result_dict["vis"] = predictions["vis"][:, vi].cpu()
-            result_dict["conf"] = predictions["conf"][:, vi].cpu()
 
         return result_dict
 

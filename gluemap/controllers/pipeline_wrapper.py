@@ -98,8 +98,6 @@ def run_star_inference(
         star_inferece = BatchInferenceStar(
             models[chosen_model], chosen_model, models.get("vggsfm"), device=device, dtype=dtype,
             pointmap_dir=os.path.join(args.curr_path, "pointmap"),
-            repredict_verified=getattr(args, "repredict_verified", False),
-            repredict_threshold=getattr(args, "repredict_threshold", 0.05),
         )
         with torch.no_grad():
             for batch in tqdm(
