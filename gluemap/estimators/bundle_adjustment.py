@@ -5,10 +5,8 @@ import pyceres
 
 import pycolmap
 
-# Re-export from colmap_utils for backwards compatibility
 from gluemap.utils.colmap_utils import (
     intrinsics_to_colmap_params,
-    colmap_params_to_intrinsics,
 )
 
 import logging

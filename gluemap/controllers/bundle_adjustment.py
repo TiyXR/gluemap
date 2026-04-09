@@ -187,14 +187,12 @@ def build_reconstruction_for_ba(
 
 def extract_results_from_reconstruction(
     reconstruction: pycolmap.Reconstruction,
-    camera_model: str = "SIMPLE_PINHOLE",
 ) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], List, Dict[int, pycolmap.Point3D]]:
     """
     Extract BA results from reconstruction back to separate data structures.
 
     Args:
         reconstruction: pycolmap.Reconstruction with optimized parameters
-        camera_model: Camera model string
 
     Returns:
         Tuple of:
@@ -204,7 +202,6 @@ def extract_results_from_reconstruction(
             - points3D: Dict[point3D_id, pycolmap.Point3D]
     """
     import torch
-    from gluemap.estimators.bundle_adjustment import colmap_params_to_intrinsics
 
     global_rotations = {}
     global_centers = {}
@@ -222,7 +219,7 @@ def extract_results_from_reconstruction(
     global_intrinsics = [None] * (max_camera_id + 1)
 
     for camera_id, camera in reconstruction.cameras.items():
-        intrinsics_matrix = colmap_params_to_intrinsics(camera.params, camera_model)
+        intrinsics_matrix = camera.calibration_matrix()
         intrinsics_tensor = torch.from_numpy(intrinsics_matrix).unsqueeze(0)
         global_intrinsics[camera_id] = intrinsics_tensor
 

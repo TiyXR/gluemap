@@ -61,52 +61,6 @@ def intrinsics_to_colmap_params(intrinsics_matrix, camera_model="SIMPLE_PINHOLE"
     return np.array(params, dtype=np.float64)
 
 
-def colmap_params_to_intrinsics(params, camera_model="SIMPLE_PINHOLE"):
-    """
-    Convert COLMAP camera parameter array to 3x3 intrinsics matrix.
-
-    Args:
-        params: numpy array of camera parameters
-        camera_model: Camera model string
-
-    Returns:
-        3x3 numpy intrinsics matrix
-    """
-    intrinsics = np.eye(3, dtype=np.float64)
-
-    if camera_model == "SIMPLE_PINHOLE":
-        # params: f, cx, cy
-        f, cx, cy = params[0], params[1], params[2]
-        intrinsics[0, 0] = f
-        intrinsics[1, 1] = f
-        intrinsics[0, 2] = cx
-        intrinsics[1, 2] = cy
-    elif camera_model == "PINHOLE":
-        # params: fx, fy, cx, cy
-        fx, fy, cx, cy = params[0], params[1], params[2], params[3]
-        intrinsics[0, 0] = fx
-        intrinsics[1, 1] = fy
-        intrinsics[0, 2] = cx
-        intrinsics[1, 2] = cy
-    elif camera_model == "SIMPLE_RADIAL":
-        # params: f, cx, cy, k (ignore k for intrinsics matrix)
-        f, cx, cy = params[0], params[1], params[2]
-        intrinsics[0, 0] = f
-        intrinsics[1, 1] = f
-        intrinsics[0, 2] = cx
-        intrinsics[1, 2] = cy
-    elif camera_model == "RADIAL":
-        # params: fx, fy, cx, cy, k (ignore k for intrinsics matrix)
-        fx, fy, cx, cy = params[0], params[1], params[2], params[3]
-        intrinsics[0, 0] = fx
-        intrinsics[1, 1] = fy
-        intrinsics[0, 2] = cx
-        intrinsics[1, 2] = cy
-    else:
-        raise NotImplementedError(f"Camera model {camera_model} not supported")
-
-    return intrinsics
-
 
 def extract_gt_intrinsics(
     gt_path: str,
@@ -135,7 +89,7 @@ def extract_gt_intrinsics(
         key = os.path.basename(name) if match_by_basename else name
         if key in name_to_gt_cam and gt_intrinsics[cam_id] is None:
             gt_cam = name_to_gt_cam[key]
-            K = colmap_params_to_intrinsics(gt_cam.params, gt_cam.model_name)
+            K = gt_cam.calibration_matrix()
             gt_intrinsics[cam_id] = torch.tensor(K, dtype=torch.float32).unsqueeze(0)
 
     num_set = sum(1 for x in gt_intrinsics if x is not None)
