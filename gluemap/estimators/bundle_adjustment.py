@@ -15,29 +15,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def get_camera_model_id(camera_model):
-    """Get COLMAP camera model ID from string name."""
-    camera_model_map = {
-        "SIMPLE_PINHOLE": pycolmap.CameraModelId.SIMPLE_PINHOLE,
-        "PINHOLE": pycolmap.CameraModelId.PINHOLE,
-        "SIMPLE_RADIAL": pycolmap.CameraModelId.SIMPLE_RADIAL,
-        "RADIAL": pycolmap.CameraModelId.RADIAL,
-        "SIMPLE_FISHEYE": pycolmap.CameraModelId.SIMPLE_FISHEYE,
-    }
-    return camera_model_map.get(camera_model, pycolmap.CameraModelId.SIMPLE_PINHOLE)
-
-
-def get_camera_model_name(camera_model_id):
-    """Get camera model string name from COLMAP camera model ID."""
-    camera_model_map = {
-        pycolmap.CameraModelId.SIMPLE_PINHOLE: "SIMPLE_PINHOLE",
-        pycolmap.CameraModelId.PINHOLE: "PINHOLE",
-        pycolmap.CameraModelId.SIMPLE_RADIAL: "SIMPLE_RADIAL",
-        pycolmap.CameraModelId.RADIAL: "RADIAL",
-        pycolmap.CameraModelId.SIMPLE_FISHEYE: "SIMPLE_FISHEYE",
-    }
-    return camera_model_map.get(camera_model_id, "SIMPLE_PINHOLE")
-
 
 def add_reprojection_error(
     prob,

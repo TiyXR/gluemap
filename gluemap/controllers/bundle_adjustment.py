@@ -107,12 +107,10 @@ def build_reconstruction_for_ba(
     Returns:
         pycolmap.Reconstruction
     """
-    from gluemap.estimators.bundle_adjustment import get_camera_model_id
-
     reconstruction = pycolmap.Reconstruction()
 
     # Build camera model ID
-    camera_model_id = get_camera_model_id(camera_model)
+    camera_model_id = pycolmap.CameraModelId(camera_model)
 
     # Add cameras
     for camera_id, intrinsics in enumerate(global_intrinsics):
