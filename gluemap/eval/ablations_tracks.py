@@ -5,10 +5,8 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-from gluemap.controllers.pipeline_wrapper import (
-    run_twoview_inference,
-    run_star_inference,
-)
+from gluemap.controllers.twoview_inference import run_twoview_inference
+from gluemap.controllers.pipeline_wrapper import run_star_inference
 from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.results_collection import generate_dataset_from_outputs
 

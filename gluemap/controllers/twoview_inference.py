@@ -1,24 +1,17 @@
-# import numpy as np
-# import torch
-
-# from pi3.models.pi3 import Pi3
-# from vggt.models.vggt import VGGT
-
-# from salad.vpr_model import VPRModel
-# from e2esfm.utils.get_pi3_calibration import get_pi3d_calibration
-# from e2esfm.utils.utils_mapanything import mapanything_inference, retrieve_mapanything_result
-
-# from e2esfm.pipeline.run_star_base import StellarBase
-# # from e2esfm.pipeline.run_ministar_vggt import MiniStellarVGGT
-# from e2esfm.pipeline.tracks_util import *
-# from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-
-# import faiss
-
+import logging
+import os
+import time
 
 from scipy.special import softmax
 import torch
 import numpy as np
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
+
+from gluemap.utils.gpu_utils import all_gather_object_cpu
+from gluemap.utils.model_loader import load_models
+
+logger = logging.getLogger(__name__)
 
 
 class BatchInferenceDG:
@@ -73,3 +66,230 @@ class BatchInferenceDG:
         }
 
         return result_dict
+
+
+class TwoViewInferencePipeline:
+    """Pipeline object for two-view (Doppelgangers) inference.
+
+    Follows the same pattern as ``SaladRetrievalPipeline``: stable config is
+    stored as instance attributes; per-dataset inputs are passed to ``run()``.
+    """
+
+    def __init__(
+        self,
+        args,
+        world_size,
+        rank,
+        file_name="twoview_result.pth",
+        device="cuda",
+        dtype=torch.bfloat16,
+        preloaded_models=None,
+    ):
+        self.args = args
+        self.world_size = world_size
+        self.rank = rank
+        self.file_name = file_name
+        self.device = device
+        self.dtype = dtype
+        self.preloaded_models = preloaded_models
+
+    def _make_dataloader(self, dataset_pair):
+        if self.args.distributed:
+            sampler = DistributedSampler(
+                dataset_pair,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=False,
+            )
+        else:
+            sampler = torch.utils.data.SequentialSampler(dataset_pair)
+
+        return torch.utils.data.DataLoader(
+            dataset_pair,
+            sampler=sampler,
+            batch_size=self.args.batch_size,
+            num_workers=self.args.num_workers,
+            pin_memory=True,
+            drop_last=False,
+        )
+
+    def _load_model(self):
+        if self.preloaded_models is not None and "dg" in self.preloaded_models:
+            return self.preloaded_models["dg"]
+        loaded, self.device = load_models(self.args, keys={"dg"})
+        return loaded["dg"]
+
+    def _run_inference(self, data_loader):
+        all_outputs = []
+        all_indices = []
+        batch_times = []
+
+        model = self._load_model()
+        t_model_load = time.perf_counter()
+        two_view_inference = BatchInferenceDG(
+            model, device=self.device, dtype=self.dtype
+        )
+
+        with torch.no_grad():
+            for batch in tqdm(
+                data_loader,
+                desc=f"Inference (Rank {self.rank})",
+                disable=self.rank != 0,
+            ):
+                torch.cuda.synchronize()
+                t_batch_start = time.perf_counter()
+
+                outputs = two_view_inference.main(batch)
+
+                torch.cuda.synchronize()
+                t_batch_end = time.perf_counter()
+                batch_times.append(t_batch_end - t_batch_start)
+
+                all_outputs.append(outputs)
+                all_indices.extend(batch["pair_indexes"].cpu().numpy().tolist())
+
+        return all_outputs, all_indices, batch_times, t_model_load
+
+    def _gather_outputs(self, all_outputs, all_indices, dataset_pair):
+        output_keys = list(all_outputs[0].keys())
+        local_outputs = (
+            {
+                key: torch.cat(
+                    [output[key] for output in all_outputs], dim=0
+                ).contiguous()
+                for key in ["scores"]
+            }
+            | {"pair_indexes": all_indices}
+            | {
+                key: [
+                    output[key][i]
+                    for output in all_outputs
+                    for i in range(len(output[key]))
+                ]
+                for key in output_keys
+                if key not in ["scores"]
+            }
+        )
+
+        if self.args.distributed:
+            output_keys = output_keys + ["pair_indexes"]
+
+            data_list = all_gather_object_cpu(
+                local_outputs,
+                tmpdir=self.args.temp_path + "/tmp_save",
+                rank_zero_return_only=False,
+                use_system_tmp=False,
+            )
+
+            global_outputs = {}
+            pair_index_order = [
+                output["pair_indexes"][x]
+                for output in data_list
+                for x in range(len(output["pair_indexes"]))
+            ]
+            index_mapping = np.zeros(len(dataset_pair), dtype=np.int64)
+            for i, pair_index in enumerate(pair_index_order):
+                index_mapping[pair_index] = i
+
+            for i, pair_index in enumerate(pair_index_order):
+                for key in output_keys:
+                    if key == "pair_indexes":
+                        continue
+                    elif key == "scores":
+                        gathered_outputs = [output[key] for output in data_list]
+                        gathered_outputs = torch.cat(
+                            gathered_outputs, dim=0
+                        ).contiguous()
+                        global_outputs[key] = gathered_outputs[index_mapping]
+                    else:
+                        gathered_outputs = [
+                            output[key][x]
+                            for output in data_list
+                            for x in range(len(output[key]))
+                        ]
+                        global_outputs[key] = [
+                            gathered_outputs[index_mapping[i]]
+                            for i in range(len(index_mapping))
+                        ]
+        else:
+            global_outputs = local_outputs
+
+        global_outputs["pairs"] = dataset_pair.pairs
+        return global_outputs
+
+    def run(self, dataset_pair, save_intermediate_results=True):
+        """Run two-view inference on the given dataset.
+
+        Returns:
+            Tuple of (global_outputs, twoview_timing).
+        """
+        args = self.args
+        file_name = self.file_name
+
+        data_loader = self._make_dataloader(dataset_pair)
+
+        batch_times = []
+        t_model_load = 0.0
+
+        from gluemap.controllers.pipeline_wrapper import is_stage_cached
+
+        if not is_stage_cached(args, file_name):
+            t0_load = time.perf_counter()
+            all_outputs, all_indices, batch_times, _ = self._run_inference(
+                data_loader
+            )
+            t_model_load = time.perf_counter() - t0_load - sum(batch_times)
+
+            global_outputs = self._gather_outputs(
+                all_outputs, all_indices, dataset_pair
+            )
+
+            if self.rank == 0 and save_intermediate_results:
+                os.makedirs(args.curr_path, exist_ok=True)
+                torch.save(
+                    global_outputs, os.path.join(args.curr_path, file_name)
+                )
+        else:
+            logger.info("Loading existing results...")
+            global_outputs = torch.load(
+                os.path.join(args.curr_path, file_name), weights_only=False
+            )
+
+        twoview_timing = {
+            "batch_times": batch_times,
+            "num_batches": len(batch_times),
+            "total": sum(batch_times) if batch_times else 0.0,
+            "model_loading": t_model_load,
+        }
+        if self.rank == 0 and batch_times:
+            logger.info(
+                f"[Profiling] Two-view inference: {len(batch_times)} batches, "
+                f"total={sum(batch_times):.2f}s, "
+                f"mean={sum(batch_times) / len(batch_times):.3f}s/batch"
+            )
+
+        return global_outputs, twoview_timing
+
+
+def run_twoview_inference(
+    args,
+    dataset_pair,
+    world_size,
+    rank,
+    file_name="twoview_result.pth",
+    save_intermediate_results=True,
+    device="cuda",
+    dtype=torch.bfloat16,
+    preloaded_models=None,
+):
+    """Module-level wrapper that instantiates TwoViewInferencePipeline and runs it."""
+    pipeline = TwoViewInferencePipeline(
+        args,
+        world_size,
+        rank,
+        file_name=file_name,
+        device=device,
+        dtype=dtype,
+        preloaded_models=preloaded_models,
+    )
+    return pipeline.run(dataset_pair, save_intermediate_results=save_intermediate_results)
