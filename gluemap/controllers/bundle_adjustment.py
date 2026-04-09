@@ -14,7 +14,6 @@ import pycolmap
 from gluemap.estimators.bundle_adjustment import (
     bundle_adjustment,
     intrinsics_to_colmap_params,
-    extract_ba_data_from_reconstruction,
 )
 from gluemap.math.errors import (
     compute_point_error,
