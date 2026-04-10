@@ -2,38 +2,13 @@ import logging
 import os
 import time
 import torch
-import numpy as np
 
+from gluemap.estimators.local_inference import create_local_inference
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
-from gluemap.utils.pi3_utils import get_pi3d_calibration
-from gluemap.utils.mapanything_utils import mapanything_inference
 from gluemap.controllers.restore_imagesize import restore_intrinsics
-
-
-def _extract_poses(predictions, backbone, image_size_hw):
-    """Extract extrinsics and intrinsics from backbone predictions.
-
-    Returns:
-        extrinsics: (1, N, 4, 4) or (1, N, 3, 4) tensor (cam-from-world)
-        intrinsics: (1, N, 3, 3) tensor (in preprocessed image coords)
-    """
-    if backbone in ("pi3", "pi3x"):
-        extrinsics, intrinsics = get_pi3d_calibration(predictions)
-    elif backbone == "vggt":
-        from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-        extrinsics, intrinsics = pose_encoding_to_extri_intri(
-            predictions["pose_enc"], image_size_hw=image_size_hw
-        )
-    elif backbone == "map_anything":
-        extrinsics = predictions["extrinsics"]
-        intrinsics = predictions["intrinsics"]
-    else:
-        raise ValueError(f"Unknown backbone: {backbone}")
-
-    return extrinsics, intrinsics
 
 
 def _extrinsics_to_global(extrinsics):
@@ -137,7 +112,7 @@ def run_direct_inference_pipeline(
     # Check cache
     if getattr(args, "force_load", False) and os.path.exists(cache_file):
         logger.info(f"  Loading cached result from {cache_file}")
-        cached = torch.load(cache_file, map_location="cpu")
+        cached = torch.load(cache_file, map_location="cpu", weights_only=False)
         global_rotations = cached["global_rotations"]
         global_centers = cached["global_centers"]
         global_intrinsics = cached["global_intrinsics"]
@@ -159,28 +134,19 @@ def run_direct_inference_pipeline(
         images = images.unsqueeze(0).float()  # (1, N, 3, H, W)
         timing["image_loading"] = time.perf_counter() - t0
 
-        # Step 3: Run backbone forward pass
+        # Step 3: Run backbone forward pass via LocalInference
         t0 = time.perf_counter()
-        images_dev = images.to(device).contiguous()
-
+        local_inf = create_local_inference(model, backbone, device, dtype)
         with torch.no_grad():
-            if backbone == "map_anything":
-                predictions = mapanything_inference(model, images_dev, device=device, dtype=dtype)
-            else:
-                with torch.cuda.amp.autocast(dtype=dtype):
-                    predictions = model(images_dev)
-
-        # Rename depth confidence to avoid collision
-        if "conf" in predictions and "depth_conf" not in predictions:
-            predictions["depth_conf"] = predictions.pop("conf")
+            predictions = local_inf.predict({"images": images})
 
         torch.cuda.synchronize()
         timing["forward_pass"] = time.perf_counter() - t0
 
         # Step 4: Extract poses
         t0 = time.perf_counter()
-        image_size_hw = images.shape[-2:]
-        extrinsics, intrinsics = _extract_poses(predictions, backbone, image_size_hw)
+        extrinsics = predictions["extrinsics"]
+        intrinsics = predictions["intrinsics"]
 
         # Convert extrinsics to global format
         global_rotations, global_centers = _extrinsics_to_global(extrinsics)
@@ -196,7 +162,7 @@ def run_direct_inference_pipeline(
         timing["pose_extraction"] = time.perf_counter() - t0
 
         # Free GPU memory
-        del images_dev, predictions
+        del images, predictions
         torch.cuda.empty_cache()
 
         # Save cache

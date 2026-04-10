@@ -1,8 +1,10 @@
-import os
 import time
-import numpy as np
+
 import torch
-from gluemap.math.scaling import rescale_tracks_single, standardize_query_points
+
+from gluemap.estimators.local_inference import create_local_inference
+from gluemap.estimators.track_inference import TrackInference
+from gluemap.math.scaling import rescale_tracks_single
 from gluemap.math.verification import (
     verify_by_reprojection_n2,
     convert_from_depth_to_world_points,
@@ -11,8 +13,6 @@ from gluemap.math.virtual_tracks import (
     calculate_virtual_tracks,
     extract_cam_points_depth,
 )
-from gluemap.utils.pi3_utils import get_pi3d_calibration
-from gluemap.utils.mapanything_utils import mapanything_inference
 
 
 class BatchInferenceStar:
@@ -35,8 +35,11 @@ class BatchInferenceStar:
         self.include_track = True
         self.check_consistency = False
 
+        self.local_inference = create_local_inference(model, model_type, device, dtype)
+        self.track_inference = TrackInference(model_track, device)
+
     def main(self, batch, disable_track=False, include_track=True):
-        predictions, images, forward_time, track_time = self._predict_images(
+        predictions, forward_time, track_time = self._predict_images(
             batch, disable_track=disable_track, include_track=include_track
         )
 
@@ -52,7 +55,6 @@ class BatchInferenceStar:
             depth_transformed,
         ) = self._covisiblity_extraction(
             predictions,
-            images.shape[-2:],
             batch["indexes"],
             batch["images_change"],
             batch["images_shape_ori"],
@@ -79,113 +81,44 @@ class BatchInferenceStar:
 
     @torch.no_grad()
     def _predict_images(self, batch, disable_track=False, include_track=True):
-        images = batch["images"].to(self.device).contiguous()
-        if include_track:
-            query_points = batch["query_points"].to(self.device)
-        else:
-            query_points = None
-
         if not disable_track and not include_track:
             raise ValueError("if not disable_track, include_track should be True")
 
+        # Local inference (timed)
         torch.cuda.synchronize()
-        t_forward_start = time.perf_counter()
+        t0 = time.perf_counter()
+        predictions = self.local_inference.predict(batch)
+        torch.cuda.synchronize()
+        forward_time = time.perf_counter() - t0
 
-        if disable_track or not self.model_track is None:
-            if self.model_type == "map_anything":
-                predictions = mapanything_inference(
-                    self.model, images, device=self.device, dtype=self.dtype
-                )
-            else:
-                with torch.cuda.amp.autocast(dtype=self.dtype):
-                    predictions = self.model(images)
-        else:
-            with torch.cuda.amp.autocast(dtype=self.dtype):
-                predictions = self.model(images, query_points)
+        # Track inference
+        track_preds, track_time = self._run_track_inference(
+            batch, disable_track, include_track
+        )
+        predictions.update(track_preds)
+
+        return predictions, forward_time, track_time
+
+    def _run_track_inference(self, batch, disable_track, include_track):
+        """Returns (track_preds_dict, track_time)."""
+        if not include_track:
+            return {}, 0.0
 
         torch.cuda.synchronize()
-        t_forward_end = time.perf_counter()
-        forward_time = t_forward_end - t_forward_start
+        t0 = time.perf_counter()
+        track_preds = self.track_inference.predict(
+            batch=batch,
+            disable_track=disable_track,
+        )
+        torch.cuda.synchronize()
+        track_time = time.perf_counter() - t0
+        return track_preds, track_time
 
-        # Rename depth confidence to avoid collision with tracker confidence
-        # (MapAnything already returns "depth_conf" directly)
-        if "conf" in predictions and "depth_conf" not in predictions:
-            predictions["depth_conf"] = predictions.pop("conf")
-
-        track_time = 0.0
-        if disable_track:
-            if include_track:
-                # Use the query points as track. Since we are not doing the BA, it is okay that the correspondences are incorrect
-                predictions["track"] = query_points.unsqueeze(1).expand(-1, images.shape[1], -1, -1)
-                predictions["vis"] = torch.ones_like(
-                    predictions["track"][..., 0:1]
-                ).squeeze(-1)
-                predictions["conf"] = torch.ones_like(
-                    predictions["track"][..., 0:1]
-                ).squeeze(-1)
-        else:
-            images_1024 = batch["images_1024"].to(self.device)
-
-            tracks_all = []
-            vis_all = []
-            scores_all = []
-
-            torch.cuda.synchronize()
-            t_track_start = time.perf_counter()
-
-            for i in range(images_1024.shape[0]):
-                fine_pred_track, _, pred_vis, pred_score = self.model_track(
-                    images_1024[i : i + 1], query_points[i : i + 1]
-                )
-
-                tracks_all.append(fine_pred_track)
-                vis_all.append(pred_vis)
-                scores_all.append(pred_score)
-
-            torch.cuda.synchronize()
-            t_track_end = time.perf_counter()
-            track_time = t_track_end - t_track_start
-
-            # Concatenate the results
-            fine_pred_track = torch.cat(tracks_all, dim=0)
-            pred_vis = torch.cat(vis_all, dim=0)
-            pred_score = torch.cat(scores_all, dim=0)
-
-            predictions["track"] = fine_pred_track
-            predictions["vis"] = pred_vis
-            predictions["conf"] = pred_score
-
-            indexes = batch["indexes"]
-
-            for i in range(indexes.shape[0]):
-                for j, idx_inner in enumerate(indexes[i].tolist()):
-                    predictions["track"][i : i + 1, j : j + 1] = (
-                        standardize_query_points(
-                            rescale_tracks_single(
-                                predictions["track"][i : i + 1, j : j + 1],
-                                batch["images_change_1024"][i][j],
-                            ),
-                            batch["images_change"][i][j],
-                        )
-                    )
-
-        return predictions, images, forward_time, track_time
-
-    # TODO: implement this function
     def _covisiblity_extraction(
-        self, predictions, image_size_hw, indexes, images_change, images_shape_ori
+        self, predictions, indexes, images_change, images_shape_ori
     ):
-        # Extract extrinsics and intrinsics based on model type
-        if self.model_type == "vggt":
-            from vggt.utils.pose_enc import pose_encoding_to_extri_intri
-            extrinsics, intrinsics = pose_encoding_to_extri_intri(
-                predictions["pose_enc"], image_size_hw=image_size_hw
-            )
-        elif self.model_type in ("pi3", "pi3x"):
-            extrinsics, intrinsics = get_pi3d_calibration(predictions)
-        elif self.model_type == "map_anything":
-            extrinsics = predictions["extrinsics"]
-            intrinsics = predictions["intrinsics"]
+        extrinsics = predictions["extrinsics"]
+        intrinsics = predictions["intrinsics"]
 
         depth_transformed = convert_from_depth_to_world_points(
             predictions["depth"], extrinsics, intrinsics
