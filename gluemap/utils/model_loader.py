@@ -1,11 +1,27 @@
+import os
+
 import thirdparty.path_to_thirdparty  # noqa: F401  (adds all thirdparty submodules to sys.path)
 from mast3r.model import AsymmetricMASt3R
 from pi3.models.pi3 import Pi3
 from pi3.models.pi3x import Pi3X
 from vggt.models.vggt import VGGT
 from mapanything.models.mapanything.model import MapAnything
-from vpr_model import VPRModel
 from thirdparty.vggsfm.vggsfm_tracker import TrackerPredictor
+
+# Import VPRModel with salad on sys.path, temporarily swapping 'models' in
+# sys.modules to avoid namespace collision with croco's models directory.
+import sys
+_salad_path = os.path.normpath(os.path.join(os.path.dirname(__file__), '../../thirdparty/salad'))
+_saved_models = {k: v for k, v in sys.modules.items() if k == 'models' or k.startswith('models.')}
+for k in _saved_models:
+    del sys.modules[k]
+sys.path.insert(0, _salad_path)
+from vpr_model import VPRModel  # noqa: E402
+sys.path.remove(_salad_path)
+_salad_models = {k: v for k, v in sys.modules.items() if k == 'models' or k.startswith('models.')}
+for k in _salad_models:
+    del sys.modules[k]
+sys.modules.update(_saved_models)
 
 import numpy as np
 
@@ -30,7 +46,7 @@ def load_models(args, keys=set()):
     elif chosen_model == "vggt" and chosen_model in keys:
         models["vggt"] = VGGT()
         models["vggt"].load_state_dict(
-            torch.load(args.path_feedforward, map_location="cpu")
+            torch.load(args.path_feedforward, map_location="cpu", weights_only=False)
         )
     elif chosen_model == "map_anything" and chosen_model in keys:
         models["map_anything"] = MapAnything.from_pretrained(
@@ -65,7 +81,7 @@ def load_models(args, keys=set()):
     if "vggsfm" in keys:
         models["vggsfm"] = TrackerPredictor()
         models["vggsfm"].load_state_dict(
-            torch.load(args.path_tracker, map_location="cpu")
+            torch.load(args.path_tracker, map_location="cpu", weights_only=False)
         )
 
     # Load SALAD
@@ -87,11 +103,10 @@ def load_models(args, keys=set()):
         )
 
         models["salad"].load_state_dict(
-            torch.load(args.path_retrieval, map_location="cpu"), strict=False
+            torch.load(args.path_retrieval, map_location="cpu", weights_only=False), strict=False
         )
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     for model_name, model in models.items():
         model.eval()

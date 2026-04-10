@@ -77,7 +77,7 @@ def get_args_parser():
     )
     parser.add_argument(
         "--images_path",
-        required=True,
+        default=None,
         type=str,
         help="path to the images folder",
     )
@@ -238,4 +238,9 @@ def parse_args_with_config(parser):
             yaml_config = yaml.safe_load(f) or {}
         parser.set_defaults(**yaml_config)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    if args.images_path is None:
+        parser.error("the following arguments are required: --images_path")
+
+    return args

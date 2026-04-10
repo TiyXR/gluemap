@@ -127,7 +127,7 @@ class MultiSequencePairs(DemoBaseDataset):
         
         # TODO: add subsampling logic here if necessary
         if os.path.exists(descriptors_path):
-            descriptors_db = torch.load(descriptors_path)
+            descriptors_db = torch.load(descriptors_path, weights_only=False)
         else:
             descriptors_db = None
 

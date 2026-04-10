@@ -97,7 +97,7 @@ class BaseTwoViewDataset(DemoBaseDataset):
         logger.info(f"Number of neighbors for retrieval: {args.num_neighbors}")
 
         if os.path.exists(descriptors_path) and len(self.images_list) > args.num_neighbors:
-            descriptors_db = torch.load(descriptors_path)
+            descriptors_db = torch.load(descriptors_path, weights_only=False)
             # find the corresponding images and only keep the short list
             image_indexes = [
                 img_list.index(os.path.join(args.images_path, img))

@@ -81,7 +81,7 @@ class NameListPairs(DemoBaseTwoViewDataset):
         logger.info(f"Number of neighbors for retrieval: {args.num_neighbors}")
 
         if os.path.exists(descriptors_path):
-            descriptors_db = torch.load(descriptors_path)
+            descriptors_db = torch.load(descriptors_path, weights_only=False)
             # find the corresponding images and only keep the short list
             image_indexes = [
                 img_list.index(os.path.join(args.image_ori_path, img))
@@ -363,7 +363,7 @@ class NameListPairs(DemoBaseTwoViewDataset):
             )
             dir_write = os.path.join(args.processed_path, prefix, dataset)
             desctriptors_all.append(
-                torch.load(os.path.join(dir_write, "salad_descriptors.pt"))
+                torch.load(os.path.join(dir_write, "salad_descriptors.pt"), weights_only=False)
             )
             neighbors = establish_neighbors_rig_plain(
                 images_list_short, num_neighbors=args.num_neighbors

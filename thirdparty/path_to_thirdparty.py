@@ -5,8 +5,9 @@ HERE_PATH = path.normpath(path.dirname(__file__))
 
 SUBMODULES = {
     'pi3': path.join('pi3', 'pi3', 'models'),
-    'salad': path.join('salad', 'vpr_model.py'),
     'doppelgangers-plusplus': path.join('doppelgangers-plusplus', 'mast3r'),
+    path.join('doppelgangers-plusplus', 'dust3r'): path.join('doppelgangers-plusplus', 'dust3r', 'dust3r'),
+    path.join('doppelgangers-plusplus', 'dust3r', 'croco'): path.join('doppelgangers-plusplus', 'dust3r', 'croco', 'models'),
     'vggt': path.join('vggt', 'vggt', 'models'),
     'mapanything': path.join('mapanything', 'mapanything', 'models'),
 }

@@ -25,7 +25,7 @@ class SequentialTwoViewDataset(BaseTwoViewDataset):
         descriptors_path = os.path.join(args.curr_processed, "salad_descriptors.pt")
 
         if os.path.exists(descriptors_path):
-            descriptors_db = torch.load(descriptors_path)
+            descriptors_db = torch.load(descriptors_path, weights_only=False)
             # find the corresponding images and only keep the short list
             image_indexes = [
                 img_list.index(os.path.join(args.images_path, img))
