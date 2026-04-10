@@ -14,7 +14,7 @@ from gluemap.controllers.pipeline_wrapper import run_star_inference
 from gluemap.controllers.global_merger import GlobalGluer
 from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipeline
 from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
-from gluemap.controllers.track_snapping import refine_tracks_database
+from gluemap.estimators.track_snapping import TrackSnapping
 from gluemap.controllers.restore_imagesize import restore_image_shape
 from gluemap.controllers.results_collection import generate_dataset_from_outputs
 
@@ -257,12 +257,12 @@ class GlueMapPipeline:
         timing["sift_database"] = time.perf_counter() - t0
 
         t0 = time.perf_counter()
-        refine_tracks_database(
+        track_snapping = TrackSnapping(snapping_thres=1.0)
+        track_snapping.main(
             args.curr_path + "/database_sift.db",
             predictions_dict,
             dataset_pair.images_shape_ori,
             dataset_pair.images_list,
-            1,
         )
         timing["track_snapping"] = time.perf_counter() - t0
 
