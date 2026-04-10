@@ -1,49 +1,10 @@
 import argparse
 
 import yaml
-import torch
-
-from gluemap.utils import gpu_utils
-from gluemap.utils.model_loader import load_models
-
-# Re-export pipeline functions for convenience
-from gluemap.controllers.salad_retrieval import (
-    run_preprocessing_pipeline,
-    run_preprocessing_pipeline_multi,
-)
-from gluemap.controllers.gluemap_impl import (
-    run_inference_pipeline,
-    run_postprocessing_pipeline,
-)
-from gluemap.eval.ablations_filtering import (
-    run_ablation_inference_pipeline,
-)
-from gluemap.eval.ablations_backbone import (
-    run_backbone_ablation_pipeline,
-)
-from gluemap.eval.ablations_tracks import (
-    run_track_ablation_pipeline,
-)
-from gluemap.eval.ablations_pure_feedforward import (
-    run_direct_inference_pipeline,
-)
-
-
-def init_distributed(args):
-    """Initialize distributed mode and return rank, world_size, device, and dtype."""
-    gpu_utils.init_distributed_mode(args)
-    rank = gpu_utils.get_rank()
-    world_size = gpu_utils.get_world_size()
-
-    # Dummy load models to get device
-    _, device = load_models(args, keys=set())
-    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
-
-    return rank, world_size, device, dtype
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser("Distributed Demo Pipeline", add_help=False)
+    parser = argparse.ArgumentParser("Distributed Demo Pipeline", add_help=True)
 
     parser.add_argument(
         "--chosen_model",
@@ -137,8 +98,8 @@ def get_args_parser():
         "--valid_pose_threshold",
         default=0.05,
         type=float,
-        help="mininum threshold for valid pose",
-    )  # if have larger than 5% of points that are covisible, then it is valid
+        help="mininum threshold for valid pose. 0.05 means that if larger than 5 percent of points are covisible, it is valid",
+    )
 
     parser.add_argument(
         "--num_workers", default=4, type=int, help="number of workers for data loading"

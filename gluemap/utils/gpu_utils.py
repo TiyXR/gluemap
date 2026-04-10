@@ -6,6 +6,8 @@ import pickle
 import shutil
 from typing import Any
 
+from gluemap.utils.model_loader import load_models
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,3 +139,16 @@ def synchronize() -> None:  # pragma: no cover
     # TODO: here, multi GPU is not supported
     # dist.barrier(group=dist.group.WORLD, device_ids=[get_rank()])
     dist.barrier()
+
+
+def init_distributed(args):
+    """Initialize distributed mode and return rank, world_size, device, and dtype."""
+    init_distributed_mode(args)
+    rank = get_rank()
+    world_size = get_world_size()
+
+    # Dummy load models to get device
+    _, device = load_models(args, keys=set())
+    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
+
+    return rank, world_size, device, dtype
