@@ -11,15 +11,13 @@ from gluemap.estimators.similarity_averaging import (
 )
 from gluemap.estimators.bundle_adjustment import bundle_adjustment
 from gluemap.controllers.bundle_adjustment import initialize_world_points
-from gluemap.estimators.establish_tracks import (
+from gluemap.estimators.track_establishment import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
 
-from gluemap.utils.misc import (
-    get_tracks_dict_indexes,
-    restore_identity,
-)
+from gluemap.utils.misc import get_tracks_dict_indexes
+from gluemap.math.geometry import restore_identity
 from gluemap.math.mst_initialization import initialize_mst_structures
 
 import logging

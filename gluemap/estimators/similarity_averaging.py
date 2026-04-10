@@ -6,7 +6,7 @@ import torch
 import pygluemap
 import pyceres
 
-from gluemap.estimators.establish_tracks import (
+from gluemap.estimators.track_establishment import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
