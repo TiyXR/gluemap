@@ -18,12 +18,7 @@ from gluemap.estimators.establish_tracks import (
 
 from gluemap.utils.misc import (
     get_tracks_dict_indexes,
-    collect_extrinsics_intrinsics_centered,
     restore_identity,
-)
-from gluemap.math.virtual_tracks import (
-    project_virtual_tracks,
-    subsample_virtual_tracks,
 )
 
 import logging
@@ -65,7 +60,7 @@ class GlobalGluer:
         )
 
         global_rotations, global_centers = self._global_structure_estimation(
-            predictions_dict, intrinsics_mapping, camera_model,
+            predictions_dict,
         )
 
         return (
@@ -218,19 +213,8 @@ class GlobalGluer:
                     valid_edges.add((idx1, idx_inner))
 
     def _global_structure_estimation(
-        self, predictions_dict, intrinsics_mapping, camera_model,
+        self, predictions_dict,
     ):
-        global_intrinsics = self._estimate_intrinsics(
-            predictions_dict, intrinsics_mapping, camera_model
-        )
-
-        self._update_virtual_tracks(
-            predictions_dict, global_intrinsics, intrinsics_mapping
-        )
-        self._subsample_virtual_tracks(
-            predictions_dict, num_desired_tracks=100, min_num=5
-        )
-
         # Double sequential edge weights (neighboring frames with index diff <= 10)
         if self.boost_sequential:
             self._boost_sequential_edges(predictions_dict, boost_factor=5.0)
@@ -339,26 +323,6 @@ class GlobalGluer:
         #     skip_world_points_init=True,  # Already initialized above
         # )
 
-        # Update a subset of virtual tracks to be consistent with the global poses
-        self._update_virtual_tracks_global(
-            predictions_dict,
-            global_intrinsics,
-            global_rotations,
-            global_centers,
-            intrinsics_mapping,
-        )
-
-        # Count the total number of valid virtual points
-        total_valid_virtual_points = 0
-        indexes = get_tracks_dict_indexes(predictions_dict)
-        for idx in indexes:
-            total_valid_virtual_points += (
-                predictions_dict["valid_virtual"][idx].sum().item()
-            )
-        logger.info(
-            f"Total number of valid virtual points after global positioning: {total_valid_virtual_points}"
-        )
-
         return global_rotations, global_centers
 
     def _estimate_intrinsics(self, predictions_dict, intrinsics_mapping, camera_model):
@@ -371,136 +335,6 @@ class GlobalGluer:
         )
 
         return global_intrinsics
-
-    def _update_virtual_tracks(
-        self, predictions_dict, global_intrinsics, intrinsics_mapping
-    ):
-        # Update the virtual tracks
-        indexes = get_tracks_dict_indexes(predictions_dict)
-        if "isnegative_virtual" not in predictions_dict:
-            predictions_dict["isnegative_virtual"] = {}
-
-        for idx in indexes:
-            intrinsics = (
-                torch.stack(
-                    [
-                        global_intrinsics[intrinsics_mapping[idx_inner]]
-                        for idx_inner in predictions_dict["indexes"][idx]
-                    ],
-                    dim=1,
-                )
-                .cpu()
-                .to(torch.float64)
-            )
-            extrinsics = predictions_dict["extrinsics"][idx].cpu().to(torch.float64)
-            (
-                predictions_dict["tracks_virtual"][idx],
-                _,
-                predictions_dict["valid_virtual"][idx],
-                predictions_dict["isnegative_virtual"][idx],
-            ) = project_virtual_tracks(
-                predictions_dict["points3d_virtual"][idx].to(torch.float64),
-                extrinsics,
-                intrinsics,
-                angle_threshold=self.angle_threshold,
-            )
-
-    def _update_virtual_tracks_global(
-        self,
-        predictions_dict,
-        global_intrinsics,
-        global_rotations,
-        global_centers,
-        intrinsics_mapping,
-        update_ratio=0.1,
-    ):
-        # Update the virtual tracks
-        indexes = get_tracks_dict_indexes(predictions_dict)
-        if "isnegative_virtual" not in predictions_dict:
-            predictions_dict["isnegative_virtual"] = {}
-
-        counter = 0
-        for idx in indexes:
-            extrinsics, intrinsics = collect_extrinsics_intrinsics_centered(
-                global_rotations,
-                global_centers,
-                global_intrinsics,
-                intrinsics_mapping,
-                predictions_dict["indexes"][idx],
-            )
-            num_virtual_points = predictions_dict["points3d_virtual"][idx].shape[-2]
-            num_tracks_chosen = int(num_virtual_points * update_ratio)
-
-            (
-                predictions_dict["tracks_virtual"][idx][..., :num_tracks_chosen, :],
-                _,
-                predictions_dict["valid_virtual"][idx][..., :num_tracks_chosen],
-                predictions_dict["isnegative_virtual"][idx][..., :num_tracks_chosen],
-            ) = project_virtual_tracks(
-                predictions_dict["points3d_virtual"][idx][:, :num_tracks_chosen].to(
-                    torch.float64
-                ),
-                extrinsics,
-                intrinsics,
-                angle_threshold=self.angle_threshold,
-            )
-
-            if "pose_inconsistent" in predictions_dict:
-                # update the rest of the virtual if the edge is inconsistent
-                invalid_idx = predictions_dict["pose_inconsistent"][idx]
-                invalid_idx = invalid_idx
-                tracks_insufficient = (
-                    predictions_dict["scores"][idx].sum(dim=-1)[0] < num_virtual_points
-                )
-                if not invalid_idx.any():
-                    continue
-                predictions_dict["valid_virtual"][idx][
-                    :, invalid_idx, num_tracks_chosen:
-                ] = 0
-
-                invalid_idx = invalid_idx * tracks_insufficient
-                if not invalid_idx.any():
-                    continue
-
-                (
-                    predictions_dict["tracks_virtual"][idx][
-                        :, invalid_idx, : 2 * num_tracks_chosen, :
-                    ],
-                    _,
-                    predictions_dict["valid_virtual"][idx][
-                        :, invalid_idx, : 2 * num_tracks_chosen
-                    ],
-                    predictions_dict["isnegative_virtual"][idx][
-                        :, invalid_idx, : 2 * num_tracks_chosen
-                    ],
-                ) = project_virtual_tracks(
-                    predictions_dict["points3d_virtual"][idx][
-                        :, : 2 * num_tracks_chosen
-                    ].to(torch.float64),
-                    extrinsics[:, invalid_idx, : 2 * num_tracks_chosen],
-                    intrinsics[:, invalid_idx, : 2 * num_tracks_chosen],
-                    angle_threshold=self.angle_threshold,
-                )
-
-    def _subsample_virtual_tracks(
-        self, predictions_dict, num_desired_tracks=100, min_num=5
-    ):
-        # subsample the virtual tracks
-        indexes = get_tracks_dict_indexes(predictions_dict)
-        for idx in indexes:
-            (
-                predictions_dict["tracks_virtual"][idx],
-                predictions_dict["points3d_virtual"][idx],
-                predictions_dict["valid_virtual"][idx],
-                predictions_dict["isnegative_virtual"][idx],
-            ) = subsample_virtual_tracks(
-                predictions_dict["tracks_virtual"][idx],
-                predictions_dict["points3d_virtual"][idx],
-                predictions_dict["valid_virtual"][idx],
-                predictions_dict["isnegative_virtual"][idx],
-                sampled_num=num_desired_tracks,
-                min_num=min_num,
-            )
 
     def _prune_invisible_pairs(self, predictions_dict):
         indexes = get_tracks_dict_indexes(predictions_dict)

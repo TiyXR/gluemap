@@ -13,6 +13,7 @@ from gluemap.controllers.twoview_inference import run_twoview_inference
 from gluemap.controllers.pipeline_wrapper import run_star_inference
 from gluemap.controllers.global_merger import GlobalGluer
 from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipeline
+from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
 from gluemap.controllers.track_snapping import refine_tracks_database
 from gluemap.controllers.restore_imagesize import restore_image_shape
 from gluemap.controllers.results_collection import generate_dataset_from_outputs
@@ -201,6 +202,15 @@ class GlueMapPipeline:
                 if cam_id < len(gt_intrinsics) and gt_intrinsics[cam_id] is not None:
                     global_intrinsics[cam_id] = gt_intrinsics[cam_id]
             logger.info(f"Replaced intrinsics with GT from {args.gt_intrinsics_path}")
+
+        virtual_track_preparation = VirtualTrackPreparation()
+        virtual_track_preparation.main(
+            predictions_dict,
+            global_intrinsics,
+            dataset_pair.intrinsics_mapping,
+            global_rotations,
+            global_centers,
+        )
 
         # Write coarse results to COLMAP format
         t0 = time.perf_counter()
