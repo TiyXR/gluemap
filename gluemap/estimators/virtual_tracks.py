@@ -1,9 +1,6 @@
 import torch
 
-from gluemap.math.virtual_tracks import (
-    project_virtual_tracks,
-    subsample_virtual_tracks,
-)
+from gluemap.math.geometry import project_tracks
 from gluemap.utils.misc import (
     get_tracks_dict_indexes,
     collect_extrinsics_intrinsics_centered,
@@ -91,7 +88,7 @@ class VirtualTrackPreparation:
                 _,
                 predictions_dict["valid_virtual"][idx],
                 predictions_dict["isnegative_virtual"][idx],
-            ) = project_virtual_tracks(
+            ) = project_tracks(
                 predictions_dict["points3d_virtual"][idx].to(torch.float64),
                 extrinsics,
                 intrinsics,
@@ -100,19 +97,75 @@ class VirtualTrackPreparation:
 
     def _subsample_virtual_tracks(self, predictions_dict, indexes):
         for idx in indexes:
-            (
-                predictions_dict["tracks_virtual"][idx],
-                predictions_dict["points3d_virtual"][idx],
-                predictions_dict["valid_virtual"][idx],
-                predictions_dict["isnegative_virtual"][idx],
-            ) = subsample_virtual_tracks(
-                predictions_dict["tracks_virtual"][idx],
-                predictions_dict["points3d_virtual"][idx],
-                predictions_dict["valid_virtual"][idx],
-                predictions_dict["isnegative_virtual"][idx],
-                sampled_num=self.num_desired_tracks,
-                min_num=self.min_num,
-            )
+            track_virtual = predictions_dict["tracks_virtual"][idx]
+            sampled_points = predictions_dict["points3d_virtual"][idx]
+            valid_mask = predictions_dict["valid_virtual"][idx]
+            is_negative = predictions_dict["isnegative_virtual"][idx]
+
+            B, N = track_virtual.shape[:2]  # (B, N, K, 2)
+            # First, select min_num valid tracks for each cameras
+            selected_idx_all = []
+            max_selected_num = 0
+            for i in range(B):
+                invalid_index = []
+                selected_idx = set()
+                for view_id in range(1, N):
+                    valid_idx = torch.where(valid_mask[i, view_id])[0]
+                    if len(valid_idx) == 0:
+                        invalid_index.append(view_id)
+                        continue
+                    sample_num = min(self.min_num, len(valid_idx))
+                    rand_columns = torch.randperm(len(valid_idx))[:sample_num]
+
+                    selected_idx = selected_idx.union(set(valid_idx[rand_columns].tolist()))
+
+                max_selected_num = max(max_selected_num, len(selected_idx))
+
+                selected_idx_all.append(selected_idx)
+                if len(invalid_index) > 0:
+                    logger.info(f"{len(invalid_index)} / {N-1} images are not covered")
+
+            selected_idx_all = [list(selected_idx_all[i]) for i in range(B)]
+            max_selected_num = max(max_selected_num, self.num_desired_tracks)
+            for i in range(B):
+                # Then, we sample remaining number of points
+                remaining_num = max_selected_num - len(selected_idx_all[i])
+
+                if remaining_num > 0:
+                    weights = valid_mask[i, 1:].float().sum(dim=0)
+                    # Do not sampled the selected points
+                    weights[list(selected_idx_all[i])] = 0
+
+                    if weights.sum() == 0:
+                        logger.warning("No valid points to sample")
+                        continue
+
+                    selected_idx_all[i] += torch.multinomial(
+                        weights, remaining_num, replacement=False
+                    ).tolist()
+
+            selected_idx_list = (
+                torch.Tensor([list(selected_idx_all[i]) for i in range(B)])
+                .to(track_virtual.device)
+                .long()
+            )  # (B, K')
+
+            predictions_dict["tracks_virtual"][idx] = torch.gather(
+                track_virtual,
+                2,
+                selected_idx_list.unsqueeze(-1).unsqueeze(1).expand(-1, N, -1, 2),
+            )  # (B, N, K', 2)
+            predictions_dict["points3d_virtual"][idx] = torch.gather(
+                sampled_points, 1, selected_idx_list.unsqueeze(-1).expand(-1, -1, 3)
+            )  # (B, K', 3)
+            predictions_dict["valid_virtual"][idx] = torch.gather(
+                valid_mask, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
+            )  # (B, N, K')
+
+            if is_negative is not None:
+                predictions_dict["isnegative_virtual"][idx] = torch.gather(
+                    is_negative, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
+                )  # (B, N, K')
 
     def _update_virtual_tracks_global(
         self,
@@ -142,7 +195,7 @@ class VirtualTrackPreparation:
                 _,
                 predictions_dict["valid_virtual"][idx][..., :num_tracks_chosen],
                 predictions_dict["isnegative_virtual"][idx][..., :num_tracks_chosen],
-            ) = project_virtual_tracks(
+            ) = project_tracks(
                 predictions_dict["points3d_virtual"][idx][:, :num_tracks_chosen].to(
                     torch.float64
                 ),
@@ -177,7 +230,7 @@ class VirtualTrackPreparation:
                     predictions_dict["isnegative_virtual"][idx][
                         :, invalid_idx, : 2 * num_tracks_chosen
                     ],
-                ) = project_virtual_tracks(
+                ) = project_tracks(
                     predictions_dict["points3d_virtual"][idx][
                         :, : 2 * num_tracks_chosen
                     ].to(torch.float64),

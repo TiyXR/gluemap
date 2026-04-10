@@ -1,150 +1,10 @@
 import logging
 import torch
-import numpy as np
 import einops
 
-from gluemap.math.geometry import project, unproject, bilinear_interpolate_value
+from gluemap.math.geometry import project_tracks, unproject, bilinear_interpolate_value
 
 logger = logging.getLogger(__name__)
-
-
-# Note: the coordinates of camera_points should correspond to extrinsics
-def project_virtual_tracks(
-    camera_points,
-    extrinsics,
-    intrinsic,
-    angle_threshold=5,
-):
-    B, N = extrinsics.shape[:2]
-
-    if camera_points.dim() == 3:
-        camera_points = camera_points.unsqueeze(1)
-
-    world_points_j = torch.einsum(
-        "b h w c, b n d c -> b n h w d", camera_points, extrinsics[:, :, :3, :3]
-    ) + extrinsics[:, :, :3, 3].unsqueeze(2).unsqueeze(3)
-
-    image_points_j = project(
-        einops.rearrange(
-            world_points_j.to(torch.float64), "b n h w d -> (b n) (h w) d"
-        ),
-        einops.rearrange(intrinsic.to(torch.float64), "b n d c -> (b n) d c"),
-    ).to(
-        world_points_j.dtype
-    )  # (B*N, H*W, 2)
-
-    # Do not consider points outside the image as invalid. Instead, check the depth of the points, it the angle to the principle point is too large, then we consider it as invalid
-    world_points_j_normalized = world_points_j / torch.clamp(
-        world_points_j.norm(dim=-1, keepdim=True), min=1e-6
-    )
-    invalid_i2j = (
-        world_points_j_normalized[..., 2] < np.sin(np.deg2rad(angle_threshold))
-    ).reshape(
-        B, N, -1
-    )  # (B, N, K)
-    invalid_j2i = (
-        world_points_j_normalized[..., 2] > -np.sin(np.deg2rad(angle_threshold))
-    ).reshape(
-        B, N, -1
-    )  # (B, N, K)
-
-    # Use these poins as the tracks
-    track_virtual = image_points_j.reshape(B, N, -1, 2)  # (B, N, grid_num, 2)
-
-    # Return:
-    # track_virtual: (B, N, K, 2)
-    # tracks_points: (B, K, 3)
-    # valid_mask: (B, N, K)
-    # is_negative: (B, N, K)
-
-    return (
-        track_virtual,
-        camera_points.flatten(1, 2),
-        ~(invalid_i2j * invalid_j2i),
-        ~invalid_j2i,
-    )
-
-
-def subsample_virtual_tracks(
-    track_virtual,
-    sampled_points,
-    valid_mask,
-    is_negative,
-    sampled_num=100,
-    min_num=3,
-):
-    B, N = track_virtual.shape[:2]  # (B, N, K, 2)
-    # First, select min_num valid tracks for each cameras
-    selected_idx_all = []
-    max_selected_num = 0
-    for i in range(B):
-        invalid_index = []
-        selected_idx = set()
-        for view_id in range(1, N):
-            valid_idx = torch.where(valid_mask[i, view_id])[0]
-            if len(valid_idx) == 0:
-                invalid_index.append(view_id)
-                continue
-            sample_num = min(min_num, len(valid_idx))
-            rand_columns = torch.randperm(len(valid_idx))[:sample_num]
-
-            selected_idx = selected_idx.union(set(valid_idx[rand_columns].tolist()))
-
-        max_selected_num = max(max_selected_num, len(selected_idx))
-
-        selected_idx_all.append(selected_idx)
-        if len(invalid_index) > 0:
-            logger.info(f"{len(invalid_index)} / {N-1} images are not covered")
-
-    selected_idx_all = [list(selected_idx_all[i]) for i in range(B)]
-    max_selected_num = max(max_selected_num, sampled_num)
-    track_virtual_selected = []
-    for i in range(B):
-        # Then, we sample remaining number of points
-        remaining_num = max_selected_num - len(selected_idx_all[i])
-
-        if remaining_num > 0:
-            weights = valid_mask[i, 1:].float().sum(dim=0)
-            # Do not sampled the selected points
-            weights[list(selected_idx_all[i])] = 0
-
-            if weights.sum() == 0:
-                logger.warning("No valid points to sample")
-                continue
-
-            selected_idx_all[i] += torch.multinomial(
-                weights, remaining_num, replacement=False
-            ).tolist()
-
-    selected_idx_list = (
-        torch.Tensor([list(selected_idx_all[i]) for i in range(B)])
-        .to(track_virtual.device)
-        .long()
-    )  # (B, K')
-
-    track_virtual_selected = torch.gather(
-        track_virtual,
-        2,
-        selected_idx_list.unsqueeze(-1).unsqueeze(1).expand(-1, N, -1, 2),
-    )  # (B, N, K', 2)
-    sampled_points_selected = torch.gather(
-        sampled_points, 1, selected_idx_list.unsqueeze(-1).expand(-1, -1, 3)
-    )  # (B, K', 3)
-    valid_mask_selected = torch.gather(
-        valid_mask, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
-    )  # (B, N, K')
-
-    if not is_negative is None:
-        is_negative_selected = torch.gather(
-            is_negative, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
-        )  # (B, N, K')
-
-    return (
-        track_virtual_selected,
-        sampled_points_selected,
-        valid_mask_selected,
-        is_negative_selected,
-    )
 
 
 def calculate_virtual_tracks(depth, extrinsics, intrinsic, valid_mask):
@@ -217,7 +77,7 @@ def calculate_virtual_tracks(depth, extrinsics, intrinsic, valid_mask):
 
     camera_points = world_points * sampled_depth  # (B, H // 4, W // 14, 3)
 
-    return project_virtual_tracks(camera_points, extrinsics, intrinsic)
+    return project_tracks(camera_points, extrinsics, intrinsic)
 
 
 def extract_cam_points_depth(intrinsics, prediction):

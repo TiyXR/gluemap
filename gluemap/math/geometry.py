@@ -1,6 +1,8 @@
 from scipy.spatial.transform import Rotation
+import numpy as np
 import torch
 import torch.nn.functional as F
+import einops
 
 # from e2esfm.models.utils import unproject
 
@@ -120,3 +122,60 @@ def unproject(uvs, intrinsics):
     rays = torch.einsum("b t j, b n j -> b n t", intrinsics_inv, uv_homogeneous)
 
     return rays
+
+
+# Note: the coordinates of camera_points should correspond to extrinsics
+def project_tracks(
+    camera_points,
+    extrinsics,
+    intrinsic,
+    angle_threshold=5,
+):
+    B, N = extrinsics.shape[:2]
+
+    if camera_points.dim() == 3:
+        camera_points = camera_points.unsqueeze(1)
+
+    world_points_j = torch.einsum(
+        "b h w c, b n d c -> b n h w d", camera_points, extrinsics[:, :, :3, :3]
+    ) + extrinsics[:, :, :3, 3].unsqueeze(2).unsqueeze(3)
+
+    image_points_j = project(
+        einops.rearrange(
+            world_points_j.to(torch.float64), "b n h w d -> (b n) (h w) d"
+        ),
+        einops.rearrange(intrinsic.to(torch.float64), "b n d c -> (b n) d c"),
+    ).to(
+        world_points_j.dtype
+    )  # (B*N, H*W, 2)
+
+    # Do not consider points outside the image as invalid. Instead, check the depth of the points, it the angle to the principle point is too large, then we consider it as invalid
+    world_points_j_normalized = world_points_j / torch.clamp(
+        world_points_j.norm(dim=-1, keepdim=True), min=1e-6
+    )
+    invalid_i2j = (
+        world_points_j_normalized[..., 2] < np.sin(np.deg2rad(angle_threshold))
+    ).reshape(
+        B, N, -1
+    )  # (B, N, K)
+    invalid_j2i = (
+        world_points_j_normalized[..., 2] > -np.sin(np.deg2rad(angle_threshold))
+    ).reshape(
+        B, N, -1
+    )  # (B, N, K)
+
+    # Use these poins as the tracks
+    track_virtual = image_points_j.reshape(B, N, -1, 2)  # (B, N, grid_num, 2)
+
+    # Return:
+    # track_virtual: (B, N, K, 2)
+    # tracks_points: (B, K, 3)
+    # valid_mask: (B, N, K)
+    # is_negative: (B, N, K)
+
+    return (
+        track_virtual,
+        camera_points.flatten(1, 2),
+        ~(invalid_i2j * invalid_j2i),
+        ~invalid_j2i,
+    )
