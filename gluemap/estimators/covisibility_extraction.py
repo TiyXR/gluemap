@@ -9,7 +9,22 @@ from gluemap.math.geometry import (
     bilinear_interpolate_value,
 )
 from gluemap.math.scaling import rescale_tracks_single
-from gluemap.utils.misc import switch_tensor_order, calculate_index_mappings
+
+
+def calculate_index_mappings(query_index, S, device=None):
+    new_order = torch.arange(S)
+    new_order[0] = query_index
+    new_order[query_index] = 0
+    if device is not None:
+        new_order = new_order.to(device)
+    return new_order
+
+
+def switch_tensor_order(tensors, order, dim=1):
+    return [
+        torch.index_select(tensor, dim, order) if tensor is not None else None
+        for tensor in tensors
+    ]
 
 
 class CovisibilityExtraction:

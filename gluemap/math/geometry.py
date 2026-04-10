@@ -56,6 +56,20 @@ def quaternion_to_rotation_matrix(q, w_first=True):
 #     return indexes
 
 
+def restore_identity(extrinsics):
+    B, N, _, _ = extrinsics.shape
+
+    extrinsics_0 = extrinsics[:, 0:1].clone()
+    extrinsics[:, :, :3, :3] = extrinsics[:, :, :3, :3] @ extrinsics_0[
+        :, :, :3, :3
+    ].transpose(-1, -2).expand(-1, N, -1, -1)
+    extrinsics[:, :, :3, 3:] = extrinsics[:, :, :3, 3:] - extrinsics[
+        :, :, :3, :3
+    ] @ extrinsics_0[:, 0:1, :3, 3:].expand(-1, N, -1, -1)
+
+    return extrinsics
+
+
 def bilinear_interpolate_value(value_map, coords, align_corners=False):
     # Function of sampling N points on each value map with coordinate specified by coords
     # value_map:    B x C x H x W

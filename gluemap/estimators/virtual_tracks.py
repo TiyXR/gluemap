@@ -1,10 +1,8 @@
+import numpy as np
 import torch
 
-from gluemap.math.geometry import project_tracks
-from gluemap.utils.misc import (
-    get_tracks_dict_indexes,
-    collect_extrinsics_intrinsics_centered,
-)
+from gluemap.math.geometry import project_tracks, restore_identity
+from gluemap.utils.misc import get_tracks_dict_indexes
 
 import logging
 logger = logging.getLogger(__name__)
@@ -63,6 +61,33 @@ class VirtualTrackPreparation:
         logger.info(
             f"Total number of valid virtual points after global positioning: {total_valid_virtual_points}"
         )
+
+    def _collect_extrinsics_intrinsics_centered(
+        self, global_rotations, global_centers, global_intrinsics, intrinsics_mapping, indexes
+    ):
+        rotations = torch.from_numpy(
+            np.stack([global_rotations[idx] for idx in indexes])
+        ).unsqueeze(0)
+        translations = torch.from_numpy(
+            np.stack(
+                [
+                    -global_rotations[idx] @ global_centers[idx].reshape(3, 1)
+                    for idx in indexes
+                ]
+            )
+        ).unsqueeze(0)
+
+        extrinsics = torch.cat([rotations, translations], dim=-1)  # (B, N, 3, 4)
+        intrinsics = (
+            torch.stack(
+                [global_intrinsics[intrinsics_mapping[idx]] for idx in indexes], dim=1
+            )
+            .cpu()
+            .to(torch.float64)
+        )
+
+        extrinsics = restore_identity(extrinsics)
+        return extrinsics, intrinsics
 
     def _update_virtual_tracks(
         self, predictions_dict, global_intrinsics, intrinsics_mapping, indexes
@@ -180,7 +205,7 @@ class VirtualTrackPreparation:
             predictions_dict["isnegative_virtual"] = {}
 
         for idx in indexes:
-            extrinsics, intrinsics = collect_extrinsics_intrinsics_centered(
+            extrinsics, intrinsics = self._collect_extrinsics_intrinsics_centered(
                 global_rotations,
                 global_centers,
                 global_intrinsics,
