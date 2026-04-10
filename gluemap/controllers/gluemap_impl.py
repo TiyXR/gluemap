@@ -15,8 +15,9 @@ from gluemap.controllers.global_merger import GlobalGluer
 from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipeline
 from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
 from gluemap.estimators.track_snapping import TrackSnapping
-from gluemap.controllers.restore_imagesize import restore_image_shape
-from gluemap.controllers.results_collection import generate_dataset_from_outputs
+from gluemap.controllers.star_collection import run_star_collection
+from gluemap.utils.misc import get_tracks_dict_indexes
+from gluemap.math.scaling import rescale_tracks, rescale_intrinsics, keep_inframes
 
 from gluemap.estimators.rotation_averaging import collect_relative_rotations_ministar
 
@@ -72,9 +73,7 @@ class GlueMapPipeline:
 
         # Step 2: Generate dataset from outputs
         t0 = time.perf_counter()
-        dataset = generate_dataset_from_outputs(
-            dataset_pair, global_outputs, args, device=device, dtype=dtype
-        )
+        dataset = run_star_collection(dataset_pair, global_outputs, args)
         timing["dataset_generation"] = time.perf_counter() - t0
 
         # Step 3: Star inference
@@ -163,7 +162,7 @@ class GlueMapPipeline:
 
         # Step 4: Global mapping
         t0 = time.perf_counter()
-        restore_image_shape(
+        GlueMapPipeline.restore_image_shape(
             predictions_dict, dataset.images_change, dataset.images_shape_ori
         )
 
@@ -296,6 +295,22 @@ class GlueMapPipeline:
 
         return pred_dir, timing
 
+    @staticmethod
+    def restore_image_shape(predictions_dict, images_change, images_shape_ori, valid_threshold=0.05):
+        index = get_tracks_dict_indexes(predictions_dict)
+        for idx in index:
+            rescale_tracks(predictions_dict, images_change, [idx])
+            keep_inframes(predictions_dict, images_shape_ori, [idx])
+
+            if "intrinsics" in predictions_dict:
+                members = predictions_dict["indexes"][idx]
+                scales_curr = [images_change[members[j]] for j in range(len(members))]
+                intrinscs_curr = [predictions_dict["intrinsics"][idx][:, j] for j in range(len(members))]
+                intrinscs_curr = torch.stack(rescale_intrinsics(intrinscs_curr, scales_curr), dim=1)
+                predictions_dict["intrinsics"][idx] = intrinscs_curr.cpu()
+
+        return predictions_dict
+
 
 # Backward-compatible module-level wrapper functions
 
@@ -322,3 +337,4 @@ def run_postprocessing_pipeline(
     return GlueMapPipeline.run_postprocessing(
         args, predictions_dict, dataset_pair, dataset, pairs=pairs, device_id=device_id
     )
+

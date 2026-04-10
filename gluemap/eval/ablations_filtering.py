@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from gluemap.controllers.twoview_inference import run_twoview_inference
 from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
-from gluemap.controllers.results_collection import generate_dataset_from_outputs
+from gluemap.controllers.star_collection import run_star_collection
 
 
 def run_ablation_inference_pipeline(
@@ -79,9 +79,7 @@ def run_ablation_inference_pipeline(
 
     # Step 2: Generate dataset from outputs
     t0 = time.perf_counter()
-    dataset = generate_dataset_from_outputs(
-        dataset_pair, global_outputs, args, device=device, dtype=dtype
-    )
+    dataset = run_star_collection(dataset_pair, global_outputs, args)
     timing["dataset_generation"] = time.perf_counter() - t0
 
     # Step 3: Star inference

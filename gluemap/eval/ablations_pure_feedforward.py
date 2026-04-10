@@ -8,7 +8,14 @@ from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
-from gluemap.controllers.restore_imagesize import restore_intrinsics
+from gluemap.math.scaling import rescale_intrinsics
+
+
+def restore_intrinsics(intrinsics, images_change, inverse=False):
+    scales_curr = [images_change[j] for j in range(len(images_change))]
+    intrinscs_curr = [intrinsics[:, j] for j in range(len(scales_curr))]
+    intrinscs_curr = torch.stack(rescale_intrinsics(intrinscs_curr, scales_curr, inverse=inverse), dim=1)
+    return intrinscs_curr
 
 
 def _extrinsics_to_global(extrinsics):
