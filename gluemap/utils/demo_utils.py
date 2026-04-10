@@ -37,7 +37,7 @@ def init_distributed(args):
 
     # Dummy load models to get device
     _, device = load_models(args, keys=set())
-    dtype = torch.bfloat16
+    dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
 
     return rank, world_size, device, dtype
 
@@ -220,6 +220,12 @@ def get_args_parser():
         type=str,
         default=None,
         help="path to a YAML configuration file (CLI arguments override YAML values)",
+    )
+
+    parser.add_argument(
+        "--cpu",
+        action="store_true",
+        help="force the entire pipeline to run on CPU (ignores available GPUs)",
     )
 
     return parser

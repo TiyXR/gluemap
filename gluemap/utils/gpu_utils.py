@@ -10,6 +10,12 @@ logger = logging.getLogger(__name__)
 
 
 def init_distributed_mode(args):
+    if getattr(args, "cpu", False):
+        logger.info("Running on CPU (--cpu flag set), distributed mode disabled")
+        setup_for_distributed(is_master=True)
+        args.distributed = False
+        return
+
     nodist = args.nodist if hasattr(args, "nodist") else False
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ and not nodist:
         args.rank = int(os.environ["RANK"])

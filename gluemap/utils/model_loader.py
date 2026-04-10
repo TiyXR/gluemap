@@ -106,7 +106,10 @@ def load_models(args, keys=set()):
             torch.load(args.path_retrieval, map_location="cpu", weights_only=False), strict=False
         )
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if getattr(args, "cpu", False):
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     for model_name, model in models.items():
         model.eval()
