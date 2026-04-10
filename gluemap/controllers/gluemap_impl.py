@@ -10,7 +10,7 @@ from gluemap.utils.prepare_prior import (
 )
 
 from gluemap.controllers.twoview_inference import run_twoview_inference
-from gluemap.controllers.pipeline_wrapper import run_star_inference
+from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.global_merger import GlobalGluer
 from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipeline
 from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
