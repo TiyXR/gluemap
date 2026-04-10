@@ -3,7 +3,7 @@ import os
 import time
 import torch
 
-from gluemap.estimators.local_inference import create_local_inference
+from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)

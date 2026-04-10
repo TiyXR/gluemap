@@ -1,6 +1,6 @@
 import torch
 
-from gluemap.estimators.local_inference import LocalInference
+from gluemap.ff_inference.local_inference import LocalInference
 
 
 class VGGTLocalInference(LocalInference):

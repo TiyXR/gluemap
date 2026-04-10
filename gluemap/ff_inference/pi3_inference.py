@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 from scipy.optimize import least_squares
 
-from gluemap.estimators.local_inference import LocalInference
+from gluemap.ff_inference.local_inference import LocalInference
 
 
 class Pi3LocalInference(LocalInference):
