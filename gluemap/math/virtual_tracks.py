@@ -114,23 +114,3 @@ def extract_cam_points_depth(intrinsics, prediction):
     return pts_interp_cam, conf_interp
 
 
-def extract_world_points_depth(extrinsics, intrinsics, prediction):
-    pts_interp_cam, conf_interp = extract_cam_points_depth(intrinsics, prediction)
-
-    pts_interp = torch.einsum(
-        "b n s d, b n d c -> b n s c",
-        pts_interp_cam - extrinsics[:, :, :3, 3].unsqueeze(2),
-        extrinsics[:, :, :3, :3],
-    )
-
-    return pts_interp, conf_interp
-
-
-def convert_world_points_to_cam_points(extrinsics, cam_points):
-    pts_world = torch.einsum(
-        "b n s d, b n c d -> b n s c",
-        cam_points,
-        extrinsics[:, :, :3, :3],
-    ) + extrinsics[:, :, :3, 3].unsqueeze(2)
-
-    return pts_world
