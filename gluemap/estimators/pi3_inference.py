@@ -5,7 +5,6 @@ from typing import Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-import utils3d
 from scipy.optimize import least_squares
 
 from gluemap.estimators.local_inference import LocalInference
@@ -51,7 +50,13 @@ class Pi3LocalInference(LocalInference):
         cx = original_width // 2
         cy = original_height // 2
 
-        intrinsics = utils3d.torch.intrinsics_from_focal_center(fx, fy, cx, cy)
+        batch_shape = fx.shape
+        intrinsics = torch.zeros(*batch_shape, 3, 3, device=fx.device, dtype=fx.dtype)
+        intrinsics[..., 0, 0] = fx
+        intrinsics[..., 1, 1] = fy
+        intrinsics[..., 0, 2] = cx
+        intrinsics[..., 1, 2] = cy
+        intrinsics[..., 2, 2] = 1.0
 
         result["shift"] = shift
 
