@@ -27,6 +27,8 @@ class BaseStarDataset(DemoBaseDataset):
 
         # Build the keypoint extractor once and reuse it across __getitem__ calls.
         # Moved to the query image's device on first use.
+        # detection_threshold=0.005 matches the det_thres default used in the
+        # original implementation.
         self.query_extractors = [
             ALIKED(
                 max_num_keypoints=self.num_tracks, detection_threshold=0.005
@@ -268,7 +270,6 @@ class BaseStarDataset(DemoBaseDataset):
             query_image,
             self.query_extractors,
             max_query_num=self.num_tracks,
-            sim_score=None,
             strict_num=False,
         )[0]
 
