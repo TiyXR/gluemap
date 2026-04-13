@@ -231,9 +231,12 @@ class TwoViewInferencePipeline:
         batch_times = []
         t_model_load = 0.0
 
-        from gluemap.controllers.pipeline_wrapper import is_stage_cached
+        cache_path = os.path.join(args.curr_path, file_name)
+        if getattr(args, "rerun_from", None) in ("retrieval", "twoview") and os.path.exists(cache_path):
+            os.remove(cache_path)
+            logger.info(f"[rerun_from={args.rerun_from}] Deleted {cache_path}")
 
-        if not is_stage_cached(args, file_name):
+        if not (args.force_load and os.path.exists(cache_path)):
             t0_load = time.perf_counter()
             all_outputs, all_indices, batch_times, _ = self._run_inference(
                 data_loader

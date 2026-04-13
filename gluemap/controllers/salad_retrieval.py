@@ -9,7 +9,6 @@ from gluemap.datasets.utils import get_image_list
 from gluemap.utils.gpu import synchronize
 from gluemap.utils.load_fn import load_and_preprocess_images
 from gluemap.utils.model_loader import load_models
-from gluemap.controllers.pipeline_wrapper import invalidate_cache_from
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,15 @@ class SaladRetrievalPipeline:
         else:
             loaded, self.device = load_models(args, keys={"salad"})
             self.model = loaded["salad"]
+
+    def _maybe_delete_retrieval_cache(self):
+        if getattr(self.args, "rerun_from", None) != "retrieval":
+            return
+        base_path = self.args.curr_processed or self.args.curr_path
+        path = os.path.join(base_path, self.file_name)
+        if os.path.exists(path):
+            os.remove(path)
+            logger.info(f"[rerun_from=retrieval] Deleted {path}")
 
     @torch.no_grad()
     def _compute_descriptors(self):
@@ -81,7 +89,7 @@ class SaladRetrievalPipeline:
                 synchronize()
 
     def run(self):
-        invalidate_cache_from(self.args, getattr(self.args, "rerun_from", None))
+        self._maybe_delete_retrieval_cache()
 
         t0 = time.perf_counter()
         # Model already loaded in __init__
@@ -112,7 +120,7 @@ class SaladRetrievalPipeline:
         for dataset in datasets:
             self.args.images_path = f"{images_path_root}/{dataset}"
             self.args.curr_path = f"{self.args.write_path}/{dataset}"
-            invalidate_cache_from(self.args, getattr(self.args, "rerun_from", None))
+            self._maybe_delete_retrieval_cache()
             t_ds_start = time.perf_counter()
             self._run_retrieval()
             t_ds_end = time.perf_counter()
