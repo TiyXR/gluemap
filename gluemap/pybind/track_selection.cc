@@ -27,14 +27,13 @@ static inline uint64_t CanonicalPairKey(int64_t id1, int64_t id2) {
 //
 // Returns: vector of point3D IDs that should be deleted.
 std::vector<int64_t> SelectTracksToDelete(
-    const std::vector<int64_t>& point3d_ids,
-    const std::vector<int64_t>& track_image_ids,
-    const std::vector<int64_t>& track_pt2d_idxs,
-    const std::vector<int32_t>& track_lengths,
-    const std::unordered_map<int64_t, int>& virtual_point_start,
-    const std::unordered_map<int64_t, int>& sift_count,
-    int min_num_support_abs,
-    const std::string& tracks_to_keep) {
+    const std::vector<int64_t> &point3d_ids,
+    const std::vector<int64_t> &track_image_ids,
+    const std::vector<int64_t> &track_pt2d_idxs,
+    const std::vector<int32_t> &track_lengths,
+    const std::unordered_map<int64_t, int> &virtual_point_start,
+    const std::unordered_map<int64_t, int> &sift_count, int min_num_support_abs,
+    const std::string &tracks_to_keep) {
 
   const int64_t N = (int64_t)point3d_ids.size();
 
@@ -60,13 +59,18 @@ std::vector<int64_t> SelectTracksToDelete(
       const int vp_start =
           (vp_it != virtual_point_start.end()) ? vp_it->second : INT32_MAX;
 
-      if (static_cast<int>(pt2d_idx) >= s_count) is_sift = false;
-      if (static_cast<int>(pt2d_idx) >= vp_start) is_virtual = true;
+      if (static_cast<int>(pt2d_idx) >= s_count)
+        is_sift = false;
+      if (static_cast<int>(pt2d_idx) >= vp_start)
+        is_virtual = true;
     }
 
-    if (is_sift) sift_idxs.push_back(i);
-    else if (is_virtual) virtual_idxs.push_back(i);
-    else prior_idxs.push_back(i);
+    if (is_sift)
+      sift_idxs.push_back(i);
+    else if (is_virtual)
+      virtual_idxs.push_back(i);
+    else
+      prior_idxs.push_back(i);
   }
 
   std::cout << "Track classification: " << sift_idxs.size() << " SIFT, "
@@ -79,7 +83,8 @@ std::vector<int64_t> SelectTracksToDelete(
     const int64_t start = offsets[idx], end = offsets[idx + 1];
     for (int64_t i = start; i < end; ++i) {
       for (int64_t j = i + 1; j < end; ++j) {
-        pair_count[CanonicalPairKey(track_image_ids[i], track_image_ids[j])] += 1;
+        pair_count[CanonicalPairKey(track_image_ids[i], track_image_ids[j])] +=
+            1;
       }
     }
   }
@@ -97,15 +102,18 @@ std::vector<int64_t> SelectTracksToDelete(
 
   struct Pass {
     bool is_virtual;
-    std::vector<int64_t>& idx_list;
+    std::vector<int64_t> &idx_list;
     bool do_pass;
   };
-  Pass passes[] = {{false, prior_idxs, do_prior}, {true, virtual_idxs, do_virtual}};
+  Pass passes[] = {{false, prior_idxs, do_prior},
+                   {true, virtual_idxs, do_virtual}};
 
-  for (auto& pass : passes) {
+  for (auto &pass : passes) {
     if (pass.do_pass) {
-      if (pass.is_virtual) num_virtual_selected += pass.idx_list.size();
-      else num_prior_selected += pass.idx_list.size();
+      if (pass.is_virtual)
+        num_virtual_selected += pass.idx_list.size();
+      else
+        num_prior_selected += pass.idx_list.size();
       continue;
     }
 
@@ -115,9 +123,11 @@ std::vector<int64_t> SelectTracksToDelete(
       bool hit = false;
       for (int64_t i = start; i < end && !hit; ++i) {
         for (int64_t j = i + 1; j < end; ++j) {
-          const auto key = CanonicalPairKey(track_image_ids[i], track_image_ids[j]);
+          const auto key =
+              CanonicalPairKey(track_image_ids[i], track_image_ids[j]);
           const auto it = pair_count.find(key);
-          if ((it != pair_count.end() ? it->second : 0) <= min_num_support_abs) {
+          if ((it != pair_count.end() ? it->second : 0) <=
+              min_num_support_abs) {
             hit = true;
             break;
           }
@@ -125,11 +135,14 @@ std::vector<int64_t> SelectTracksToDelete(
       }
 
       if (hit) {
-        if (pass.is_virtual) num_virtual_selected++;
-        else num_prior_selected++;
+        if (pass.is_virtual)
+          num_virtual_selected++;
+        else
+          num_prior_selected++;
         for (int64_t i = start; i < end; ++i) {
           for (int64_t j = i + 1; j < end; ++j) {
-            pair_count[CanonicalPairKey(track_image_ids[i], track_image_ids[j])] += 1;
+            pair_count[CanonicalPairKey(track_image_ids[i],
+                                        track_image_ids[j])] += 1;
           }
         }
       } else {
@@ -152,21 +165,24 @@ py::array_t<int64_t> ComputeTracksToDeleteWrapper(
     py::array_t<int64_t, py::array::c_style> track_image_ids,
     py::array_t<int64_t, py::array::c_style> track_pt2d_idxs,
     py::array_t<int32_t, py::array::c_style> track_lengths,
-    const std::unordered_map<int64_t, int>& virtual_point_start,
-    const std::unordered_map<int64_t, int>& sift_count,
-    int min_num_support_abs,
-    const std::string& tracks_to_keep) {
+    const std::unordered_map<int64_t, int> &virtual_point_start,
+    const std::unordered_map<int64_t, int> &sift_count, int min_num_support_abs,
+    const std::string &tracks_to_keep) {
 
   // numpy → vector (pointer-range constructor, no element-wise copy)
-  std::vector<int64_t> ids_vec(point3d_ids.data(), point3d_ids.data() + point3d_ids.size());
-  std::vector<int64_t> img_ids_vec(track_image_ids.data(), track_image_ids.data() + track_image_ids.size());
-  std::vector<int64_t> pt2d_vec(track_pt2d_idxs.data(), track_pt2d_idxs.data() + track_pt2d_idxs.size());
-  std::vector<int32_t> lens_vec(track_lengths.data(), track_lengths.data() + track_lengths.size());
+  std::vector<int64_t> ids_vec(point3d_ids.data(),
+                               point3d_ids.data() + point3d_ids.size());
+  std::vector<int64_t> img_ids_vec(
+      track_image_ids.data(), track_image_ids.data() + track_image_ids.size());
+  std::vector<int64_t> pt2d_vec(
+      track_pt2d_idxs.data(), track_pt2d_idxs.data() + track_pt2d_idxs.size());
+  std::vector<int32_t> lens_vec(track_lengths.data(),
+                                track_lengths.data() + track_lengths.size());
 
   // call core
   std::vector<int64_t> to_delete = SelectTracksToDelete(
-      ids_vec, img_ids_vec, pt2d_vec, lens_vec,
-      virtual_point_start, sift_count, min_num_support_abs, tracks_to_keep);
+      ids_vec, img_ids_vec, pt2d_vec, lens_vec, virtual_point_start, sift_count,
+      min_num_support_abs, tracks_to_keep);
 
   return VecToArray1D(std::move(to_delete));
 }

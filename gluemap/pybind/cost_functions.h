@@ -1,6 +1,6 @@
-#include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <ceres/ceres.h>
 #include <ceres/rotation.h>
 
 #include "vendor/colmap/estimators/cost_functions/reprojection_error.h"
@@ -11,15 +11,14 @@
 // ----------------------------------------
 // Computes the geodesic error between rotation quaternions.
 struct RotationGeodesicError
-    : public colmap::AutoDiffCostFunctor<RotationGeodesicError, 3, 4, 4>
-{
+    : public colmap::AutoDiffCostFunctor<RotationGeodesicError, 3, 4, 4> {
 public:
   explicit RotationGeodesicError(const Eigen::Vector4d &j_q_i)
       : j_q_i_(j_q_i) {}
 
   template <typename T>
-  bool operator()(const T *const i_q_w, const T *const j_q_w, T *residuals_ptr) const
-  {
+  bool operator()(const T *const i_q_w, const T *const j_q_w,
+                  T *residuals_ptr) const {
     const T w_q_j[4] = {j_q_w[0], -j_q_w[1], -j_q_w[2], -j_q_w[3]};
 
     T tmp_i_q_j[4];
@@ -44,17 +43,14 @@ private:
 // Computes the error between a translation direction and the direction formed
 // from two positions such that t_ij - scale * (c_j - c_i) is minimized.
 struct BATAPairwiseDirectionError
-    : public colmap::AutoDiffCostFunctor<BATAPairwiseDirectionError, 3, 3, 3, 1>
-{
+    : public colmap::AutoDiffCostFunctor<BATAPairwiseDirectionError, 3, 3, 3,
+                                         1> {
   BATAPairwiseDirectionError(const Eigen::Vector3d &translation_obs)
       : translation_obs_(translation_obs) {}
 
   template <typename T>
-  bool operator()(const T *position1,
-                  const T *position2,
-                  const T *scale,
-                  T *residuals) const
-  {
+  bool operator()(const T *position1, const T *position2, const T *scale,
+                  T *residuals) const {
     Eigen::Map<Eigen::Matrix<T, 3, 1>> residuals_vec(residuals);
     residuals_vec =
         translation_obs_.cast<T>() -
@@ -74,22 +70,18 @@ private:
 // translation instead of the position difference:
 //   scale * t_ij - (c_j - c_i)
 struct ScaledObsPairwiseDirectionError
-    : public colmap::AutoDiffCostFunctor<ScaledObsPairwiseDirectionError, 3, 3, 3, 1>
-{
+    : public colmap::AutoDiffCostFunctor<ScaledObsPairwiseDirectionError, 3, 3,
+                                         3, 1> {
   ScaledObsPairwiseDirectionError(const Eigen::Vector3d &translation_obs)
       : translation_obs_(translation_obs) {}
 
   template <typename T>
-  bool operator()(const T *position1,
-                  const T *position2,
-                  const T *scale,
-                  T *residuals) const
-  {
+  bool operator()(const T *position1, const T *position2, const T *scale,
+                  T *residuals) const {
     Eigen::Map<Eigen::Matrix<T, 3, 1>> residuals_vec(residuals);
-    residuals_vec =
-        scale[0] * translation_obs_.cast<T>() -
-        (Eigen::Map<const Eigen::Matrix<T, 3, 1>>(position2) -
-         Eigen::Map<const Eigen::Matrix<T, 3, 1>>(position1));
+    residuals_vec = scale[0] * translation_obs_.cast<T>() -
+                    (Eigen::Map<const Eigen::Matrix<T, 3, 1>>(position2) -
+                     Eigen::Map<const Eigen::Matrix<T, 3, 1>>(position1));
     return true;
   }
 
@@ -105,22 +97,17 @@ private:
 // This version handles negative depth (points behind camera).
 template <typename CameraModel>
 class ReprojErrorCostWithNegativeDepthFunctor
-    : public colmap::AutoDiffCostFunctor<ReprojErrorCostWithNegativeDepthFunctor<CameraModel>,
-                                         2,
-                                         3,
-                                         7,
-                                         CameraModel::num_params>
-{
+    : public colmap::AutoDiffCostFunctor<
+          ReprojErrorCostWithNegativeDepthFunctor<CameraModel>, 2, 3, 7,
+          CameraModel::num_params> {
 public:
-  explicit ReprojErrorCostWithNegativeDepthFunctor(const Eigen::Vector2d &point2D)
+  explicit ReprojErrorCostWithNegativeDepthFunctor(
+      const Eigen::Vector2d &point2D)
       : point2D_(point2D) {}
 
   template <typename T>
-  bool operator()(const T *const point3D,
-                  const T *const cam_from_world,
-                  const T *const camera_params,
-                  T *residuals) const
-  {
+  bool operator()(const T *const point3D, const T *const cam_from_world,
+                  const T *const camera_params, T *residuals) const {
     Eigen::Matrix<T, 3, 1> point3D_in_cam =
         colmap::EigenQuaternionMap<T>(cam_from_world) *
             colmap::EigenVector3Map<T>(point3D) +
@@ -129,17 +116,11 @@ public:
 
     // Always negate the point for negative depth projection
     point3D_in_cam = -point3D_in_cam;
-    if (CameraModel::ImgFromCam(camera_params,
-                                point3D_in_cam[0],
-                                point3D_in_cam[1],
-                                point3D_in_cam[2],
-                                &residuals[0],
-                                &residuals[1]))
-    {
+    if (CameraModel::ImgFromCam(camera_params, point3D_in_cam[0],
+                                point3D_in_cam[1], point3D_in_cam[2],
+                                &residuals[0], &residuals[1])) {
       residuals_vec -= point2D_.cast<T>();
-    }
-    else
-    {
+    } else {
       residuals_vec.setZero();
     }
     return true;
