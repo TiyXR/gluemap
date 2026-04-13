@@ -5,26 +5,18 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from functools import partial
-from torch import nn, einsum
-from einops import rearrange, repeat
-from einops.layers.torch import Rearrange, Reduce
 
-from hydra.utils import instantiate
-from omegaconf import OmegaConf
-
-from .track_modules.track_refine import refine_track
-from .track_modules.blocks import BasicEncoder, ShallowEncoder
 from .track_modules.base_track_predictor import BaseTrackerPredictor
+from .track_modules.blocks import BasicEncoder, ShallowEncoder
+from .track_modules.track_refine import refine_track
 
 
 class TrackerPredictor(nn.Module):
     def __init__(self, **extra_args):
-        super(TrackerPredictor, self).__init__()
+        super().__init__()
         """
         Initializes the tracker predictor.
 
@@ -56,7 +48,14 @@ class TrackerPredictor(nn.Module):
         )
 
     def forward(
-        self, images, query_points, fmaps=None, coarse_iters=6, inference=True, fine_tracking=True, fine_chunk=40960
+        self,
+        images,
+        query_points,
+        fmaps=None,
+        coarse_iters=6,
+        inference=True,
+        fine_tracking=True,
+        fine_chunk=40960,
     ):
         """
         Args:
@@ -73,16 +72,23 @@ class TrackerPredictor(nn.Module):
 
         if fmaps is None:
             batch_num, frame_num, image_dim, height, width = images.shape
-            reshaped_image = images.reshape(batch_num * frame_num, image_dim, height, width)
+            reshaped_image = images.reshape(
+                batch_num * frame_num, image_dim, height, width
+            )
             fmaps = self.process_images_to_fmaps(reshaped_image)
-            fmaps = fmaps.reshape(batch_num, frame_num, -1, fmaps.shape[-2], fmaps.shape[-1])
+            fmaps = fmaps.reshape(
+                batch_num, frame_num, -1, fmaps.shape[-2], fmaps.shape[-1]
+            )
 
             if inference:
                 torch.cuda.empty_cache()
 
         # Coarse prediction
         coarse_pred_track_lists, pred_vis = self.coarse_predictor(
-            query_points=query_points, fmaps=fmaps, iters=coarse_iters, down_ratio=self.coarse_down_ratio
+            query_points=query_points,
+            fmaps=fmaps,
+            iters=coarse_iters,
+            down_ratio=self.coarse_down_ratio,
         )
         coarse_pred_track = coarse_pred_track_lists[-1]
 
@@ -92,7 +98,12 @@ class TrackerPredictor(nn.Module):
         if fine_tracking:
             # Refine the coarse prediction
             fine_pred_track, pred_score = refine_track(
-                images, self.fine_fnet, self.fine_predictor, coarse_pred_track, compute_score=True, chunk=fine_chunk
+                images,
+                self.fine_fnet,
+                self.fine_predictor,
+                coarse_pred_track,
+                compute_score=True,
+                chunk=fine_chunk,
             )
 
             if inference:
@@ -116,7 +127,12 @@ class TrackerPredictor(nn.Module):
         if self.coarse_down_ratio > 1:
             # whether or not scale down the input images to save memory
             fmaps = self.coarse_fnet(
-                F.interpolate(images, scale_factor=1 / self.coarse_down_ratio, mode="bilinear", align_corners=True)
+                F.interpolate(
+                    images,
+                    scale_factor=1 / self.coarse_down_ratio,
+                    mode="bilinear",
+                    align_corners=True,
+                )
             )
         else:
             fmaps = self.coarse_fnet(images)

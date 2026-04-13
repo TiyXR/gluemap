@@ -8,15 +8,14 @@
 # and https://github.com/facebookresearch/co-tracker/tree/main
 
 
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 
-from typing import Optional, Tuple, Union
-from einops import rearrange, repeat
 
-
-def get_2d_sincos_pos_embed(embed_dim: int, grid_size: Union[int, Tuple[int, int]], return_grid=False) -> torch.Tensor:
+def get_2d_sincos_pos_embed(
+    embed_dim: int, grid_size: int | tuple[int, int], return_grid=False
+) -> torch.Tensor:
     """
     This function initializes a grid and generates a 2D positional embedding using sine and cosine functions.
     It is a wrapper of get_2d_sincos_pos_embed_from_grid.
@@ -37,11 +36,20 @@ def get_2d_sincos_pos_embed(embed_dim: int, grid_size: Union[int, Tuple[int, int
     grid = grid.reshape([2, 1, grid_size_h, grid_size_w])
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     if return_grid:
-        return (pos_embed.reshape(1, grid_size_h, grid_size_w, -1).permute(0, 3, 1, 2), grid)
-    return pos_embed.reshape(1, grid_size_h, grid_size_w, -1).permute(0, 3, 1, 2)
+        return (
+            pos_embed.reshape(1, grid_size_h, grid_size_w, -1).permute(
+                0, 3, 1, 2
+            ),
+            grid,
+        )
+    return pos_embed.reshape(1, grid_size_h, grid_size_w, -1).permute(
+        0, 3, 1, 2
+    )
 
 
-def get_2d_sincos_pos_embed_from_grid(embed_dim: int, grid: torch.Tensor) -> torch.Tensor:
+def get_2d_sincos_pos_embed_from_grid(
+    embed_dim: int, grid: torch.Tensor
+) -> torch.Tensor:
     """
     This function generates a 2D positional embedding from a given grid using sine and cosine functions.
 
@@ -55,14 +63,20 @@ def get_2d_sincos_pos_embed_from_grid(embed_dim: int, grid: torch.Tensor) -> tor
     assert embed_dim % 2 == 0
 
     # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+    emb_h = get_1d_sincos_pos_embed_from_grid(
+        embed_dim // 2, grid[0]
+    )  # (H*W, D/2)
+    emb_w = get_1d_sincos_pos_embed_from_grid(
+        embed_dim // 2, grid[1]
+    )  # (H*W, D/2)
 
     emb = torch.cat([emb_h, emb_w], dim=2)  # (H*W, D)
     return emb
 
 
-def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: torch.Tensor) -> torch.Tensor:
+def get_1d_sincos_pos_embed_from_grid(
+    embed_dim: int, pos: torch.Tensor
+) -> torch.Tensor:
     """
     This function generates a 1D positional embedding from a given grid using sine and cosine functions.
 
@@ -88,7 +102,9 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim: int, pos: torch.Tensor) -> torc
     return emb[None].float()
 
 
-def get_2d_embedding(xy: torch.Tensor, C: int, cat_coords: bool = True) -> torch.Tensor:
+def get_2d_embedding(
+    xy: torch.Tensor, C: int, cat_coords: bool = True
+) -> torch.Tensor:
     """
     This function generates a 2D positional embedding from given coordinates using sine and cosine functions.
 
@@ -105,7 +121,10 @@ def get_2d_embedding(xy: torch.Tensor, C: int, cat_coords: bool = True) -> torch
 
     x = xy[:, :, 0:1]
     y = xy[:, :, 1:2]
-    div_term = (torch.arange(0, C, 2, device=xy.device, dtype=torch.float32) * (1000.0 / C)).reshape(1, 1, int(C / 2))
+    div_term = (
+        torch.arange(0, C, 2, device=xy.device, dtype=torch.float32)
+        * (1000.0 / C)
+    ).reshape(1, 1, int(C / 2))
 
     pe_x = torch.zeros(B, N, C, device=xy.device, dtype=torch.float32)
     pe_y = torch.zeros(B, N, C, device=xy.device, dtype=torch.float32)
@@ -174,13 +193,20 @@ def bilinear_sampler(input, coords, align_corners=True, padding_mode="border"):
         coords = coords[..., [1, 2, 0]]
 
     if align_corners:
-        coords = coords * torch.tensor([2 / max(size - 1, 1) for size in reversed(sizes)], device=coords.device)
+        coords = coords * torch.tensor(
+            [2 / max(size - 1, 1) for size in reversed(sizes)],
+            device=coords.device,
+        )
     else:
-        coords = coords * torch.tensor([2 / size for size in reversed(sizes)], device=coords.device)
+        coords = coords * torch.tensor(
+            [2 / size for size in reversed(sizes)], device=coords.device
+        )
 
     coords -= 1
 
-    return F.grid_sample(input, coords, align_corners=align_corners, padding_mode=padding_mode)
+    return F.grid_sample(
+        input, coords, align_corners=align_corners, padding_mode=padding_mode
+    )
 
 
 def sample_features4d(input, coords):
@@ -213,4 +239,6 @@ def sample_features4d(input, coords):
     # B C R 1
     feats = bilinear_sampler(input, coords)
 
-    return feats.permute(0, 2, 1, 3).view(B, -1, feats.shape[1] * feats.shape[3])  # B C R 1 -> B R C
+    return feats.permute(0, 2, 1, 3).view(
+        B, -1, feats.shape[1] * feats.shape[3]
+    )  # B C R 1 -> B R C

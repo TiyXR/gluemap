@@ -5,22 +5,21 @@
 # LICENSE file in the root directory of this source tree.
 
 
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from functools import partial
-from torch import nn, einsum
-from einops import rearrange, repeat
-from einops.layers.torch import Rearrange, Reduce
 
-from PIL import Image
-import os
-from typing import Union, Tuple
+import torch
+from einops import rearrange
 
 
 def refine_track(
-    images, fine_fnet, fine_tracker, coarse_pred, compute_score=False, pradius=15, sradius=2, fine_iters=6, chunk=40960
+    images,
+    fine_fnet,
+    fine_tracker,
+    coarse_pred,
+    compute_score=False,
+    pradius=15,
+    sradius=2,
+    fine_iters=6,
+    chunk=40960,
 ):
     """
     Refines the tracking of images using a fine track predictor and a fine feature network.
@@ -80,7 +79,9 @@ def refine_track(
         # The shape changes from
         # (B*S)x C_in x H x W to (B*S)x C_in x H_new x W_new x Psize x Psize
         # where Psize is the size of patch
-        content_to_extract = content_to_extract.unfold(2, psize, 1).unfold(3, psize, 1)
+        content_to_extract = content_to_extract.unfold(2, psize, 1).unfold(
+            3, psize, 1
+        )
 
     # Floor the coarse predictions to get integers and save the fractional/decimal
     track_int = coarse_pred.floor().int()
@@ -101,15 +102,21 @@ def refine_track(
     topleft = topleft.reshape(B * S, N, 2)
 
     # Prepare batches for indexing, shape: (B*S)xN
-    batch_indices = torch.arange(B * S)[:, None].expand(-1, N).to(content_to_extract.device)
+    batch_indices = (
+        torch.arange(B * S)[:, None].expand(-1, N).to(content_to_extract.device)
+    )
 
     # extracted_patches: (B*S) x N x C_in x Psize x Psize
-    extracted_patches = content_to_extract[batch_indices, :, topleft[..., 1], topleft[..., 0]]
+    extracted_patches = content_to_extract[
+        batch_indices, :, topleft[..., 1], topleft[..., 0]
+    ]
 
     if chunk < 0:
         # Extract image patches based on top left corners
         # Feed patches to fine fent for features
-        patch_feat = fine_fnet(extracted_patches.reshape(B * S * N, C_in, psize, psize))
+        patch_feat = fine_fnet(
+            extracted_patches.reshape(B * S * N, C_in, psize, psize)
+        )
     else:
         patches = extracted_patches.reshape(B * S * N, C_in, psize, psize)
 
@@ -135,7 +142,10 @@ def refine_track(
 
     # Feed the PATCH query points and tracks into fine tracker
     fine_pred_track_lists, _, _, query_point_feat = fine_tracker(
-        query_points=patch_query_points, fmaps=patch_feat, iters=fine_iters, return_feat=True
+        query_points=patch_query_points,
+        fmaps=patch_feat,
+        iters=fine_iters,
+        return_feat=True,
     )
 
     # relative the patch top left
@@ -143,7 +153,9 @@ def refine_track(
 
     # From (relative to the patch top left) to (relative to the image top left)
     for idx in range(len(fine_pred_track_lists)):
-        fine_level = rearrange(fine_pred_track_lists[idx], "(b n) s u v -> b s n u v", b=B, n=N)
+        fine_level = rearrange(
+            fine_pred_track_lists[idx], "(b n) s u v -> b s n u v", b=B, n=N
+        )
         fine_level = fine_level.squeeze(-2)
         fine_level = fine_level + topleft_BSN
         fine_pred_track_lists[idx] = fine_level
@@ -155,13 +167,30 @@ def refine_track(
     score = None
 
     if compute_score:
-        score = compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psize, B, N, S, C_out)
+        score = compute_score_fn(
+            query_point_feat,
+            patch_feat,
+            fine_pred_track,
+            sradius,
+            psize,
+            B,
+            N,
+            S,
+            C_out,
+        )
 
     return refined_tracks, score
 
 
 def refine_track_v0(
-    images, fine_fnet, fine_tracker, coarse_pred, compute_score=False, pradius=15, sradius=2, fine_iters=6
+    images,
+    fine_fnet,
+    fine_tracker,
+    coarse_pred,
+    compute_score=False,
+    pradius=15,
+    sradius=2,
+    fine_iters=6,
 ):
     """
     COPIED FROM VGGSfM
@@ -223,7 +252,9 @@ def refine_track_v0(
         # The shape changes from
         # (B*S)x C_in x H x W to (B*S)x C_in x H_new x W_new x Psize x Psize
         # where Psize is the size of patch
-        content_to_extract = content_to_extract.unfold(2, psize, 1).unfold(3, psize, 1)
+        content_to_extract = content_to_extract.unfold(2, psize, 1).unfold(
+            3, psize, 1
+        )
 
     # Floor the coarse predictions to get integers and save the fractional/decimal
     track_int = coarse_pred.floor().int()
@@ -244,14 +275,20 @@ def refine_track_v0(
     topleft = topleft.reshape(B * S, N, 2)
 
     # Prepare batches for indexing, shape: (B*S)xN
-    batch_indices = torch.arange(B * S)[:, None].expand(-1, N).to(content_to_extract.device)
+    batch_indices = (
+        torch.arange(B * S)[:, None].expand(-1, N).to(content_to_extract.device)
+    )
 
     # Extract image patches based on top left corners
     # extracted_patches: (B*S) x N x C_in x Psize x Psize
-    extracted_patches = content_to_extract[batch_indices, :, topleft[..., 1], topleft[..., 0]]
+    extracted_patches = content_to_extract[
+        batch_indices, :, topleft[..., 1], topleft[..., 0]
+    ]
 
     # Feed patches to fine fent for features
-    patch_feat = fine_fnet(extracted_patches.reshape(B * S * N, C_in, psize, psize))
+    patch_feat = fine_fnet(
+        extracted_patches.reshape(B * S * N, C_in, psize, psize)
+    )
 
     C_out = patch_feat.shape[1]
 
@@ -271,7 +308,10 @@ def refine_track_v0(
 
     # Feed the PATCH query points and tracks into fine tracker
     fine_pred_track_lists, _, _, query_point_feat = fine_tracker(
-        query_points=patch_query_points, fmaps=patch_feat, iters=fine_iters, return_feat=True
+        query_points=patch_query_points,
+        fmaps=patch_feat,
+        iters=fine_iters,
+        return_feat=True,
     )
 
     # relative the patch top left
@@ -279,7 +319,9 @@ def refine_track_v0(
 
     # From (relative to the patch top left) to (relative to the image top left)
     for idx in range(len(fine_pred_track_lists)):
-        fine_level = rearrange(fine_pred_track_lists[idx], "(b n) s u v -> b s n u v", b=B, n=N)
+        fine_level = rearrange(
+            fine_pred_track_lists[idx], "(b n) s u v -> b s n u v", b=B, n=N
+        )
         fine_level = fine_level.squeeze(-2)
         fine_level = fine_level + topleft_BSN
         fine_pred_track_lists[idx] = fine_level
@@ -291,7 +333,17 @@ def refine_track_v0(
     score = None
 
     if compute_score:
-        score = compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psize, B, N, S, C_out)
+        score = compute_score_fn(
+            query_point_feat,
+            patch_feat,
+            fine_pred_track,
+            sradius,
+            psize,
+            B,
+            N,
+            S,
+            C_out,
+        )
 
     return refined_tracks, score
 
@@ -299,14 +351,24 @@ def refine_track_v0(
 ################################## NOTE: NOT USED ##################################
 
 
-def compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psize, B, N, S, C_out):
+def compute_score_fn(
+    query_point_feat,
+    patch_feat,
+    fine_pred_track,
+    sradius,
+    psize,
+    B,
+    N,
+    S,
+    C_out,
+):
     """
     Compute the scores, i.e., the standard deviation of the 2D similarity heatmaps,
     given the query point features and reference frame feature maps
     """
 
-    from kornia.utils.grid import create_meshgrid
     from kornia.geometry.subpix import dsnt
+    from kornia.utils.grid import create_meshgrid
 
     # query_point_feat initial shape: B x N x C_out,
     # query_point_feat indicates the feat at the coorponsing query points
@@ -340,8 +402,12 @@ def compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psi
 
     # Prepare the batch indices and xy locations
 
-    batch_indices_score = torch.arange(B)[:, None, None].expand(-1, S, N)  # BxSxN
-    batch_indices_score = batch_indices_score.reshape(-1).to(patch_feat_unfold.device)  # B*S*N
+    batch_indices_score = torch.arange(B)[:, None, None].expand(
+        -1, S, N
+    )  # BxSxN
+    batch_indices_score = batch_indices_score.reshape(-1).to(
+        patch_feat_unfold.device
+    )  # B*S*N
     y_indices = fine_level_floor_topleft[..., 0].flatten()  # Flatten H indices
     x_indices = fine_level_floor_topleft[..., 1].flatten()  # Flatten W indices
 
@@ -351,25 +417,42 @@ def compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psi
 
     # Note again, according to pytorch convention
     # x_indices cooresponds to [..., 1] and y_indices cooresponds to [..., 0]
-    reference_frame_feat = reference_frame_feat[batch_indices_score, :, x_indices, y_indices]
-    reference_frame_feat = reference_frame_feat.reshape(B, S, N, C_out, ssize, ssize)
+    reference_frame_feat = reference_frame_feat[
+        batch_indices_score, :, x_indices, y_indices
+    ]
+    reference_frame_feat = reference_frame_feat.reshape(
+        B, S, N, C_out, ssize, ssize
+    )
     # pick the frames other than the first one, so we have S-1 frames here
-    reference_frame_feat = reference_frame_feat[:, 1:].reshape(B * (S - 1) * N, C_out, ssize * ssize)
+    reference_frame_feat = reference_frame_feat[:, 1:].reshape(
+        B * (S - 1) * N, C_out, ssize * ssize
+    )
 
     # Compute similarity
-    sim_matrix = torch.einsum("mc,mcr->mr", query_point_feat, reference_frame_feat)
+    sim_matrix = torch.einsum(
+        "mc,mcr->mr", query_point_feat, reference_frame_feat
+    )
     softmax_temp = 1.0 / C_out**0.5
     heatmap = torch.softmax(softmax_temp * sim_matrix, dim=1)
     # 2D heatmaps
-    heatmap = heatmap.reshape(B * (S - 1) * N, ssize, ssize)  # * x ssize x ssize
+    heatmap = heatmap.reshape(
+        B * (S - 1) * N, ssize, ssize
+    )  # * x ssize x ssize
 
     coords_normalized = dsnt.spatial_expectation2d(heatmap[None], True)[0]
-    grid_normalized = create_meshgrid(ssize, ssize, normalized_coordinates=True, device=heatmap.device).reshape(
-        1, -1, 2
-    )
+    grid_normalized = create_meshgrid(
+        ssize, ssize, normalized_coordinates=True, device=heatmap.device
+    ).reshape(1, -1, 2)
 
-    var = torch.sum(grid_normalized**2 * heatmap.view(-1, ssize * ssize, 1), dim=1) - coords_normalized**2
-    std = torch.sum(torch.sqrt(torch.clamp(var, min=1e-10)), -1)  # clamp needed for numerical stability
+    var = (
+        torch.sum(
+            grid_normalized**2 * heatmap.view(-1, ssize * ssize, 1), dim=1
+        )
+        - coords_normalized**2
+    )
+    std = torch.sum(
+        torch.sqrt(torch.clamp(var, min=1e-10)), -1
+    )  # clamp needed for numerical stability
 
     score = std.reshape(B, S - 1, N)
     # set score as 1 for the query frame
@@ -379,13 +462,25 @@ def compute_score_fn(query_point_feat, patch_feat, fine_pred_track, sradius, psi
 
 
 def extract_glimpse(
-    tensor: torch.Tensor, size: Tuple[int, int], offsets, mode="bilinear", padding_mode="zeros", debug=False, orib=None
+    tensor: torch.Tensor,
+    size: tuple[int, int],
+    offsets,
+    mode="bilinear",
+    padding_mode="zeros",
+    debug=False,
+    orib=None,
 ):
     B, C, W, H = tensor.shape
 
     h, w = size
-    xs = torch.arange(0, w, dtype=tensor.dtype, device=tensor.device) - (w - 1) / 2.0
-    ys = torch.arange(0, h, dtype=tensor.dtype, device=tensor.device) - (h - 1) / 2.0
+    xs = (
+        torch.arange(0, w, dtype=tensor.dtype, device=tensor.device)
+        - (w - 1) / 2.0
+    )
+    ys = (
+        torch.arange(0, h, dtype=tensor.dtype, device=tensor.device)
+        - (h - 1) / 2.0
+    )
 
     vy, vx = torch.meshgrid(ys, xs)
     grid = torch.stack([vx, vy], dim=-1)  # h, w, 2
@@ -397,7 +492,9 @@ def extract_glimpse(
     offsets_grid = offsets + grid
 
     # normalised grid  to [-1, 1]
-    offsets_grid = (offsets_grid - offsets_grid.new_tensor([W / 2, H / 2])) / offsets_grid.new_tensor([W / 2, H / 2])
+    offsets_grid = (
+        offsets_grid - offsets_grid.new_tensor([W / 2, H / 2])
+    ) / offsets_grid.new_tensor([W / 2, H / 2])
 
     # BxCxHxW -> Bx1xCxHxW
     tensor = tensor[:, None]
@@ -409,7 +506,11 @@ def extract_glimpse(
     tensor = tensor.reshape((B * N), C, W, H)
 
     sampled = torch.nn.functional.grid_sample(
-        tensor, offsets_grid, mode=mode, align_corners=False, padding_mode=padding_mode
+        tensor,
+        offsets_grid,
+        mode=mode,
+        align_corners=False,
+        padding_mode=padding_mode,
     )
 
     # NOTE: I am not sure it should be h, w or w, h here

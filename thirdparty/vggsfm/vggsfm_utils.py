@@ -6,13 +6,8 @@
 
 import logging
 import warnings
-from typing import Dict, List, Optional, Tuple, Union
 
-import numpy as np
-import pycolmap
 import torch
-import torch.nn.functional as F
-from lightglue import ALIKED, SIFT, SuperPoint
 
 from .vggsfm_tracker import TrackerPredictor
 
@@ -183,7 +178,10 @@ def switch_tensor_order(tensors, order, dim=1):
     Returns:
         List of reordered tensors
     """
-    return [torch.index_select(tensor, dim, order) if tensor is not None else None for tensor in tensors]
+    return [
+        torch.index_select(tensor, dim, order) if tensor is not None else None
+        for tensor in tensors
+    ]
 
 
 # def initialize_feature_extractors(max_query_num, det_thres=0.005, extractor_method="aliked", device="cuda"):
