@@ -1,0 +1,6 @@
+checkpoints/
+pybind_build/
+results/
+venv_gluemap/
+
+*.pyc
