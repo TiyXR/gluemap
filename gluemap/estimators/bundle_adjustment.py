@@ -134,7 +134,8 @@ def add_reprojection_error(
 
     return first_camera_id
 
-
+# TODO: leverage pycolmap's built-in CeresBundleAdjuster, and feed in with two reconstruction
+# One with real tracks, and one with virtual tracks.
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     negative_depth_observations,
