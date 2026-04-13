@@ -32,25 +32,6 @@ from gluemap.math.union_find import UnionFind
 from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 
 
-# COLMAP pair ID encoding constant (2^31 - 1)
-_COLMAP_MAX_NUM_IMAGES = 2147483647
-
-
-def _pair_id_to_image_pair(pair_id: int) -> tuple:
-    """
-    Convert a packed pair ID to (image_id1, image_id2).
-
-    Uses pycolmap.pair_id_to_image_pair if available, otherwise
-    manually decodes using COLMAP's encoding: pair_id = id1 * MAX + id2.
-    """
-    if hasattr(pycolmap, 'pair_id_to_image_pair'):
-        return pycolmap.pair_id_to_image_pair(pair_id)
-    # Manual fallback for older pycolmap versions
-    image_id2 = pair_id % _COLMAP_MAX_NUM_IMAGES
-    image_id1 = (pair_id - image_id2) // _COLMAP_MAX_NUM_IMAGES
-    return (image_id1, image_id2)
-
-
 def merge_colmap_databases(
     db_path_primary: str,
     db_path_secondary: str,
@@ -203,7 +184,7 @@ def merge_colmap_databases(
     primary_id_to_name = {img.image_id: name for name, img in primary_images.items()}
     pair_ids_pri, matches_list_pri = db_primary.read_all_matches()
     for pair_id, matches in zip(pair_ids_pri, matches_list_pri):
-        id1, id2 = _pair_id_to_image_pair(pair_id)
+        id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
         if matches is None or len(matches) == 0:
             continue
         name1 = primary_id_to_name.get(id1)
@@ -233,7 +214,7 @@ def merge_colmap_databases(
     secondary_id_to_name = {img.image_id: name for name, img in secondary_images.items()}
     pair_ids_sec, matches_list_sec = db_secondary.read_all_matches()
     for pair_id, matches in zip(pair_ids_sec, matches_list_sec):
-        id1, id2 = _pair_id_to_image_pair(pair_id)
+        id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
         if matches is None or len(matches) == 0:
             continue
         name1 = secondary_id_to_name.get(id1)
@@ -268,7 +249,7 @@ def merge_colmap_databases(
 
     # Read primary geometries
     for pair_id in pair_ids_pri:
-        id1, id2 = _pair_id_to_image_pair(pair_id)
+        id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
         name1 = primary_id_to_name.get(id1)
         name2 = primary_id_to_name.get(id2)
         if name1 is None or name2 is None:
@@ -297,7 +278,7 @@ def merge_colmap_databases(
 
     # Read secondary geometries (with offset)
     for pair_id in pair_ids_sec:
-        id1, id2 = _pair_id_to_image_pair(pair_id)
+        id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
         name1 = secondary_id_to_name.get(id1)
         name2 = secondary_id_to_name.get(id2)
         if name1 is None or name2 is None:
