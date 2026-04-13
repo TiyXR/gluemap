@@ -79,7 +79,6 @@ class TrackEstablishment:
             N=num_images,
             add_tracks=add_tracks,
             add_virtual_points=add_virtual_points,
-            device=device,
             use_1_indexed=False,  # Use 0-indexed to match keypoints_per_image
         )
 
@@ -106,7 +105,6 @@ class TrackEstablishment:
         N,
         add_tracks,
         add_virtual_points,
-        device="cuda",
         use_1_indexed=True,
     ):
         """
@@ -120,7 +118,6 @@ class TrackEstablishment:
             N: Number of images
             add_tracks: Whether to add real tracks
             add_virtual_points: Whether to add virtual points
-            device: CUDA device for tensor operations
             use_1_indexed: If True, correspondences use 1-indexed image IDs (COLMAP style).
                            If False, use 0-indexed image IDs.
 

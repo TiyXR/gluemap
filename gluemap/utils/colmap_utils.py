@@ -458,7 +458,6 @@ def remap_cameras_to_intrinsics(database, images_list, intrinsics_mapping):
     return idx_to_image_id
 
 
-# poses_rel, poses_rel_scores, intrinsics_all, neighbors, tracks_dict
 def prepare_glomap_prior(
     dir_write,
     images_shape_ori,
@@ -474,40 +473,7 @@ def prepare_glomap_prior(
     if not os.path.exists(dir_write):
         os.makedirs(dir_write)
 
-    # Perform intrinsics averaging here
-    indexes = range(len(tracks_dict["indexes"]))
-    members = [tracks_dict["indexes"][idx] for idx in indexes]
-
-    # Write colmap database
-    prepare_database_prior(
-        dir_write,
-        images_shape_ori,
-        tracks_dict,
-        global_intrinsics,
-        intrinsics_mapping,
-        images_list,
-        camera_model=camera_model,
-        add_tracks=add_tracks,
-        add_virtual_points=add_virtual_points,
-        database_name=database_name,
-    )
-
-
-def prepare_database_prior(
-    dir_write,
-    images_shape_ori,
-    tracks_dict,
-    global_intrinsics,
-    intrinsics_mapping,
-    images_list,
-    camera_model="SIMPLE_RADIAL",
-    add_tracks=True,
-    add_virtual_points=True,
-    database_name="database.db",
-    device="cuda",
-):
     database_path = dir_write + "/" + database_name
-
     if os.path.exists(database_path):
         os.remove(database_path)
     database = pycolmap.Database.open(database_path)
@@ -551,7 +517,6 @@ def prepare_database_prior(
         N,
         add_tracks,
         add_virtual_points,
-        device,
     )
 
     # Add images
