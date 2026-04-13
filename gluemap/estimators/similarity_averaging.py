@@ -1,14 +1,14 @@
-from collections import defaultdict
 import logging
+from collections import defaultdict
+
 import numpy as np
+import pyceres
+import pygluemap
 import torch
 
-import pygluemap
-import pyceres
-
 from gluemap.estimators.track_establishment import (
-    establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
+    establish_tracks_from_tracks_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,14 +24,17 @@ def initialize_parameters(
     num_ministar = len(predictions_dict["indexes"])
     if global_centers is None:
         global_centers = {
-            idx: np.random.rand(3).astype(np.float64) for idx in global_rotations
+            idx: np.random.rand(3).astype(np.float64)
+            for idx in global_rotations
         }
     else:
         for idx in global_rotations:
             if idx not in global_centers:
                 global_centers[idx] = np.random.rand(3).astype(np.float64)
     if global_scales is None:
-        global_scales = [np.ones((1,)).astype(np.float64) for i in range(num_ministar)]
+        global_scales = [
+            np.ones((1,)).astype(np.float64) for i in range(num_ministar)
+        ]
     elif isinstance(global_scales, dict):
         temp_scales = []
         for idx_star in range(num_ministar):
@@ -68,14 +71,19 @@ def add_star_edge_error(
 
             if idx1 == idx2:
                 continue
-                
-            if predictions_dict["median_tri_angle"][idx_star][idx - 1].item() < MIN_TRI_ANGLE:
+
+            if (
+                predictions_dict["median_tri_angle"][idx_star][idx - 1].item()
+                < MIN_TRI_ANGLE
+            ):
                 continue  # Skip low-confidence edges
 
             # s_i * (c_j - c_i) = -R_j^T * t_ij
             t_ij_rotated = (
                 -global_rotations[idx2].T
-                @ predictions_dict["extrinsics"][idx_star][0, idx, :3, 3:].cpu().numpy()
+                @ predictions_dict["extrinsics"][idx_star][0, idx, :3, 3:]
+                .cpu()
+                .numpy()
             )
             loss_scaled = pyceres.LossFunction(
                 {"name": "huber", "params": [1e-2], "magnitude": scores[idx]}
@@ -85,7 +93,11 @@ def add_star_edge_error(
             prob.add_residual_block(
                 cost,
                 loss_scaled,
-                [global_centers[idx1], global_centers[idx2], global_scales[idx_star]],
+                [
+                    global_centers[idx1],
+                    global_centers[idx2],
+                    global_scales[idx_star],
+                ],
             )
 
             costs.append(cost)
@@ -107,7 +119,10 @@ def update_points3d(
     global_scales,
     num_ministar,
 ):
-    if "world_points" in predictions_dict and len(predictions_dict["world_points"]) > 0:
+    if (
+        "world_points" in predictions_dict
+        and len(predictions_dict["world_points"]) > 0
+    ):
         # Rescale the world points
         for idx in range(num_ministar):
             idx_center = predictions_dict["indexes"][idx][0]
@@ -118,7 +133,11 @@ def update_points3d(
                 + global_centers[idx_center]
             )
     # Since it is in camera frame, we only need to change the scale
-    if "cam_points" in predictions_dict and len(predictions_dict["cam_points"]) > 0 and predictions_dict["cam_points"][0] != None:
+    if (
+        "cam_points" in predictions_dict
+        and len(predictions_dict["cam_points"]) > 0
+        and predictions_dict["cam_points"][0] != None
+    ):
         for idx in range(num_ministar):
             idx_center = predictions_dict["indexes"][idx][0]
             predictions_dict["cam_points"][idx] = (
@@ -180,7 +199,11 @@ def similarity_averaging(
     for idx_star in range(num_ministar):
         if not prob.has_parameter_block(global_scales[idx_star]):
             continue
-        if fix_scales or predictions_dict["median_tri_angle"][idx_star].max().item() < MIN_TRI_ANGLE:
+        if (
+            fix_scales
+            or predictions_dict["median_tri_angle"][idx_star].max().item()
+            < MIN_TRI_ANGLE
+        ):
             prob.set_parameter_block_constant(global_scales[idx_star])
         else:
             prob.set_parameter_lower_bound(global_scales[idx_star], 0, 1e-5)
@@ -250,13 +273,16 @@ def add_depth_error(
     if points3D is None or pts2d_idx_inv is None:
         return
 
-    if "cam_points" not in predictions_dict or len(predictions_dict["cam_points"]) == 0 or predictions_dict["cam_points"][0] == None:
+    if (
+        "cam_points" not in predictions_dict
+        or len(predictions_dict["cam_points"]) == 0
+        or predictions_dict["cam_points"][0] == None
+    ):
         return
 
     num_constraints = 0
     num_same_cam_constraints = 0
     num_skipped_same_star = 0
-
 
     cam_points_rotated = {}
     for idx_star in range(num_ministar):
@@ -289,7 +315,9 @@ def add_depth_error(
             idx1, pos1, j1 = pts2d_idx_inv[image_id1][pt_idx1]
 
             # Get 3D camera point (rotated to world frame)
-            cam_point1 = cam_points_rotated[idx1][pos1][j1].numpy().astype(np.float64)
+            cam_point1 = (
+                cam_points_rotated[idx1][pos1][j1].numpy().astype(np.float64)
+            )
 
             for k in range(i + 1, len(elements)):
                 elem2 = elements[k]
@@ -302,7 +330,9 @@ def add_depth_error(
                 idx2, pos2, j2 = pts2d_idx_inv[image_id2][pt_idx2]
 
                 cam_point2 = (
-                    cam_points_rotated[idx2][pos2][j2].numpy().astype(np.float64)
+                    cam_points_rotated[idx2][pos2][j2]
+                    .numpy()
+                    .astype(np.float64)
                 )
 
                 # Do not add constraint if same star
@@ -311,13 +341,19 @@ def add_depth_error(
                     continue
 
                 # Check for the confidence of the two points
-                pt_conf1 = predictions_dict["cam_points_conf"][idx1][0, pos1, j1]
-                pt_conf2 = predictions_dict["cam_points_conf"][idx2][0, pos2, j2]
+                pt_conf1 = predictions_dict["cam_points_conf"][idx1][
+                    0, pos1, j1
+                ]
+                pt_conf2 = predictions_dict["cam_points_conf"][idx2][
+                    0, pos2, j2
+                ]
 
                 if pt_conf1.item() < 0.01 or pt_conf2.item() < 0.01:
                     continue  # Skip low-confidence points
 
-                weight = ((pt_conf1.item() + 1e-6) * (pt_conf2.item() + 1e-6)) * 0.01
+                weight = (
+                    (pt_conf1.item() + 1e-6) * (pt_conf2.item() + 1e-6)
+                ) * 0.01
 
                 # if weight < 0.01:
                 #     continue  # Skip low-confidence points
@@ -334,8 +370,12 @@ def add_depth_error(
                     #     cam_point1, cam_point2
                     # )
                     cost = pygluemap.DepthConsistencySameCamError(
-                        predictions_dict["cam_points"][idx1][0, pos1, j1][2].item(),
-                        predictions_dict["cam_points"][idx2][0, pos2, j2][2].item(),
+                        predictions_dict["cam_points"][idx1][0, pos1, j1][
+                            2
+                        ].item(),
+                        predictions_dict["cam_points"][idx2][0, pos2, j2][
+                            2
+                        ].item(),
                     )
 
                     prob.add_residual_block(
@@ -347,12 +387,14 @@ def add_depth_error(
                             global_scales[idx2],  # scale_2
                         ],
                     )
-                    
+
                     num_same_cam_constraints += 1
                     pass
                 else:
                     # Different cameras -> use Point3DConsistencyError
-                    cost = pygluemap.Point3DConsistencyError(cam_point1, cam_point2)
+                    cost = pygluemap.Point3DConsistencyError(
+                        cam_point1, cam_point2
+                    )
 
                     prob.add_residual_block(
                         cost,
@@ -371,12 +413,13 @@ def add_depth_error(
                 losses.append(loss)
 
     logger.info(f"Added {num_constraints} depth consistency constraints")
-    logger.info(f"Added {num_same_cam_constraints} same-camera constraints (from tracks)")
+    logger.info(
+        f"Added {num_same_cam_constraints} same-camera constraints (from tracks)"
+    )
     logger.info(f"Skipped {num_skipped_same_star} same-star pairs")
 
     # Additionally, iterate through pts2d_idx_all to find points with same 2D index
     if pts2d_idx_all is not None:
-
         # Build mapping from (image_id, pt_idx) to list of (idx, i, j) sources
         pt_to_sources = defaultdict(list)
 
@@ -398,7 +441,9 @@ def add_depth_error(
             # Add pairwise constraints between all sources
             for a in range(len(sources)):
                 idx1, i1, j1 = sources[a]
-                cam_point1 = cam_points_rotated[idx1][i1][j1].numpy().astype(np.float64)
+                cam_point1 = (
+                    cam_points_rotated[idx1][i1][j1].numpy().astype(np.float64)
+                )
 
                 for b in range(a + 1, len(sources)):
                     idx2, i2, j2 = sources[b]
@@ -407,15 +452,21 @@ def add_depth_error(
                         continue  # Skip same star
 
                     cam_point2 = (
-                        cam_points_rotated[idx2][i2][j2].numpy().astype(np.float64)
+                        cam_points_rotated[idx2][i2][j2]
+                        .numpy()
+                        .astype(np.float64)
                     )
 
                     # cost = pygluemap.Point3DConsistencySameCamError(
                     #     cam_point1, cam_point2
                     # )
                     cost = pygluemap.DepthConsistencySameCamError(
-                        predictions_dict["cam_points"][idx1][0, i1, j1][2].item(),
-                        predictions_dict["cam_points"][idx2][0, i2, j2][2].item(),
+                        predictions_dict["cam_points"][idx1][0, i1, j1][
+                            2
+                        ].item(),
+                        predictions_dict["cam_points"][idx2][0, i2, j2][
+                            2
+                        ].item(),
                     )
                     # loss = pyceres.LossFunction({"name": "huber", "params": [1.]})
                     # weight = np.log(
@@ -425,8 +476,12 @@ def add_depth_error(
                     #     predictions_dict["cam_points_conf"][idx2][0, i2, j2].item()
                     #     + 1e-6
                     # )
-                    pt_conf1 = predictions_dict["cam_points_conf"][idx1][0, i1, j1]
-                    pt_conf2 = predictions_dict["cam_points_conf"][idx2][0, i2, j2]
+                    pt_conf1 = predictions_dict["cam_points_conf"][idx1][
+                        0, i1, j1
+                    ]
+                    pt_conf2 = predictions_dict["cam_points_conf"][idx2][
+                        0, i2, j2
+                    ]
                     if pt_conf1.item() < 0.01 or pt_conf2.item() < 0.01:
                         continue  # Skip low-confidence points
 
@@ -455,7 +510,9 @@ def add_depth_error(
                     losses.append(loss)
                     num_same_idx_constraints += 1
 
-        logger.info(f"Added {num_same_idx_constraints} same-2D-index constraints")
+        logger.info(
+            f"Added {num_same_idx_constraints} same-2D-index constraints"
+        )
 
 
 def similarity_averaging_with_depth(
@@ -554,7 +611,6 @@ def similarity_averaging_with_depth(
     pyceres.solve(options, prob, summary)
 
     logger.info(summary.BriefReport())
-
 
     update_points3d(
         prob,

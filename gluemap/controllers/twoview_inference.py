@@ -2,9 +2,9 @@ import logging
 import os
 import time
 
-from scipy.special import softmax
-import torch
 import numpy as np
+import torch
+from scipy.special import softmax
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
@@ -24,8 +24,14 @@ class BatchInferenceDG:
     def main(self, batch):
         images = batch["images"].to(self.device)
 
-        view1 = {"img": images[:, 0], "instance": [i for i in range(images.shape[0])]}
-        view2 = {"img": images[:, 1], "instance": [i for i in range(images.shape[0])]}
+        view1 = {
+            "img": images[:, 0],
+            "instance": [i for i in range(images.shape[0])],
+        }
+        view2 = {
+            "img": images[:, 1],
+            "instance": [i for i in range(images.shape[0])],
+        }
 
         res1, res2, pred1, pred2 = self.model(view1, view2)
 
@@ -232,7 +238,10 @@ class TwoViewInferencePipeline:
         t_model_load = 0.0
 
         cache_path = os.path.join(args.curr_path, file_name)
-        if getattr(args, "rerun_from", None) in ("retrieval", "twoview") and os.path.exists(cache_path):
+        if getattr(args, "rerun_from", None) in (
+            "retrieval",
+            "twoview",
+        ) and os.path.exists(cache_path):
             os.remove(cache_path)
             logger.info(f"[rerun_from={args.rerun_from}] Deleted {cache_path}")
 
@@ -295,4 +304,6 @@ def run_twoview_inference(
         dtype=dtype,
         preloaded_models=preloaded_models,
     )
-    return pipeline.run(dataset_pair, save_intermediate_results=save_intermediate_results)
+    return pipeline.run(
+        dataset_pair, save_intermediate_results=save_intermediate_results
+    )

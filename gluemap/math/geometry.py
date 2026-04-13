@@ -1,8 +1,8 @@
-from scipy.spatial.transform import Rotation
+import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
-import einops
+from scipy.spatial.transform import Rotation
 
 # from e2esfm.models.utils import unproject
 
@@ -75,7 +75,7 @@ def bilinear_interpolate_value(value_map, coords, align_corners=False):
     # value_map:    B x C x H x W
     # coords:       B x N x 2
     # Return:       B x N x C
-    assert value_map.dim() == 4, f"bad dimension for the value map"
+    assert value_map.dim() == 4, "bad dimension for the value map"
 
     sizes = value_map.shape[2:]
 
@@ -102,7 +102,7 @@ def bilinear_interpolate_value(value_map, coords, align_corners=False):
 def project(rays, intrinsics):
     # rays:         B x N x 3
     # intrinsics:   B x 3 x 3
-    assert rays.dim() == 3, f"bad dimension for the coordinates"
+    assert rays.dim() == 3, "bad dimension for the coordinates"
 
     uv_homogeneous = torch.einsum("b t j, b n j -> b n t", intrinsics, rays)
     scale = torch.where(uv_homogeneous[..., 2:] < 0, -1, 1)
@@ -159,9 +159,7 @@ def project_tracks(
             world_points_j.to(torch.float64), "b n h w d -> (b n) (h w) d"
         ),
         einops.rearrange(intrinsic.to(torch.float64), "b n d c -> (b n) d c"),
-    ).to(
-        world_points_j.dtype
-    )  # (B*N, H*W, 2)
+    ).to(world_points_j.dtype)  # (B*N, H*W, 2)
 
     # Do not consider points outside the image as invalid. Instead, check the depth of the points, it the angle to the principle point is too large, then we consider it as invalid
     world_points_j_normalized = world_points_j / torch.clamp(
@@ -169,14 +167,10 @@ def project_tracks(
     )
     invalid_i2j = (
         world_points_j_normalized[..., 2] < np.sin(np.deg2rad(angle_threshold))
-    ).reshape(
-        B, N, -1
-    )  # (B, N, K)
+    ).reshape(B, N, -1)  # (B, N, K)
     invalid_j2i = (
         world_points_j_normalized[..., 2] > -np.sin(np.deg2rad(angle_threshold))
-    ).reshape(
-        B, N, -1
-    )  # (B, N, K)
+    ).reshape(B, N, -1)  # (B, N, K)
 
     # Use these poins as the tracks
     track_virtual = image_points_j.reshape(B, N, -1, 2)  # (B, N, grid_num, 2)

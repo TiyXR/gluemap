@@ -7,8 +7,8 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from gluemap.estimators.covisibility_extraction import CovisibilityExtraction
-from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.estimators.track_inference import TrackInference
+from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.utils.gpu import all_gather_object_cpu
 from gluemap.utils.model_loader import load_models
 
@@ -32,7 +32,9 @@ class BatchInferenceStar:
         self.dtype = dtype
         self.pointmap_dir = pointmap_dir
 
-        self.local_inference = create_local_inference(model, model_type, device, dtype)
+        self.local_inference = create_local_inference(
+            model, model_type, device, dtype
+        )
         self.track_inference = TrackInference(model_track, device)
         self.covisibility_extraction = CovisibilityExtraction()
 
@@ -79,7 +81,9 @@ class BatchInferenceStar:
     @torch.no_grad()
     def _predict_images(self, batch, disable_track=False, include_track=True):
         if not disable_track and not include_track:
-            raise ValueError("if not disable_track, include_track should be True")
+            raise ValueError(
+                "if not disable_track, include_track should be True"
+            )
 
         # Local inference (timed)
         torch.cuda.synchronize()
@@ -159,7 +163,10 @@ class StarInferencePipeline:
 
     def _load_models(self):
         chosen_model = getattr(self.args, "chosen_model", "pi3")
-        if self.preloaded_models is not None and chosen_model in self.preloaded_models:
+        if (
+            self.preloaded_models is not None
+            and chosen_model in self.preloaded_models
+        ):
             return self.preloaded_models, chosen_model
         model_keys = (
             {chosen_model}
@@ -263,7 +270,10 @@ class StarInferencePipeline:
                     ]
         else:
             predictions_dict = {
-                key: [local_outputs[key][x] for x in range(len(local_outputs[key]))]
+                key: [
+                    local_outputs[key][x]
+                    for x in range(len(local_outputs[key]))
+                ]
                 for key in output_keys
             }
 
@@ -286,7 +296,9 @@ class StarInferencePipeline:
         t_model_load = 0.0
 
         cache_path = os.path.join(args.curr_path, file_name)
-        if getattr(args, "rerun_from", None) is not None and os.path.exists(cache_path):
+        if getattr(args, "rerun_from", None) is not None and os.path.exists(
+            cache_path
+        ):
             os.remove(cache_path)
             logger.info(f"[rerun_from={args.rerun_from}] Deleted {cache_path}")
 
@@ -300,7 +312,9 @@ class StarInferencePipeline:
                 t_model_load,
             ) = self._run_inference(data_loader)
 
-            predictions_dict = self._gather_outputs(all_outputs, all_indices, dataset)
+            predictions_dict = self._gather_outputs(
+                all_outputs, all_indices, dataset
+            )
 
             if self.rank == 0 and save_intermediate_results:
                 torch.save(
@@ -353,4 +367,6 @@ def run_star_inference(
         dtype=dtype,
         preloaded_models=preloaded_models,
     )
-    return pipeline.run(dataset, save_intermediate_results=save_intermediate_results)
+    return pipeline.run(
+        dataset, save_intermediate_results=save_intermediate_results
+    )

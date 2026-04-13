@@ -1,7 +1,7 @@
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torchvision import transforms as TF
-import torch.nn.functional as F
 
 
 def load_and_preprocess_images_inner(
@@ -11,9 +11,9 @@ def load_and_preprocess_images_inner(
     if len(images_ori) == 0:
         raise ValueError("At least 1 image is required")
 
-    assert (
-        image_size % patch_size == 0
-    ), "Image size must be divisible by patch_size for compatibility with model requirements"
+    assert image_size % patch_size == 0, (
+        "Image size must be divisible by patch_size for compatibility with model requirements"
+    )
 
     images = []
     shapes = set()
@@ -33,13 +33,17 @@ def load_and_preprocess_images_inner(
             new_width = image_size
 
             # Calculate height maintaining aspect ratio, divisible by patch_size
-            new_height = round(height * (new_width / width) / patch_size) * patch_size
+            new_height = (
+                round(height * (new_width / width) / patch_size) * patch_size
+            )
 
         else:
             new_height = image_size
 
             # Calculate width maintaining aspect ratio, divisible by patch_size
-            new_width = round(width * (new_height / height) / patch_size) * patch_size
+            new_width = (
+                round(width * (new_height / height) / patch_size) * patch_size
+            )
             shapes.add(
                 (image_size, image_size)
             )  # since VGGT does not support portrait images, always pad them
@@ -105,9 +109,9 @@ def load_and_preprocess_images(
     if len(image_path_list) == 0:
         raise ValueError("At least 1 image is required")
 
-    assert (
-        image_size % patch_size == 0
-    ), "Image size must be divisible by patch_size for compatibility with model requirements"
+    assert image_size % patch_size == 0, (
+        "Image size must be divisible by patch_size for compatibility with model requirements"
+    )
 
     to_tensor = TF.ToTensor()
 
@@ -237,13 +241,17 @@ def calculate_image_shapes(images_shape_ori, new_shape_hw):
             new_width = max_new_shape
 
             # Calculate height maintaining aspect ratio, divisible by patch_size
-            new_height = round(height * (new_width / width) / patch_size) * patch_size
+            new_height = (
+                round(height * (new_width / width) / patch_size) * patch_size
+            )
 
         else:
             new_height = max_new_shape
 
             # Calculate width maintaining aspect ratio, divisible by patch_size
-            new_width = round(width * (new_height / height) / patch_size) * patch_size
+            new_width = (
+                round(width * (new_height / height) / patch_size) * patch_size
+            )
 
         images_change.append([new_width / width, new_height / height, 0, 0])
 
@@ -284,8 +292,12 @@ def unify_image_sizes(images_ori, images_change):
             align_corners=False,
         ).squeeze(0)
 
-        images_change[i][0] = images_ori[i].shape[2] / max_width * images_change[i][0]
-        images_change[i][1] = images_ori[i].shape[1] / max_height * images_change[i][1]
+        images_change[i][0] = (
+            images_ori[i].shape[2] / max_width * images_change[i][0]
+        )
+        images_change[i][1] = (
+            images_ori[i].shape[1] / max_height * images_change[i][1]
+        )
         images_ori[i] = img
 
     return images_ori, images_change

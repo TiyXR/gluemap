@@ -104,8 +104,8 @@ class SaladRetrievalPipeline:
         }
         if self.rank == 0:
             logger.info(
-                f"[Profiling] Preprocessing: model_loading={t1-t0:.2f}s, "
-                f"salad_retrieval={t2-t1:.2f}s, total={t2-t0:.2f}s"
+                f"[Profiling] Preprocessing: model_loading={t1 - t0:.2f}s, "
+                f"salad_retrieval={t2 - t1:.2f}s, total={t2 - t0:.2f}s"
             )
 
         return ({"salad": self.model}, self.device), timing
@@ -140,8 +140,8 @@ class SaladRetrievalPipeline:
         }
         if self.rank == 0:
             logger.info(
-                f"[Profiling] Preprocessing multi: model_loading={t1-t0:.2f}s, "
-                f"salad_retrieval={sum(retrieval_times.values()):.2f}s, total={t2-t0:.2f}s"
+                f"[Profiling] Preprocessing multi: model_loading={t1 - t0:.2f}s, "
+                f"salad_retrieval={sum(retrieval_times.values()):.2f}s, total={t2 - t0:.2f}s"
             )
 
         return ({"salad": self.model}, self.device), timing
@@ -157,7 +157,12 @@ def run_preprocessing_pipeline(
 
 
 def run_preprocessing_pipeline_multi(
-    args, world_size, rank, datasets, file_name="salad_descriptors.pt", models=None
+    args,
+    world_size,
+    rank,
+    datasets,
+    file_name="salad_descriptors.pt",
+    models=None,
 ):
     pipeline = SaladRetrievalPipeline(
         args, world_size, rank, file_name, models=models

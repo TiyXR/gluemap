@@ -1,5 +1,6 @@
 import torch
 
+
 def intrinsics_averaging(
     intrinsics_all, communities, intrinsics_mapping, camera_model="PINHOLE"
 ):
@@ -20,7 +21,9 @@ def intrinsics_averaging(
 
         intrinsics_curr = torch.stack(intrinsics[i])
         if camera_model.startswith("SIMPLE"):
-            focals = (intrinsics_curr[:, :, 0, 0] + intrinsics_curr[:, :, 1, 1]) / 2
+            focals = (
+                intrinsics_curr[:, :, 0, 0] + intrinsics_curr[:, :, 1, 1]
+            ) / 2
             intrinsics_curr[:, :, 0, 0] = focals
             intrinsics_curr[:, :, 1, 1] = focals
 

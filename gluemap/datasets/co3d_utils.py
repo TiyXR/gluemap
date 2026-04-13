@@ -41,8 +41,12 @@ def extract_images_from_h5py(h5py_path, image_names):
         Path to the directory containing extracted images
     """
     # Derive output dir from h5py filename
-    stem = os.path.splitext(os.path.basename(h5py_path))[0]  # e.g., apple.110_13051_23361
-    output_dir = os.path.join("/tmp", "co3d_extracted", f"{stem}_{len(image_names)}img")
+    stem = os.path.splitext(os.path.basename(h5py_path))[
+        0
+    ]  # e.g., apple.110_13051_23361
+    output_dir = os.path.join(
+        "/tmp", "co3d_extracted", f"{stem}_{len(image_names)}img"
+    )
     os.makedirs(output_dir, exist_ok=True)
 
     # Check if already extracted

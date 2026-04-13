@@ -1,24 +1,31 @@
+import logging
 import os
 import time
-import logging
+
 import torch
 
 logger = logging.getLogger(__name__)
+from gluemap.controllers.augmented_bundle_adjustment import (
+    run_refinement_pipeline,
+)
+from gluemap.controllers.global_merger import GlobalGluer
+from gluemap.controllers.star_collection import run_star_collection
+from gluemap.controllers.star_inference import run_star_inference
+from gluemap.controllers.twoview_inference import run_twoview_inference
+from gluemap.estimators.rotation_averaging import (
+    collect_relative_rotations_ministar,
+)
+from gluemap.estimators.track_snapping import TrackSnapping
+from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
+from gluemap.math.scaling import (
+    keep_inframes,
+    rescale_intrinsics,
+    rescale_tracks,
+)
 from gluemap.utils.colmap import (
     prepare_sift_database,
     write_to_colmap_format,
 )
-
-from gluemap.controllers.twoview_inference import run_twoview_inference
-from gluemap.controllers.star_inference import run_star_inference
-from gluemap.controllers.global_merger import GlobalGluer
-from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipeline
-from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
-from gluemap.estimators.track_snapping import TrackSnapping
-from gluemap.controllers.star_collection import run_star_collection
-from gluemap.math.scaling import rescale_tracks, rescale_intrinsics, keep_inframes
-
-from gluemap.estimators.rotation_averaging import collect_relative_rotations_ministar
 
 
 class GlueMapPipeline:
@@ -112,23 +119,31 @@ class GlueMapPipeline:
             timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
             # Print summary
-            logger.info(f"[Profiling] Pipeline Summary:")
+            logger.info("[Profiling] Pipeline Summary:")
             logger.info(
                 f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
                 f"inference={twoview_timing['total']:.2f}s"
             )
-            logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
+            logger.info(
+                f"  Dataset generation:    {timing['dataset_generation']:.2f}s"
+            )
             logger.info(
                 f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
                 f"inference={star_timing['total']:.2f}s"
             )
-            logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
-            logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
+            logger.info(
+                f"  Postprocessing:        {postproc_timing['total']:.2f}s"
+            )
+            logger.info(
+                f"  Total pipeline:        {timing['total_pipeline']:.2f}s"
+            )
 
             # Save per-dataset timing
             timing_path = os.path.join(args.curr_path, "pipeline_timing.pth")
             torch.save(timing, timing_path)
-            logger.info(f"[Profiling] Per-dataset timing saved to: {timing_path}")
+            logger.info(
+                f"[Profiling] Per-dataset timing saved to: {timing_path}"
+            )
 
             return pred_dir, timing
 
@@ -197,9 +212,14 @@ class GlueMapPipeline:
                 dataset_pair.intrinsics_mapping,
             )
             for cam_id in range(len(global_intrinsics)):
-                if cam_id < len(gt_intrinsics) and gt_intrinsics[cam_id] is not None:
+                if (
+                    cam_id < len(gt_intrinsics)
+                    and gt_intrinsics[cam_id] is not None
+                ):
                     global_intrinsics[cam_id] = gt_intrinsics[cam_id]
-            logger.info(f"Replaced intrinsics with GT from {args.gt_intrinsics_path}")
+            logger.info(
+                f"Replaced intrinsics with GT from {args.gt_intrinsics_path}"
+            )
 
         virtual_track_preparation = VirtualTrackPreparation()
         virtual_track_preparation.main(
@@ -214,7 +234,9 @@ class GlueMapPipeline:
         t0 = time.perf_counter()
         suffix = getattr(args, "output_suffix", "")
         coarse_dir = f"coarse{suffix}"
-        logger.info("write_to_colmap_format: %s", args.curr_path + "/" + coarse_dir)
+        logger.info(
+            "write_to_colmap_format: %s", args.curr_path + "/" + coarse_dir
+        )
         write_to_colmap_format(
             args.curr_path + "/" + coarse_dir,
             dataset_pair.images_shape_ori,
@@ -237,9 +259,9 @@ class GlueMapPipeline:
             return coarse_dir, timing
 
         t0 = time.perf_counter()
-        if not (hasattr(args, "force_load") and args.force_load) or not os.path.exists(
-            args.curr_path + "/database_sift.db"
-        ):
+        if not (
+            hasattr(args, "force_load") and args.force_load
+        ) or not os.path.exists(args.curr_path + "/database_sift.db"):
             prepare_sift_database(
                 args.curr_path,
                 args.images_path,
@@ -275,7 +297,9 @@ class GlueMapPipeline:
             dataset_pair=dataset_pair,
             num_images=len(dataset),
             use_triangulation_first=True,
-            num_refinement_iterations=getattr(args, "num_refinement_iterations", 2),
+            num_refinement_iterations=getattr(
+                args, "num_refinement_iterations", 2
+            ),
             track_mode=getattr(args, "track_mode", "SPV"),
         )
         timing["refinement"] = time.perf_counter() - t0
@@ -283,19 +307,25 @@ class GlueMapPipeline:
 
         timing["total"] = time.perf_counter() - t_postproc_start
 
-        logger.info(f"[Profiling] Postprocessing Summary:")
+        logger.info("[Profiling] Postprocessing Summary:")
         logger.info(f"  collect_rotations: {timing['collect_rotations']:.2f}s")
         logger.info(f"  global_mapping:    {timing['global_mapping']:.2f}s")
         logger.info(f"  write_coarse:      {timing['write_coarse']:.2f}s")
-        logger.info(f"  sift_database:     {timing.get('sift_database', 0):.2f}s")
-        logger.info(f"  track_snapping:    {timing.get('track_snapping', 0):.2f}s")
+        logger.info(
+            f"  sift_database:     {timing.get('sift_database', 0):.2f}s"
+        )
+        logger.info(
+            f"  track_snapping:    {timing.get('track_snapping', 0):.2f}s"
+        )
         logger.info(f"  refinement:        {timing.get('refinement', 0):.2f}s")
         logger.info(f"  total:             {timing['total']:.2f}s")
 
         return pred_dir, timing
 
     @staticmethod
-    def restore_image_shape(predictions_dict, images_change, images_shape_ori, valid_threshold=0.05):
+    def restore_image_shape(
+        predictions_dict, images_change, images_shape_ori, valid_threshold=0.05
+    ):
         index = range(len(predictions_dict["indexes"]))
         for idx in index:
             rescale_tracks(predictions_dict, images_change, [idx])
@@ -303,15 +333,23 @@ class GlueMapPipeline:
 
             if "intrinsics" in predictions_dict:
                 members = predictions_dict["indexes"][idx]
-                scales_curr = [images_change[members[j]] for j in range(len(members))]
-                intrinscs_curr = [predictions_dict["intrinsics"][idx][:, j] for j in range(len(members))]
-                intrinscs_curr = torch.stack(rescale_intrinsics(intrinscs_curr, scales_curr), dim=1)
+                scales_curr = [
+                    images_change[members[j]] for j in range(len(members))
+                ]
+                intrinscs_curr = [
+                    predictions_dict["intrinsics"][idx][:, j]
+                    for j in range(len(members))
+                ]
+                intrinscs_curr = torch.stack(
+                    rescale_intrinsics(intrinscs_curr, scales_curr), dim=1
+                )
                 predictions_dict["intrinsics"][idx] = intrinscs_curr.cpu()
 
         return predictions_dict
 
 
 # Backward-compatible module-level wrapper functions
+
 
 def run_inference_pipeline(
     args,
@@ -325,7 +363,9 @@ def run_inference_pipeline(
     models=None,
 ):
     """Backward-compatible wrapper for GlueMapPipeline.run()."""
-    pipeline = GlueMapPipeline(args, world_size, rank, device, dtype, models=models)
+    pipeline = GlueMapPipeline(
+        args, world_size, rank, device, dtype, models=models
+    )
     return pipeline.run(dataset_pair, pairs=pairs, device_id=device_id)
 
 
@@ -334,6 +374,10 @@ def run_postprocessing_pipeline(
 ):
     """Backward-compatible wrapper for GlueMapPipeline.run_postprocessing()."""
     return GlueMapPipeline.run_postprocessing(
-        args, predictions_dict, dataset_pair, dataset, pairs=pairs, device_id=device_id
+        args,
+        predictions_dict,
+        dataset_pair,
+        dataset,
+        pairs=pairs,
+        device_id=device_id,
     )
-

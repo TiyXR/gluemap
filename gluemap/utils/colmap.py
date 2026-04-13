@@ -1,7 +1,6 @@
 import logging
 import os
 from pathlib import Path
-from typing import List, Optional
 
 import numpy as np
 import pycolmap
@@ -14,7 +13,11 @@ logger = logging.getLogger(__name__)
 
 
 def camera_from_intrinsics_matrix(
-    intrinsics_matrix, camera_model="SIMPLE_PINHOLE", width=None, height=None, camera_id=0
+    intrinsics_matrix,
+    camera_model="SIMPLE_PINHOLE",
+    width=None,
+    height=None,
+    camera_id=0,
 ):
     """
     Create a pycolmap.Camera from a 3x3 intrinsics matrix.
@@ -53,13 +56,12 @@ def camera_from_intrinsics_matrix(
     return camera
 
 
-
 def extract_gt_intrinsics(
     gt_path: str,
-    images_list: List[str],
-    intrinsics_mapping: List[int],
+    images_list: list[str],
+    intrinsics_mapping: list[int],
     match_by_basename: bool = False,
-) -> List[Optional[torch.Tensor]]:
+) -> list[torch.Tensor | None]:
     """Extract GT intrinsics from a COLMAP reconstruction directory.
 
     Returns List[Optional[torch.Tensor]] indexed by camera_id,
@@ -82,10 +84,14 @@ def extract_gt_intrinsics(
         if key in name_to_gt_cam and gt_intrinsics[cam_id] is None:
             gt_cam = name_to_gt_cam[key]
             K = gt_cam.calibration_matrix()
-            gt_intrinsics[cam_id] = torch.tensor(K, dtype=torch.float32).unsqueeze(0)
+            gt_intrinsics[cam_id] = torch.tensor(
+                K, dtype=torch.float32
+            ).unsqueeze(0)
 
     num_set = sum(1 for x in gt_intrinsics if x is not None)
-    logger.info(f"GT intrinsics loaded: {num_set}/{num_cameras} cameras matched")
+    logger.info(
+        f"GT intrinsics loaded: {num_set}/{num_cameras} cameras matched"
+    )
     return gt_intrinsics
 
 
@@ -126,11 +132,15 @@ def merge_colmap_databases(
     db_output = pycolmap.Database.open(target_path)
 
     # Read all data from primary
-    primary_cameras = {cam.camera_id: cam for cam in db_primary.read_all_cameras()}
+    primary_cameras = {
+        cam.camera_id: cam for cam in db_primary.read_all_cameras()
+    }
     primary_images = {img.name: img for img in db_primary.read_all_images()}
 
     # Read all data from secondary
-    secondary_cameras = {cam.camera_id: cam for cam in db_secondary.read_all_cameras()}
+    secondary_cameras = {
+        cam.camera_id: cam for cam in db_secondary.read_all_cameras()
+    }
     secondary_images = {img.name: img for img in db_secondary.read_all_images()}
 
     # Determine common and unique images
@@ -152,7 +162,7 @@ def merge_colmap_databases(
     # Add any additional cameras from secondary (for images only in secondary)
     max_camera_id = max(primary_cameras.keys()) if primary_cameras else 0
     secondary_cam_to_output_cam = {}
-    for name in secondary_images.keys():
+    for name in secondary_images:
         if name not in primary_images:
             sec_img = secondary_images[name]
             if sec_img.camera_id not in secondary_cam_to_output_cam:
@@ -170,8 +180,8 @@ def merge_colmap_databases(
 
     # Step 2: Write images and track keypoint offsets
     name_to_output_image_id = {}
-    primary_offsets = {}   # image_name -> index offset for primary keypoints
-    secondary_offsets = {} # image_name -> index offset for secondary keypoints
+    primary_offsets = {}  # image_name -> index offset for primary keypoints
+    secondary_offsets = {}  # image_name -> index offset for secondary keypoints
 
     logger.info("Writing images and merging keypoints...")
     for name in all_names:
@@ -203,11 +213,17 @@ def merge_colmap_databases(
         if name in primary_images:
             pri_kp = db_primary.read_keypoints(primary_images[name].image_id)
         if name in secondary_images:
-            sec_kp = db_secondary.read_keypoints(secondary_images[name].image_id)
+            sec_kp = db_secondary.read_keypoints(
+                secondary_images[name].image_id
+            )
 
         # Compute per-source offsets and merge keypoints
-        pri_kp_xy = pri_kp[:, :2] if pri_kp is not None and len(pri_kp) > 0 else None
-        sec_kp_xy = sec_kp[:, :2] if sec_kp is not None and len(sec_kp) > 0 else None
+        pri_kp_xy = (
+            pri_kp[:, :2] if pri_kp is not None and len(pri_kp) > 0 else None
+        )
+        sec_kp_xy = (
+            sec_kp[:, :2] if sec_kp is not None and len(sec_kp) > 0 else None
+        )
 
         if pri_kp_xy is not None and sec_kp_xy is not None:
             if primary_features_first:
@@ -238,7 +254,9 @@ def merge_colmap_databases(
     all_matches = {}  # (out_id1, out_id2) -> merged matches array
 
     # Read primary matches
-    primary_id_to_name = {img.image_id: name for name, img in primary_images.items()}
+    primary_id_to_name = {
+        img.image_id: name for name, img in primary_images.items()
+    }
     pair_ids_pri, matches_list_pri = db_primary.read_all_matches()
     for pair_id, matches in zip(pair_ids_pri, matches_list_pri):
         id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
@@ -268,7 +286,9 @@ def merge_colmap_databases(
     logger.info("Merging matches from secondary database...")
 
     # Read secondary matches (with offset)
-    secondary_id_to_name = {img.image_id: name for name, img in secondary_images.items()}
+    secondary_id_to_name = {
+        img.image_id: name for name, img in secondary_images.items()
+    }
     pair_ids_sec, matches_list_sec = db_secondary.read_all_matches()
     for pair_id, matches in zip(pair_ids_sec, matches_list_sec):
         id1, id2 = pycolmap.pair_id_to_image_pair(pair_id)
@@ -313,7 +333,11 @@ def merge_colmap_databases(
             continue
         try:
             geom = db_primary.read_two_view_geometry(id1, id2)
-            if geom is not None and geom.inlier_matches is not None and len(geom.inlier_matches) > 0:
+            if (
+                geom is not None
+                and geom.inlier_matches is not None
+                and len(geom.inlier_matches) > 0
+            ):
                 out_id1 = name_to_output_image_id[name1]
                 out_id2 = name_to_output_image_id[name2]
                 offset1 = primary_offsets.get(name1, 0)
@@ -342,7 +366,11 @@ def merge_colmap_databases(
             continue
         try:
             geom = db_secondary.read_two_view_geometry(id1, id2)
-            if geom is not None and geom.inlier_matches is not None and len(geom.inlier_matches) > 0:
+            if (
+                geom is not None
+                and geom.inlier_matches is not None
+                and len(geom.inlier_matches) > 0
+            ):
                 out_id1 = name_to_output_image_id[name1]
                 out_id2 = name_to_output_image_id[name2]
                 offset1 = secondary_offsets.get(name1, 0)
@@ -491,7 +519,11 @@ def prepare_glomap_prior(
             continue
 
         camera = camera_from_intrinsics_matrix(
-            global_intrinsics[i][0], camera_model, camera_sizes[i][-1], camera_sizes[i][0], i + 1
+            global_intrinsics[i][0],
+            camera_model,
+            camera_sizes[i][-1],
+            camera_sizes[i][0],
+            i + 1,
         )
 
         database.write_camera(camera)
@@ -550,8 +582,12 @@ def prepare_glomap_prior(
         two_view_geometry.inlier_matches = np.array(correspondences[key])
         two_view_geometry.config = 2
 
-        database.write_two_view_geometry(image_id1, image_id2, two_view_geometry)
-        database.write_matches(image_id1, image_id2, np.array(correspondences[key]))
+        database.write_two_view_geometry(
+            image_id1, image_id2, two_view_geometry
+        )
+        database.write_matches(
+            image_id1, image_id2, np.array(correspondences[key])
+        )
 
     database.close()
 
@@ -584,18 +620,24 @@ def prepare_sift_database(
     reader_opts = pycolmap.ImageReaderOptions()
     reader_opts.camera_model = camera_model
     pycolmap.extract_features(
-        datbase_dir, images_path, images_list, camera_mode, reader_opts,
+        datbase_dir,
+        images_path,
+        images_list,
+        camera_mode,
+        reader_opts,
     )  # use the same camera model for all images
 
     database = pycolmap.Database.open(datbase_dir)
-    idx_to_image_id = remap_cameras_to_intrinsics(database, images_list, intrinsics_mapping)
+    idx_to_image_id = remap_cameras_to_intrinsics(
+        database, images_list, intrinsics_mapping
+    )
 
     if skip_matching:
         return True
 
     # Run matching on all the matched neighbors
     matched_pairs = []
-    if not selected_seeds is None:
+    if selected_seeds is not None:
         for idx in selected_seeds:
             for i in range(len(neighbors[idx])):
                 for j in range(len(neighbors[idx])):
@@ -606,7 +648,9 @@ def prepare_sift_database(
                     )
     else:
         matched_pairs = neighbors.tolist()
-        matched_pairs = [(i, j) for i, j in matched_pairs]  # Ensure unique pairs
+        matched_pairs = [
+            (i, j) for i, j in matched_pairs
+        ]  # Ensure unique pairs
 
     matched_pairs = list(set(matched_pairs))
 
@@ -630,6 +674,7 @@ def prepare_sift_database(
         )
 
     return True
+
 
 def convert_to_colmap_format(
     images_shape_ori,
@@ -659,7 +704,11 @@ def convert_to_colmap_format(
             continue
         model = camera_type if camera_type is not None else "PINHOLE"
         camera = camera_from_intrinsics_matrix(
-            global_intrinsics[i][0], model, camera_sizes[i][-1], camera_sizes[i][0], i + 1
+            global_intrinsics[i][0],
+            model,
+            camera_sizes[i][-1],
+            camera_sizes[i][0],
+            i + 1,
         )
         reconstruction.add_camera_with_trivial_rig(camera)
 
@@ -674,7 +723,9 @@ def convert_to_colmap_format(
         indexes = range(len(predictions_dict["indexes"]))
 
     if not pose_only:
-        max_track_length = max([predictions_dict["tracks"][idx].shape[2] for idx in indexes])
+        max_track_length = max(
+            [predictions_dict["tracks"][idx].shape[2] for idx in indexes]
+        )
     else:
         max_track_length = 0
 
@@ -687,7 +738,9 @@ def convert_to_colmap_format(
                 if valid.sum() < 2:
                     continue
 
-                points3d.append({"point3d": global_tracks[idx][j], "tracks": []})
+                points3d.append(
+                    {"point3d": global_tracks[idx][j], "tracks": []}
+                )
                 points3d_idx.append(idx * max_track_length + j)
 
                 # for i, idx_inner in enumerate(predictions_dict["indexes"][idx]):
@@ -702,7 +755,9 @@ def convert_to_colmap_format(
                     images_points2d[idx_inner].append(
                         (
                             len(points3d) - 1,
-                            predictions_dict["tracks"][idx][0, i, j].cpu().numpy(),
+                            predictions_dict["tracks"][idx][0, i, j]
+                            .cpu()
+                            .numpy(),
                         )
                     )
 
@@ -711,7 +766,7 @@ def convert_to_colmap_format(
                     continue
 
     # Add images
-    for idx in images_points2d.keys():
+    for idx in images_points2d:
         image = pycolmap.Image()
         image.camera_id = intrinsics_mapping[idx] + 1
 
@@ -726,7 +781,10 @@ def convert_to_colmap_format(
 
         cam_from_world = pycolmap.Rigid3d(
             np.concatenate(
-                [global_rotations[idx][:3, :3].T, global_centers[idx].reshape(3, 1)],
+                [
+                    global_rotations[idx][:3, :3].T,
+                    global_centers[idx].reshape(3, 1),
+                ],
                 axis=1,
             )
         ).inverse()
@@ -737,7 +795,9 @@ def convert_to_colmap_format(
     for i, point_3d in enumerate(points3d):
         tracks = []
         for j, track in enumerate(point_3d["tracks"]):
-            tracks.append(pycolmap.TrackElement(track[0] + 1, track[1]))  # 1-indexed image_id
+            tracks.append(
+                pycolmap.TrackElement(track[0] + 1, track[1])
+            )  # 1-indexed image_id
 
             pass
 

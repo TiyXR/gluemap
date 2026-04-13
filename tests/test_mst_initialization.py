@@ -7,12 +7,12 @@ import torch
 
 from gluemap.math.mst_initialization import initialize_mst_structures
 from tests.helpers import (
-    create_synthetic_reconstruction,
-    extract_gt,
+    build_predictions_dict,
     build_star_topology_full,
     build_star_topology_sparse,
-    build_predictions_dict,
+    create_synthetic_reconstruction,
     evaluate_centers,
+    extract_gt,
     max_center_error,
     remap_to_original_ids,
 )
@@ -26,12 +26,17 @@ class TestMSTInitialization:
     def test_fully_connected_clean(self):
         """Clean data, fully connected stars, uniform scales."""
         gt_rec = create_synthetic_reconstruction(num_frames=8, seed=100)
-        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec, zero_indexed=True)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
         stars = build_star_topology_full(image_ids)
 
         gt_scales_values = np.ones(len(stars))
         predictions_dict = build_predictions_dict(
-            gt_rotations, gt_centers, stars, gt_scales_values,
+            gt_rotations,
+            gt_centers,
+            stars,
+            gt_scales_values,
             generate_points3d_virtual=True,
         )
 
@@ -52,12 +57,17 @@ class TestMSTInitialization:
     def test_sparse_topology(self):
         """Clean data, sparse (k=3) neighbors, uniform scales."""
         gt_rec = create_synthetic_reconstruction(num_frames=8, seed=101)
-        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec, zero_indexed=True)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
         stars = build_star_topology_sparse(image_ids, gt_centers, k=3)
 
         gt_scales_values = np.ones(len(stars))
         predictions_dict = build_predictions_dict(
-            gt_rotations, gt_centers, stars, gt_scales_values,
+            gt_rotations,
+            gt_centers,
+            stars,
+            gt_scales_values,
             generate_points3d_virtual=True,
         )
 
@@ -77,14 +87,20 @@ class TestMSTInitialization:
     def test_non_uniform_scales(self):
         """Clean data, fully connected, non-uniform GT scales."""
         gt_rec = create_synthetic_reconstruction(num_frames=8, seed=200)
-        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec, zero_indexed=True)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
         stars = build_star_topology_full(image_ids)
 
         rng = np.random.default_rng(200)
         gt_scales_values = rng.uniform(0.5, 3.0, size=len(stars))
         predictions_dict = build_predictions_dict(
-            gt_rotations, gt_centers, stars, gt_scales_values,
-            generate_points3d_virtual=True, rng=rng,
+            gt_rotations,
+            gt_centers,
+            stars,
+            gt_scales_values,
+            generate_points3d_virtual=True,
+            rng=rng,
         )
 
         global_centers, global_scales = initialize_mst_structures(
@@ -114,7 +130,11 @@ class TestMSTInitialization:
             if ratios:
                 ratios = np.array(ratios)
                 # All ratio-of-ratios should be approximately the same constant
-                spread = ratios.max() / ratios.min() if ratios.min() > 1e-12 else float("inf")
+                spread = (
+                    ratios.max() / ratios.min()
+                    if ratios.min() > 1e-12
+                    else float("inf")
+                )
                 logger.info(f"Scale ratio spread: {spread:.4f}")
                 assert spread < 1.5, f"Scale ratio spread {spread:.4f} >= 1.5"
 
@@ -125,14 +145,20 @@ class TestMSTInitializationTriangulationAngle:
     def test_small_triangulation_angle_fallback(self):
         """Stars with near-collinear 3D points should trigger scale=1.0 fallback."""
         gt_rec = create_synthetic_reconstruction(num_frames=4, seed=300)
-        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec, zero_indexed=True)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
         stars = build_star_topology_full(image_ids)
 
         rng = np.random.default_rng(300)
         gt_scales_values = rng.uniform(0.5, 3.0, size=len(stars))
         predictions_dict = build_predictions_dict(
-            gt_rotations, gt_centers, stars, gt_scales_values,
-            generate_points3d_virtual=True, rng=rng,
+            gt_rotations,
+            gt_centers,
+            stars,
+            gt_scales_values,
+            generate_points3d_virtual=True,
+            rng=rng,
         )
 
         # Override points3d_virtual for all stars with near-collinear points
@@ -170,7 +196,9 @@ class TestMSTInitializationDisconnected:
     def test_disconnected_graph(self):
         """Nodes in a disconnected component should not appear in global_centers."""
         gt_rec = create_synthetic_reconstruction(num_frames=6, seed=400)
-        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec, zero_indexed=True)
+        image_ids, gt_rotations, gt_centers = extract_gt(
+            gt_rec, zero_indexed=True
+        )
 
         # Build two separate clusters: {0,1,2} fully connected, {3,4,5} fully connected
         # No cross-edges between the clusters
@@ -187,8 +215,12 @@ class TestMSTInitializationDisconnected:
         gt_scales_values = np.ones(len(stars))
         rng = np.random.default_rng(400)
         predictions_dict = build_predictions_dict(
-            gt_rotations, gt_centers, stars, gt_scales_values,
-            generate_points3d_virtual=True, rng=rng,
+            gt_rotations,
+            gt_centers,
+            stars,
+            gt_scales_values,
+            generate_points3d_virtual=True,
+            rng=rng,
         )
 
         global_centers, global_scales = initialize_mst_structures(
@@ -198,7 +230,9 @@ class TestMSTInitializationDisconnected:
         # Node 0 is the DFS root, so cluster_a (containing node 0) should be recovered
         # Cluster_b nodes should NOT be reachable from node 0
         for img_id in cluster_a:
-            assert img_id in global_centers, f"Image {img_id} (cluster A) missing from global_centers"
+            assert img_id in global_centers, (
+                f"Image {img_id} (cluster A) missing from global_centers"
+            )
         for img_id in cluster_b:
             assert img_id not in global_centers, (
                 f"Image {img_id} (cluster B) should not be reachable from node 0"

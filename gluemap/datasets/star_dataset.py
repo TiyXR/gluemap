@@ -1,12 +1,15 @@
 import logging
-import numpy as np
+
 import networkx as nx
+import numpy as np
 from lightglue import ALIKED
 from tqdm import tqdm
 
 from gluemap.datasets.base_dataset import DemoBaseDataset
+from gluemap.estimators.feature_extraction import (
+    get_query_points_from_extractors,
+)
 from gluemap.utils.load_fn import calculate_image_shapes
-from gluemap.estimators.feature_extraction import get_query_points_from_extractors
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +20,18 @@ class BaseStarDataset(DemoBaseDataset):
         self.patch_size = 14
 
         self.num_tracks = (
-            args.num_track_per_img if hasattr(args, "num_track_per_img") else 1024
+            args.num_track_per_img
+            if hasattr(args, "num_track_per_img")
+            else 1024
         )
 
         # Build the keypoint extractor once and reuse it across __getitem__ calls.
         # Moved to the query image's device on first use.
-        self.query_extractors = [ALIKED(max_num_keypoints=self.num_tracks, detection_threshold=0.005).eval()]
+        self.query_extractors = [
+            ALIKED(
+                max_num_keypoints=self.num_tracks, detection_threshold=0.005
+            ).eval()
+        ]
         self._extractors_device = None
 
         self.query_points = None  # needs to be initialized
@@ -45,7 +54,9 @@ class BaseStarDataset(DemoBaseDataset):
 
         # Initialize the star structure from the valid edges
         valid_edges = np.array(self.valid_edges, dtype=np.int64)
-        valid_edges = np.concatenate([valid_edges, valid_edges[:, ::-1]], axis=0)
+        valid_edges = np.concatenate(
+            [valid_edges, valid_edges[:, ::-1]], axis=0
+        )
         valid_edges = np.unique(valid_edges, axis=0)
 
         # Collect the neighbors for each node
@@ -61,7 +72,9 @@ class BaseStarDataset(DemoBaseDataset):
         MIN_NONSEQ = 5
 
         # Build sequential edge lookup set
-        seq_edge_set = set(self.sequential_edges) if self.sequential_edges else set()
+        seq_edge_set = (
+            set(self.sequential_edges) if self.sequential_edges else set()
+        )
         has_sequential = len(seq_edge_set) > 0
 
         if self.edge_scores is not None:
@@ -86,15 +99,28 @@ class BaseStarDataset(DemoBaseDataset):
                         first, last = seq_nbrs[0], seq_nbrs[-1]
                         middle = seq_nbrs[1:-1]
                         n_middle = MAX_SEQ - 2
-                        indices = np.round(np.linspace(0, len(middle) - 1, n_middle)).astype(int)
-                        sampled_middle = [middle[idx] for idx in np.unique(indices)]
+                        indices = np.round(
+                            np.linspace(0, len(middle) - 1, n_middle)
+                        ).astype(int)
+                        sampled_middle = [
+                            middle[idx] for idx in np.unique(indices)
+                        ]
                         seq_nbrs = [first] + sampled_middle + [last]
 
                     # Fill remaining slots with top non-sequential by score
                     remaining = max(MAX_NEIGHBORS - len(seq_nbrs), MIN_NONSEQ)
                     nonseq_scored = sorted(
-                        [(j, self.edge_scores.get((min(i, j), max(i, j)), 0.0)) for j in nonseq_nbrs],
-                        key=lambda x: x[1], reverse=True,
+                        [
+                            (
+                                j,
+                                self.edge_scores.get(
+                                    (min(i, j), max(i, j)), 0.0
+                                ),
+                            )
+                            for j in nonseq_nbrs
+                        ],
+                        key=lambda x: x[1],
+                        reverse=True,
                     )
                     selected_nonseq = [x[0] for x in nonseq_scored[:remaining]]
                     neighbors_all[i] = set(seq_nbrs + selected_nonseq)
@@ -118,7 +144,9 @@ class BaseStarDataset(DemoBaseDataset):
                 # Collect pruned edges sorted by score descending
                 original_set = set()
                 for e in np.array(self.valid_edges, dtype=np.int64):
-                    original_set.add((min(int(e[0]), int(e[1])), max(int(e[0]), int(e[1]))))
+                    original_set.add(
+                        (min(int(e[0]), int(e[1])), max(int(e[0]), int(e[1])))
+                    )
                 current_set = set()
                 for i in range(self.N):
                     for j in neighbors_all[i]:
@@ -126,26 +154,33 @@ class BaseStarDataset(DemoBaseDataset):
                 pruned_edges = original_set - current_set
                 pruned_with_scores = sorted(
                     [(e, self.edge_scores.get(e, 0.0)) for e in pruned_edges],
-                    key=lambda x: x[1], reverse=True,
+                    key=lambda x: x[1],
+                    reverse=True,
                 )
 
                 for (u, v), score in pruned_with_scores:
                     if nx.is_connected(G):
                         break
                     # Only add the edge if it bridges two different components
-                    if nx.node_connected_component(G, u) != nx.node_connected_component(G, v):
+                    if nx.node_connected_component(
+                        G, u
+                    ) != nx.node_connected_component(G, v):
                         G.add_edge(u, v)
                         neighbors_all[u].add(v)
                         neighbors_all[v].add(u)
                 logger.info("Re-added edges to restore connectivity")
             else:
-                logger.info(f"Graph is already connected after top-{MAX_NEIGHBORS} pruning")
+                logger.info(
+                    f"Graph is already connected after top-{MAX_NEIGHBORS} pruning"
+                )
         else:
             # Fallback: no scores available, random selection
             for i in range(self.N):
                 if len(neighbors_all[i]) > MAX_NEIGHBORS:
                     neighbors = list(neighbors_all[i])
-                    index = np.random.choice(len(neighbors), size=MAX_NEIGHBORS, replace=False)
+                    index = np.random.choice(
+                        len(neighbors), size=MAX_NEIGHBORS, replace=False
+                    )
                     neighbors_all[i] = set(np.array(neighbors)[index])
 
         # Filter sequential_edges to only keep edges that survived pruning
@@ -154,7 +189,9 @@ class BaseStarDataset(DemoBaseDataset):
             for i in range(self.N):
                 for j in neighbors_all[i]:
                     kept_edges.add((min(i, j), max(i, j)))
-            self.sequential_edges = [e for e in self.sequential_edges if e in kept_edges]
+            self.sequential_edges = [
+                e for e in self.sequential_edges if e in kept_edges
+            ]
 
         # Build stars from pruned neighbors
         stars = []
@@ -170,7 +207,9 @@ class BaseStarDataset(DemoBaseDataset):
         stars = [stars[i] for i in sorted_idx]
 
         # Add a mapping between star index and image index
-        self.image_index_to_star_index = {stars[i][0]: i for i in range(len(stars))}
+        self.image_index_to_star_index = {
+            stars[i][0]: i for i in range(len(stars))
+        }
         self.stars = stars
 
         # calculate the image_changes
@@ -195,7 +234,9 @@ class BaseStarDataset(DemoBaseDataset):
 
             new_shape_hw = (new_height, new_width)
 
-        self.images_change = calculate_image_shapes(self.images_shape_ori, new_shape_hw)
+        self.images_change = calculate_image_shapes(
+            self.images_shape_ori, new_shape_hw
+        )
 
         valid_edges = valid_edges[
             valid_edges[:, 0] < valid_edges[:, 1]
@@ -219,7 +260,9 @@ class BaseStarDataset(DemoBaseDataset):
 
         query_image = images_1024[:1]
         if self._extractors_device != query_image.device:
-            self.query_extractors = [e.to(query_image.device) for e in self.query_extractors]
+            self.query_extractors = [
+                e.to(query_image.device) for e in self.query_extractors
+            ]
             self._extractors_device = query_image.device
         query_points = get_query_points_from_extractors(
             query_image,
@@ -237,7 +280,8 @@ class BaseStarDataset(DemoBaseDataset):
             global_rotations = [self.global_rotations[i] for i in indexes]
             global_centers = [self.global_centers[i] for i in indexes]
             global_intrinsics = [
-                self.global_intrinsics[self.intrinsics_mapping[i]][0] for i in indexes
+                self.global_intrinsics[self.intrinsics_mapping[i]][0]
+                for i in indexes
             ]
 
         # extract the query points for the star structure

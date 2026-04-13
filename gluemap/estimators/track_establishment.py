@@ -8,19 +8,17 @@ This implements the GLOMAP EstablishTracks algorithm from:
 /home/linpan/workspace/colmap/src/glomap/sfm/global_mapper.cc (lines 122-256)
 """
 
-from typing import Dict, List, Tuple
-from dataclasses import dataclass
+import logging
 from collections import defaultdict
-import numpy as np
-import torch
-from tqdm import tqdm
-from scipy.spatial import cKDTree
+from dataclasses import dataclass
 
+import numpy as np
 import pycolmap
+import torch
+from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 from gluemap.math.union_find import UnionFind
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -43,12 +41,12 @@ class TrackEstablishment:
 
     def run(
         self,
-        tracks_dict: Dict,
+        tracks_dict: dict,
         num_images: int,
         add_tracks: bool = True,
         add_virtual_points: bool = False,
         device: str = "cuda",
-    ) -> Tuple[Dict[int, pycolmap.Point3D], Dict[int, np.ndarray]]:
+    ) -> tuple[dict[int, pycolmap.Point3D], dict[int, np.ndarray]]:
         """
         Establish tracks directly from tracks_dict.
 
@@ -131,15 +129,24 @@ class TrackEstablishment:
         indexes = range(len(tracks_dict["indexes"]))
 
         # Initialize data structures
-        images_points2d = {i: [] for i in range(N)}  # (image_id, [point_2d, ...])
-        images_points2d_virtual = {i: [] for i in range(N)}  # (image_id, [point_2d, ...])
+        images_points2d = {
+            i: [] for i in range(N)
+        }  # (image_id, [point_2d, ...])
+        images_points2d_virtual = {
+            i: [] for i in range(N)
+        }  # (image_id, [point_2d, ...])
         images_points2d_virtual_isnegative = {
             i: [] for i in range(N)
         }  # (image_id, [is_negative, ...])
 
-        N_indexes = {idx: tracks_dict["tracks"][idx].shape[-3] for idx in indexes}
+        N_indexes = {
+            idx: tracks_dict["tracks"][idx].shape[-3] for idx in indexes
+        }
         pts2d_idx_all = {
-            idx: np.ones([N_indexes[idx], tracks_dict["tracks"][idx].shape[-2]], dtype=int)
+            idx: np.ones(
+                [N_indexes[idx], tracks_dict["tracks"][idx].shape[-2]],
+                dtype=int,
+            )
             * -1
             for idx in indexes
         }  # N x K
@@ -147,7 +154,10 @@ class TrackEstablishment:
         if add_virtual_points or not add_tracks:
             pts2d_idx_virtual_all = {
                 idx: np.zeros(
-                    [N_indexes[idx], tracks_dict["tracks_virtual"][idx].shape[-2]],
+                    [
+                        N_indexes[idx],
+                        tracks_dict["tracks_virtual"][idx].shape[-2],
+                    ],
                     dtype=int,
                 )
                 for idx in indexes
@@ -159,7 +169,9 @@ class TrackEstablishment:
         pts2d_idx_inv = {i: [] for i in range(N)}  # inverse map for real tracks
 
         if add_virtual_points or not add_tracks:
-            pts2d_idx_virtual_inv = {i: [] for i in range(N)}  # inverse map for virtual
+            pts2d_idx_virtual_inv = {
+                i: [] for i in range(N)
+            }  # inverse map for virtual
         else:
             pts2d_idx_virtual_inv = None
 
@@ -202,12 +214,14 @@ class TrackEstablishment:
                 indexes_pts = list(
                     range(
                         len(images_points2d_virtual[idx_inner]),
-                        len(images_points2d_virtual[idx_inner]) + len(valid_idx),
+                        len(images_points2d_virtual[idx_inner])
+                        + len(valid_idx),
                     )
                 )
                 pts2d_idx_virtual_all[idx][i, valid_idx] = indexes_pts
                 images_points2d_virtual[idx_inner] += [
-                    tracks_dict["tracks_virtual"][idx][0, i, j] for j in valid_idx
+                    tracks_dict["tracks_virtual"][idx][0, i, j]
+                    for j in valid_idx
                 ]
                 images_points2d_virtual_isnegative[idx_inner] += (
                     tracks_dict["isnegative_virtual"][idx][0, i, valid_idx]
@@ -226,7 +240,10 @@ class TrackEstablishment:
         logger.info("Constructing correspondences...")
         for idx in tqdm(range(N)):
             uf_pts2d = UnionFind()
-            if len(images_points2d[idx]) == 0 and len(images_points2d_virtual[idx]) == 0:
+            if (
+                len(images_points2d[idx]) == 0
+                and len(images_points2d_virtual[idx]) == 0
+            ):
                 continue
 
             if len(images_points2d[idx]) == 0:
@@ -235,19 +252,21 @@ class TrackEstablishment:
                 ).to(torch.float32)
 
                 # Store keypoints for this image
-                keypoints_per_image[idx] = images_points2d_virtual_tensor.cpu().numpy()
+                keypoints_per_image[idx] = (
+                    images_points2d_virtual_tensor.cpu().numpy()
+                )
 
                 continue
 
             # Use KDTree for efficient near-duplicate detection (O(N) memory vs O(N^2))
-            images_points2d_tensor = (
-                torch.stack(images_points2d[idx], dim=0).to(torch.float32)
-            )
+            images_points2d_tensor = torch.stack(
+                images_points2d[idx], dim=0
+            ).to(torch.float32)
 
             # Find near-duplicate points using KDTree on CPU
             pts_np = images_points2d_tensor.numpy()
             tree = cKDTree(pts_np)
-            pairs = tree.query_pairs(r=1e-3, output_type='ndarray')
+            pairs = tree.query_pairs(r=1e-3, output_type="ndarray")
             for i, j in pairs:
                 uf_pts2d.union(int(i), int(j))
 
@@ -256,7 +275,8 @@ class TrackEstablishment:
                     images_points2d_virtual[idx], dim=0
                 ).to(torch.float32)
                 images_points2d_tensor = torch.cat(
-                    [images_points2d_tensor, images_points2d_virtual_tensor], dim=0
+                    [images_points2d_tensor, images_points2d_virtual_tensor],
+                    dim=0,
                 )
 
             # Store keypoints for this image
@@ -278,12 +298,9 @@ class TrackEstablishment:
 
         # Establish the concrete correspondences
         # Just change the point index a bit if two points are very close to each other
-        correspondences = (
-            {}
-        )  # key is (image_id1, image_id2), value is a list of (point2d_id1, point2d_id2)
+        correspondences = {}  # key is (image_id1, image_id2), value is a list of (point2d_id1, point2d_id2)
         logger.info("Concatenating tracks...")
         for idx in tqdm(indexes):
-
             # Note: since in GLOMAP, blind concatenation is used, so we only need to consider the pairs with the center image as one of the image
             for i, idx_inner in enumerate(tracks_dict["indexes"][idx]):
                 if i == 0:
@@ -308,7 +325,10 @@ class TrackEstablishment:
                     index_j = np.where(common_points)[0]
 
                     corres_real = np.stack(
-                        [pts2d_idx_all[idx][i1, index_j], pts2d_idx_all[idx][i2, index_j]],
+                        [
+                            pts2d_idx_all[idx][i1, index_j],
+                            pts2d_idx_all[idx][i2, index_j],
+                        ],
                         axis=1,
                     )
                 else:
@@ -325,8 +345,10 @@ class TrackEstablishment:
                     index_virtual_j = np.where(common_points_virtual)[0]
                     corres_virtual = np.stack(
                         [
-                            pts2d_idx_virtual_all[idx][i1, index_virtual_j] + len1,
-                            pts2d_idx_virtual_all[idx][i2, index_virtual_j] + len2,
+                            pts2d_idx_virtual_all[idx][i1, index_virtual_j]
+                            + len1,
+                            pts2d_idx_virtual_all[idx][i2, index_virtual_j]
+                            + len2,
                         ],
                         axis=1,
                     )
@@ -341,7 +363,7 @@ class TrackEstablishment:
                 if len(corres_virtual) > 0:
                     correspondences[key].append(corres_virtual)
 
-        for key in correspondences.keys():
+        for key in correspondences:
             if len(correspondences[key]) == 0:
                 continue
             correspondences[key] = np.unique(
@@ -362,9 +384,9 @@ class TrackEstablishment:
 
     def _establish_tracks(
         self,
-        keypoints_per_image: Dict[int, np.ndarray],
-        correspondences: Dict[Tuple[int, int], List],
-    ) -> Tuple[Dict[int, pycolmap.Point3D], Dict[int, Dict[int, int]]]:
+        keypoints_per_image: dict[int, np.ndarray],
+        correspondences: dict[tuple[int, int], list],
+    ) -> tuple[dict[int, pycolmap.Point3D], dict[int, dict[int, int]]]:
         """
         Establish 3D point tracks from keypoints and correspondences.
 
@@ -408,7 +430,9 @@ class TrackEstablishment:
             root = uf.find(obs)
             track_map[root].append(obs)
 
-        logger.info(f"Established {len(track_map)} tracks from {len(uf.parent)} observations")
+        logger.info(
+            f"Established {len(track_map)} tracks from {len(uf.parent)} observations"
+        )
 
         # Step 3: Validate tracks and check consistency
         candidate_points3D = {}
@@ -470,19 +494,22 @@ class TrackEstablishment:
         track_lengths.sort(reverse=True)
 
         tracks_per_image = defaultdict(int)
-        images_with_keypoints = [k for k, v in keypoints_per_image.items() if len(v) > 0]
+        images_with_keypoints = [
+            k for k, v in keypoints_per_image.items() if len(v) > 0
+        ]
         images_left = len(images_with_keypoints)
 
         final_points3D = {}
         # Initialize mapping from (image_id, pt_idx) -> point3D_id
-        image_to_point3D = {img_id: {} for img_id in keypoints_per_image.keys()}
+        image_to_point3D = {img_id: {} for img_id in keypoints_per_image}
 
         for track_length, point3D_id in track_lengths:
             point3D = candidate_points3D[point3D_id]
 
             # Check if any image in this track still needs more observations
             should_add = any(
-                tracks_per_image[elem.image_id] <= options.track_required_tracks_per_view
+                tracks_per_image[elem.image_id]
+                <= options.track_required_tracks_per_view
                 for elem in point3D.track.elements
             )
 
@@ -512,13 +539,13 @@ class TrackEstablishment:
 
 
 def establish_tracks_from_tracks_dict(
-    tracks_dict: Dict,
+    tracks_dict: dict,
     num_images: int,
     options: TrackEstablishmentOptions = None,
     add_tracks: bool = True,
     add_virtual_points: bool = False,
     device: str = "cuda",
-) -> Tuple[Dict[int, pycolmap.Point3D], Dict[int, np.ndarray]]:
+) -> tuple[dict[int, pycolmap.Point3D], dict[int, np.ndarray]]:
     """
     Lightweight wrapper that creates a TrackEstablishment instance and calls run().
     """

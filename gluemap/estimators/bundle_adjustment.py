@@ -1,14 +1,11 @@
-import numpy as np
-
-import pygluemap
-import pyceres
-
-import pycolmap
-
-
 import logging
-logger = logging.getLogger(__name__)
 
+import numpy as np
+import pyceres
+import pycolmap
+import pygluemap
+
+logger = logging.getLogger(__name__)
 
 
 def add_reprojection_error(
@@ -78,9 +75,7 @@ def add_reprojection_error(
             camera_params = reconstruction.cameras[camera_id].params
 
             # Determine if this is a virtual point
-            vp_start = virtual_point_start.get(
-                image_id, len(image.points2D)
-            )
+            vp_start = virtual_point_start.get(image_id, len(image.points2D))
             is_virtual_point = pt_idx >= vp_start
 
             # Virtual points use duplicate SIMPLE_FISHEYE camera (fixed params)
@@ -133,6 +128,7 @@ def add_reprojection_error(
     logger.info(f"Number of negative observation: {isnegative_count}")
 
     return first_camera_id
+
 
 # TODO: leverage pycolmap's built-in CeresBundleAdjuster, and feed in with two reconstruction
 # One with real tracks, and one with virtual tracks.
@@ -193,7 +189,9 @@ def bundle_adjustment(
         params = camera.params
         if prob.has_parameter_block(params):
             pp_idxs = list(camera.principal_point_idxs())
-            prob.set_manifold(params, pyceres.SubsetManifold(len(params), pp_idxs))
+            prob.set_manifold(
+                params, pyceres.SubsetManifold(len(params), pp_idxs)
+            )
 
     # Fix fisheye camera params (not optimized)
     if fisheye_intrinsics_params is not None:
@@ -204,7 +202,9 @@ def bundle_adjustment(
     # Fix gauge freedom
     if first_camera_id is not None:
         # Fix both rotation and translation of first camera
-        first_pose = reconstruction.frames[first_camera_id].rig_from_world.params
+        first_pose = reconstruction.frames[
+            first_camera_id
+        ].rig_from_world.params
         if prob.has_parameter_block(first_pose):
             prob.set_parameter_block_constant(first_pose)
             logger.info(
@@ -215,18 +215,22 @@ def bundle_adjustment(
         second_camera_id = None
         for image_id in reconstruction.images:
             if image_id != first_camera_id:
-                pose_params = reconstruction.frames[image_id].rig_from_world.params
+                pose_params = reconstruction.frames[
+                    image_id
+                ].rig_from_world.params
                 if prob.has_parameter_block(pose_params):
                     second_camera_id = image_id
                     break
         if second_camera_id is not None:
             # Get translation part of the pose (indices 4-6)
-            second_pose = reconstruction.frames[second_camera_id].rig_from_world.params
+            second_pose = reconstruction.frames[
+                second_camera_id
+            ].rig_from_world.params
             t2 = second_pose[4:]
             fixed_idx = int(np.argmax(np.abs(t2)))
             # Create product manifold: full quaternion manifold + subset translation manifold
-            scale_gauge_manifold = pygluemap.CreatePoseManifoldWithFixedTransComponent(
-                fixed_idx
+            scale_gauge_manifold = (
+                pygluemap.CreatePoseManifoldWithFixedTransComponent(fixed_idx)
             )
             prob.set_manifold(second_pose, scale_gauge_manifold)
             logger.info(
@@ -275,7 +279,9 @@ def bundle_adjustment(
         # Create manifold that fixes rotation (quaternion) but allows translation
         for image_id in reconstruction.images:
             if image_id != first_camera_id:
-                pose_params = reconstruction.frames[image_id].rig_from_world.params
+                pose_params = reconstruction.frames[
+                    image_id
+                ].rig_from_world.params
                 if prob.has_parameter_block(pose_params):
                     translation_only_manifold = (
                         pygluemap.CreateTranslationOnlyManifold()
@@ -290,10 +296,15 @@ def bundle_adjustment(
         # Release rotations for second pass - restore full pose manifold
         for image_id in reconstruction.images:
             if image_id != first_camera_id:
-                pose_params = reconstruction.frames[image_id].rig_from_world.params
+                pose_params = reconstruction.frames[
+                    image_id
+                ].rig_from_world.params
                 if prob.has_parameter_block(pose_params):
                     # Restore appropriate manifold
-                    if image_id == second_camera_id and second_camera_id is not None:
+                    if (
+                        image_id == second_camera_id
+                        and second_camera_id is not None
+                    ):
                         # Restore scale gauge manifold for second camera
                         t2 = pose_params[4:]
                         fixed_idx = int(np.argmax(np.abs(t2)))
@@ -311,6 +322,5 @@ def bundle_adjustment(
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)
     logger.info(summary.BriefReport())
-
 
     return reconstruction

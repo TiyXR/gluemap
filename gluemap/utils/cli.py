@@ -20,7 +20,10 @@ def get_args_parser():
         help="path to the chosen feedforward model checkpoint",
     )
     parser.add_argument(
-        "--path_retrieval", default="", type=str, help="path to the retrieval model"
+        "--path_retrieval",
+        default="",
+        type=str,
+        help="path to the retrieval model",
     )
     parser.add_argument(
         "--path_tracker", default="", type=str, help="path to the tracker model"
@@ -91,7 +94,10 @@ def get_args_parser():
         help="temp path, for collecting results from multiple GPUs",
     )
     parser.add_argument(
-        "--save_result", default=True, type=bool, help="force to discard the results"
+        "--save_result",
+        default=True,
+        type=bool,
+        help="force to discard the results",
     )
 
     parser.add_argument(
@@ -102,13 +108,21 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--num_workers", default=4, type=int, help="number of workers for data loading"
+        "--num_workers",
+        default=4,
+        type=int,
+        help="number of workers for data loading",
     )
     parser.add_argument(
-        "--batch_size", default=30, type=int, help="batch size for two view inference"
+        "--batch_size",
+        default=30,
+        type=int,
+        help="batch size for two view inference",
     )
     parser.add_argument(
-        "--dist_url", default="env://", help="url used to set up distributed training"
+        "--dist_url",
+        default="env://",
+        help="url used to set up distributed training",
     )
     parser.add_argument(
         "--valid_dg_threshold",
@@ -118,11 +132,16 @@ def get_args_parser():
     )
 
     parser.add_argument(
-        "--retrieval_batch_size", default=30, type=int, help="batch size for retrieval"
+        "--retrieval_batch_size",
+        default=30,
+        type=int,
+        help="batch size for retrieval",
     )
 
     parser.add_argument(
-        "--force_load", action="store_true", help="force load the precomputed results"
+        "--force_load",
+        action="store_true",
+        help="force load the precomputed results",
     )
 
     parser.add_argument(

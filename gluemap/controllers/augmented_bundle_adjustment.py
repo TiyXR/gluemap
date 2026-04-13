@@ -1,45 +1,42 @@
+import logging
 import os
-import random
 import shutil
 import time
-from collections import defaultdict
-from typing import Dict, Literal, Tuple
-import pygluemap
-import torch
 
 import numpy as np
 import pycolmap
+import pygluemap
+import torch
 
 from gluemap.controllers.bundle_adjustment import (
-    iterative_bundle_adjustment,
     IterativeBAOptions,
-    initialize_world_points,
+    build_negative_depth_observations,
     build_reconstruction_for_ba,
     build_virtual_point_start,
-    build_negative_depth_observations,
     filter_observations_by_error,
-)
-from gluemap.math.reprojection_error import (
-    compute_all_errors_from_reconstruction,
-    ReprojectionErrorType,
+    initialize_world_points,
+    iterative_bundle_adjustment,
 )
 from gluemap.estimators.track_establishment import (
-    establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
+    establish_tracks_from_tracks_dict,
+)
+from gluemap.math.reprojection_error import (
+    ReprojectionErrorType,
+    compute_all_errors_from_reconstruction,
 )
 from gluemap.utils.colmap import (
     camera_from_intrinsics_matrix,
-    prepare_glomap_prior,
     merge_colmap_databases,
+    prepare_glomap_prior,
 )
 
-import logging
 logger = logging.getLogger(__name__)
 
 
 def create_fisheye_cameras_and_rectify(
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: Dict[int, int],
+    virtual_point_start: dict[int, int],
 ):
     """
     Create duplicate SIMPLE_FISHEYE cameras and rectify virtual 2D points.
@@ -84,7 +81,9 @@ def create_fisheye_cameras_and_rectify(
             new_pt2d = fisheye_cam.img_from_cam(ray)
             image.points2D[pt_idx] = pycolmap.Point2D(new_pt2d)
             num_rectified += 1
-    logger.info(f"Rectified {num_rectified} virtual 2D points to SIMPLE_FISHEYE projection")
+    logger.info(
+        f"Rectified {num_rectified} virtual 2D points to SIMPLE_FISHEYE projection"
+    )
 
     # Build fisheye_intrinsics_params list (separate numpy arrays, will be fixed in BA)
     max_camera_id = max(reconstruction.cameras.keys())
@@ -99,8 +98,8 @@ def create_fisheye_cameras_and_rectify(
 
 def select_tracks_from_merged(
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: Dict[int, int],
-    sift_count: Dict[int, int],
+    virtual_point_start: dict[int, int],
+    sift_count: dict[int, int],
     min_num_support_abs: int = 512,
     tracks_to_keep: str = "sift",
 ) -> None:
@@ -130,8 +129,14 @@ def select_tracks_from_merged(
     sc = {int(k): int(v) for k, v in sift_count.items()}
 
     ids_to_delete = pygluemap.compute_tracks_to_delete(
-        point3d_ids_np, track_img_ids_np, track_pt2d_idxs_np, track_lengths_np,
-        vps, sc, min_num_support_abs, tracks_to_keep,
+        point3d_ids_np,
+        track_img_ids_np,
+        track_pt2d_idxs_np,
+        track_lengths_np,
+        vps,
+        sc,
+        min_num_support_abs,
+        tracks_to_keep,
     )
 
     for p3d_id in ids_to_delete:
@@ -140,7 +145,7 @@ def select_tracks_from_merged(
 
 def prune_non_virtual_points3D(
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: Dict[int, int],
+    virtual_point_start: dict[int, int],
 ) -> int:
     """
     Remove all 3D points where NO observation is virtual.
@@ -150,7 +155,8 @@ def prune_non_virtual_points3D(
     to_remove = []
     for p3d_id, p3d in reconstruction.points3D.items():
         has_virtual = any(
-            elem.point2D_idx >= virtual_point_start.get(elem.image_id, float("inf"))
+            elem.point2D_idx
+            >= virtual_point_start.get(elem.image_id, float("inf"))
             for elem in p3d.track.elements
         )
         if not has_virtual:
@@ -162,9 +168,9 @@ def prune_non_virtual_points3D(
 
 def strip_non_virtual_keypoints(
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: Dict[int, int],
-    negative_depth_observations: Dict[int, set],
-) -> Tuple[pycolmap.Reconstruction, Dict[int, int], Dict[int, set]]:
+    virtual_point_start: dict[int, int],
+    negative_depth_observations: dict[int, set],
+) -> tuple[pycolmap.Reconstruction, dict[int, int], dict[int, set]]:
     """
     Remove the non-virtual keypoint prefix from each image after merge.
 
@@ -233,13 +239,14 @@ def update_poses_from_reconstruction(
     Matches images by name.
     """
     source_by_name = {
-        img.name: (img_id, img)
-        for img_id, img in source_recon.images.items()
+        img.name: (img_id, img) for img_id, img in source_recon.images.items()
     }
     for target_id, target_img in target_recon.images.items():
         if target_img.name in source_by_name:
             src_id, src_img = source_by_name[target_img.name]
-            target_recon.frames[target_id].rig_from_world = src_img.cam_from_world()
+            target_recon.frames[
+                target_id
+            ].rig_from_world = src_img.cam_from_world()
     # Copy camera intrinsics
     for cam_id, cam in source_recon.cameras.items():
         if cam_id in target_recon.cameras:
@@ -286,7 +293,9 @@ def reindex_reconstruction_for_triangulation(
     for p3d_id, point3D in reconstruction.points3D.items():
         new_track = pycolmap.Track()
         for elem in point3D.track.elements:
-            new_track.add_element(old_to_new_img[elem.image_id], elem.point2D_idx)
+            new_track.add_element(
+                old_to_new_img[elem.image_id], elem.point2D_idx
+            )
         new_recon.add_point3D(point3D.xyz, new_track)
 
     return new_recon
@@ -322,7 +331,9 @@ def _extract_reconstruction_arrays(recon: pycolmap.Reconstruction):
         names,
         np.array(ids, dtype=np.int64),
         np.array(n_pts2d, dtype=np.int32),
-        np.array(xyz_list, dtype=np.float64) if xyz_list else np.empty((0, 3), dtype=np.float64),
+        np.array(xyz_list, dtype=np.float64)
+        if xyz_list
+        else np.empty((0, 3), dtype=np.float64),
         img_ids_flat,
         pt2d_idxs_flat,
         np.array(lens, dtype=np.int32),
@@ -332,10 +343,10 @@ def _extract_reconstruction_arrays(recon: pycolmap.Reconstruction):
 def merge_triangulated_with_reconstruction(
     triangulated_reconstruction: pycolmap.Reconstruction,
     reconstruction: pycolmap.Reconstruction,
-    virtual_point_start: Dict[int, int],
-    negative_depth_observations: Dict[int, set],
+    virtual_point_start: dict[int, int],
+    negative_depth_observations: dict[int, set],
     triangulated_features_first: bool = True,
-) -> Tuple[pycolmap.Reconstruction, Dict[int, int], Dict[int, set]]:
+) -> tuple[pycolmap.Reconstruction, dict[int, int], dict[int, set]]:
     """
     Merge triangulated_reconstruction with reconstruction.
     Extracts data as numpy arrays, delegates index remapping to C++, then
@@ -351,22 +362,48 @@ def merge_triangulated_with_reconstruction(
     Returns:
         Tuple of (merged reconstruction, updated virtual_point_start, updated negative_depth_observations)
     """
-    tri_names, tri_ids, tri_n_pts2d, tri_xyz, tri_img_ids, tri_pt2d_idxs, tri_lens = (
-        _extract_reconstruction_arrays(triangulated_reconstruction)
-    )
-    recon_names, recon_ids, recon_n_pts2d, recon_xyz, recon_img_ids, recon_pt2d_idxs, recon_lens = (
-        _extract_reconstruction_arrays(reconstruction)
-    )
+    (
+        tri_names,
+        tri_ids,
+        tri_n_pts2d,
+        tri_xyz,
+        tri_img_ids,
+        tri_pt2d_idxs,
+        tri_lens,
+    ) = _extract_reconstruction_arrays(triangulated_reconstruction)
+    (
+        recon_names,
+        recon_ids,
+        recon_n_pts2d,
+        recon_xyz,
+        recon_img_ids,
+        recon_pt2d_idxs,
+        recon_lens,
+    ) = _extract_reconstruction_arrays(reconstruction)
 
     vps = {int(k): int(v) for k, v in virtual_point_start.items()}
-    ndo = {int(k): {int(x) for x in v} for k, v in negative_depth_observations.items()}
+    ndo = {
+        int(k): {int(x) for x in v}
+        for k, v in negative_depth_observations.items()
+    }
 
     result = pygluemap.compute_merge_data(
-        tri_names, tri_ids, tri_n_pts2d,
-        recon_names, recon_ids, recon_n_pts2d,
-        recon_xyz, recon_img_ids, recon_pt2d_idxs, recon_lens,
-        tri_xyz, tri_img_ids, tri_pt2d_idxs, tri_lens,
-        vps, ndo,
+        tri_names,
+        tri_ids,
+        tri_n_pts2d,
+        recon_names,
+        recon_ids,
+        recon_n_pts2d,
+        recon_xyz,
+        recon_img_ids,
+        recon_pt2d_idxs,
+        recon_lens,
+        tri_xyz,
+        tri_img_ids,
+        tri_pt2d_idxs,
+        tri_lens,
+        vps,
+        ndo,
         triangulated_features_first,
     )
 
@@ -382,18 +419,34 @@ def merge_triangulated_with_reconstruction(
     for cam_id, cam in reconstruction.cameras.items():
         merged.add_camera_with_trivial_rig(cam)
 
-    tri_by_name = {img.name: img for img in triangulated_reconstruction.images.values()}
+    tri_by_name = {
+        img.name: img for img in triangulated_reconstruction.images.values()
+    }
     for recon_id, img in reconstruction.images.items():
         tri_img = tri_by_name.get(img.name)
         if tri_img:
-            tri_pts = np.array([pt.xy for pt in tri_img.points2D], dtype=np.float64).reshape(-1, 2)
-            recon_pts = np.array([pt.xy for pt in img.points2D], dtype=np.float64).reshape(-1, 2)
+            tri_pts = np.array(
+                [pt.xy for pt in tri_img.points2D], dtype=np.float64
+            ).reshape(-1, 2)
+            recon_pts = np.array(
+                [pt.xy for pt in img.points2D], dtype=np.float64
+            ).reshape(-1, 2)
             if triangulated_features_first:
-                keypoints = np.vstack([tri_pts, recon_pts]) if len(tri_pts) and len(recon_pts) else (tri_pts if len(tri_pts) else recon_pts)
+                keypoints = (
+                    np.vstack([tri_pts, recon_pts])
+                    if len(tri_pts) and len(recon_pts)
+                    else (tri_pts if len(tri_pts) else recon_pts)
+                )
             else:
-                keypoints = np.vstack([recon_pts, tri_pts]) if len(recon_pts) and len(tri_pts) else (recon_pts if len(recon_pts) else tri_pts)
+                keypoints = (
+                    np.vstack([recon_pts, tri_pts])
+                    if len(recon_pts) and len(tri_pts)
+                    else (recon_pts if len(recon_pts) else tri_pts)
+                )
         else:
-            keypoints = np.array([pt.xy for pt in img.points2D], dtype=np.float64).reshape(-1, 2)
+            keypoints = np.array(
+                [pt.xy for pt in img.points2D], dtype=np.float64
+            ).reshape(-1, 2)
         new_img = pycolmap.Image(
             name=img.name,
             keypoints=keypoints,
@@ -407,7 +460,10 @@ def merge_triangulated_with_reconstruction(
     for i in range(len(merged_xyz)):
         track_len = int(merged_track_lens[i])
         elements = [
-            pycolmap.TrackElement(int(merged_track_img_ids[offset + k]), int(merged_track_pt2d_idxs[offset + k]))
+            pycolmap.TrackElement(
+                int(merged_track_img_ids[offset + k]),
+                int(merged_track_pt2d_idxs[offset + k]),
+            )
             for k in range(track_len)
         ]
         merged.add_point3D(merged_xyz[i], pycolmap.Track(elements))
@@ -418,7 +474,7 @@ def merge_triangulated_with_reconstruction(
 
 def run_refinement_pipeline(
     args,
-    predictions_dict: Dict,
+    predictions_dict: dict,
     global_rotations,
     global_centers,
     global_intrinsics,
@@ -454,7 +510,9 @@ def run_refinement_pipeline(
     use_sift = "S" in track_mode
     use_prior = "P" in track_mode
     use_virtual = "V" in track_mode
-    logger.info(f"Track mode: {track_mode} (SIFT={use_sift}, Prior={use_prior}, Virtual={use_virtual})")
+    logger.info(
+        f"Track mode: {track_mode} (SIFT={use_sift}, Prior={use_prior}, Virtual={use_virtual})"
+    )
 
     # Step 1: Triangulate 3D points
     logger.info("Triangulating points with pycolmap...")
@@ -464,7 +522,6 @@ def run_refinement_pipeline(
     coarse_reconstruction = pycolmap.Reconstruction()
     coarse_reconstruction.read(args.curr_path + "/" + coarse_dir)
     refinement_timing["load_coarse"] = time.perf_counter() - t0
-
 
     # Step 1b: Determine parameters based on track mode
     if use_prior:
@@ -500,7 +557,9 @@ def run_refinement_pipeline(
         sift_count_by_name = {}
         for img in sift_db.read_all_images():
             kp = sift_db.read_keypoints(img.image_id)
-            sift_count_by_name[img.name] = len(kp) if kp is not None and len(kp) > 0 else 0
+            sift_count_by_name[img.name] = (
+                len(kp) if kp is not None and len(kp) > 0 else 0
+            )
     else:
         sift_count_by_name = {}
     refinement_timing["read_sift"] = time.perf_counter() - t0
@@ -621,16 +680,19 @@ def run_refinement_pipeline(
 
     iteration_timings = []
     for outer_iter in range(num_refinement_iterations):
-        logger.info(f"{'='*60}")
-        logger.info(f"Refinement iteration {outer_iter + 1}/{num_refinement_iterations}")
-        logger.info(f"{'='*60}")
+        logger.info(f"{'=' * 60}")
+        logger.info(
+            f"Refinement iteration {outer_iter + 1}/{num_refinement_iterations}"
+        )
+        logger.info(f"{'=' * 60}")
         t_iter_start = time.perf_counter()
 
         if outer_iter > 0:
             # Prune all non-virtual 3D points (keep only virtual)
             num_pruned = prune_non_virtual_points3D(
                 # reconstruction, original_virtual_point_start
-                reconstruction, virtual_point_start
+                reconstruction,
+                virtual_point_start,
             )
             logger.info(
                 f"Pruned {num_pruned} non-virtual 3D points, "
@@ -641,7 +703,9 @@ def run_refinement_pipeline(
             # don't grow with each iteration
             reconstruction, virtual_point_start, negative_depth_observations = (
                 strip_non_virtual_keypoints(
-                    reconstruction, virtual_point_start, negative_depth_observations
+                    reconstruction,
+                    virtual_point_start,
+                    negative_depth_observations,
                 )
             )
 
@@ -652,14 +716,18 @@ def run_refinement_pipeline(
         opt_triang.triangulation.merge_max_reproj_error = 15.0
         opt_triang.triangulation.complete_max_reproj_error = 15.0
         opt_triang.triangulation.ignore_two_view_tracks = False
-        opt_triang.triangulation.create_max_angle_error = angular_error_threshold_deg
+        opt_triang.triangulation.create_max_angle_error = (
+            angular_error_threshold_deg
+        )
         opt_triang.ba_global_max_refinements = 0
 
-        reindexed_reconstruction = reindex_reconstruction_for_triangulation(reconstruction)
+        reindexed_reconstruction = reindex_reconstruction_for_triangulation(
+            reconstruction
+        )
         triangulated_reconstruction = pycolmap.triangulate_points(
             reindexed_reconstruction,
             database_path,
-            ".", # skip color extraction
+            ".",  # skip color extraction
             triangulated_output_path,
             clear_points=True,
             refine_intrinsics=False,
@@ -691,7 +759,7 @@ def run_refinement_pipeline(
             virtual_point_start=virtual_point_start,
             sift_count=sift_count,
             min_num_support_abs=512,
-            tracks_to_keep="sift", 
+            tracks_to_keep="sift",
         )
 
         # Step 7b: Create fisheye cameras and rectify virtual 2D points
@@ -717,7 +785,9 @@ def run_refinement_pipeline(
             )
 
             all_angular = [
-                e for errs in angular_errors.values() for _, _, e in errs
+                e
+                for errs in angular_errors.values()
+                for _, _, e in errs
                 if e < float("inf")
             ]
             if len(all_angular) > 0:
@@ -752,10 +822,15 @@ def run_refinement_pipeline(
 
         # Step 7c: Limit number of tracks before BA
         max_num_tracks = getattr(args, "max_num_tracks", None)
-        if max_num_tracks is not None and len(reconstruction.points3D) > max_num_tracks:
+        if (
+            max_num_tracks is not None
+            and len(reconstruction.points3D) > max_num_tracks
+        ):
             sorted_ids = sorted(
                 reconstruction.points3D.keys(),
-                key=lambda pid: len(list(reconstruction.points3D[pid].track.elements)),
+                key=lambda pid: len(
+                    list(reconstruction.points3D[pid].track.elements)
+                ),
                 reverse=True,
             )
             ids_to_remove = sorted_ids[max_num_tracks:]
@@ -785,9 +860,11 @@ def run_refinement_pipeline(
             "total": t_ba_end - t_iter_start,
         }
         iteration_timings.append(iter_timing)
-        logger.info(f"[Profiling] Iteration {outer_iter+1}: triangulation={iter_timing['triangulation']:.2f}s, "
-              f"merge={iter_timing['merge']:.2f}s, filter={iter_timing['filter']:.2f}s, "
-              f"ba={iter_timing['ba']:.2f}s, total={iter_timing['total']:.2f}s")
+        logger.info(
+            f"[Profiling] Iteration {outer_iter + 1}: triangulation={iter_timing['triangulation']:.2f}s, "
+            f"merge={iter_timing['merge']:.2f}s, filter={iter_timing['filter']:.2f}s, "
+            f"ba={iter_timing['ba']:.2f}s, total={iter_timing['total']:.2f}s"
+        )
 
         # # Step 10: Write bundle adjusted results to COLMAP format
         # file_dir = "bundle_adjusted_thres0.5_iter" + str(outer_iter + 1)
@@ -833,7 +910,8 @@ def run_refinement_pipeline(
     suffix = getattr(args, "output_suffix", "")
     file_dir = f"gluemap_aba{suffix}"
     logger.info(
-        "Writing bundle adjusted reconstruction: %s", args.curr_path + "/" + file_dir
+        "Writing bundle adjusted reconstruction: %s",
+        args.curr_path + "/" + file_dir,
     )
     os.makedirs(args.curr_path + "/" + file_dir, exist_ok=True)
     reconstruction.write(args.curr_path + "/" + file_dir)
@@ -843,16 +921,22 @@ def run_refinement_pipeline(
     refinement_timing["total"] = time.perf_counter() - t_refinement_start
 
     logger.info("[Profiling] Refinement Summary:")
-    logger.info(f"  Setup: load_coarse={refinement_timing['load_coarse']:.2f}s, "
-          f"prepare_prior={refinement_timing['prepare_prior']:.2f}s, "
-          f"merge_db={refinement_timing['merge_databases']:.2f}s, "
-          f"establish_tracks={refinement_timing['establish_tracks']:.2f}s, "
-          f"init_points={refinement_timing['initialize_points']:.2f}s, "
-          f"build_recon={refinement_timing['build_reconstruction']:.2f}s")
-    logger.info(f"  Iterations: {sum(it['total'] for it in iteration_timings):.2f}s "
-          f"({len(iteration_timings)} iters)")
-    logger.info(f"  Cleanup: remove_virtual={refinement_timing['remove_virtual']:.2f}s, "
-          f"write={refinement_timing['write_output']:.2f}s")
+    logger.info(
+        f"  Setup: load_coarse={refinement_timing['load_coarse']:.2f}s, "
+        f"prepare_prior={refinement_timing['prepare_prior']:.2f}s, "
+        f"merge_db={refinement_timing['merge_databases']:.2f}s, "
+        f"establish_tracks={refinement_timing['establish_tracks']:.2f}s, "
+        f"init_points={refinement_timing['initialize_points']:.2f}s, "
+        f"build_recon={refinement_timing['build_reconstruction']:.2f}s"
+    )
+    logger.info(
+        f"  Iterations: {sum(it['total'] for it in iteration_timings):.2f}s "
+        f"({len(iteration_timings)} iters)"
+    )
+    logger.info(
+        f"  Cleanup: remove_virtual={refinement_timing['remove_virtual']:.2f}s, "
+        f"write={refinement_timing['write_output']:.2f}s"
+    )
     logger.info(f"  Total refinement: {refinement_timing['total']:.2f}s")
 
     return file_dir, refinement_timing

@@ -1,7 +1,8 @@
 import logging
+
+import networkx as nx
 import numpy as np
 import torch
-import networkx as nx
 
 from gluemap.datasets.star_dataset import BaseStarDataset
 
@@ -38,7 +39,11 @@ class StarCollector:
         )
 
         # Build edge score lookup from all pairs
-        pairs_np = global_outputs["pairs"].numpy() if torch.is_tensor(global_outputs["pairs"]) else global_outputs["pairs"]
+        pairs_np = (
+            global_outputs["pairs"].numpy()
+            if torch.is_tensor(global_outputs["pairs"])
+            else global_outputs["pairs"]
+        )
         scores_np = scores.numpy() if torch.is_tensor(scores) else scores
         edge_scores = {}
         for k in range(len(pairs_np)):
@@ -47,7 +52,9 @@ class StarCollector:
             edge_scores[key] = float(scores_np[k])
 
         # Initialize the dataset with the global outputs
-        logger.info(f"Initializing dataset with valid edges: {valid_edges.shape}")
+        logger.info(
+            f"Initializing dataset with valid edges: {valid_edges.shape}"
+        )
         dataset.valid_edges = valid_edges
         dataset.edge_scores = edge_scores
         dataset.N = len(dataset_pair.images_list)
@@ -96,12 +103,15 @@ class StarCollector:
                 G.add_nodes_from(np.arange(N))
                 G.add_edges_from(
                     np.concatenate(
-                        [valid_edges, pairs[index * (scores > threshold)]], axis=0
+                        [valid_edges, pairs[index * (scores > threshold)]],
+                        axis=0,
                     )
                 )
                 components = list(nx.connected_components(G))
 
-                logger.info(f"Reducing threshold to {threshold:.2f} to connect components")
+                logger.info(
+                    f"Reducing threshold to {threshold:.2f} to connect components"
+                )
                 valid_edges = np.concatenate(
                     [valid_edges, pairs[index * (scores > threshold)]], axis=0
                 )
@@ -110,7 +120,6 @@ class StarCollector:
                     break
 
         return valid_edges
-
 
 
 def run_star_collection(dataset_pair, global_outputs, args):

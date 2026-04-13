@@ -1,7 +1,6 @@
+import networkx as nx
 import numpy as np
 import torch
-import networkx as nx
-
 
 MIN_TRI_ANGLE = 1  # degrees, minimum median triangulation angle for reliable scale estimation
 
@@ -29,22 +28,30 @@ def initialize_mst_structures(predictions_dict, global_rotations):
 
         # Vectorized over all neighbor views
         R_all = extr[0, 1:, :3, :3]  # (M, 3, 3)
-        t_all = extr[0, 1:, :3, 3]   # (M, 3)
-        c_all = -torch.einsum('mji,mj->mi', R_all, t_all)  # (M, 3)
+        t_all = extr[0, 1:, :3, 3]  # (M, 3)
+        c_all = -torch.einsum("mji,mj->mi", R_all, t_all)  # (M, 3)
 
         ray_all = points3d.unsqueeze(0) - c_all.unsqueeze(1)  # (M, K, 3)
         ray_all = ray_all / torch.clamp(
             ray_all.norm(dim=-1, keepdim=True), min=1e-8
         )
         cos_angles = torch.clamp(
-            torch.einsum('kd,mkd->mk', ray_center, ray_all),
-            -1.0 + 1e-6, 1.0 - 1e-6,
+            torch.einsum("kd,mkd->mk", ray_center, ray_all),
+            -1.0 + 1e-6,
+            1.0 - 1e-6,
         )  # (M, K)
         angles = torch.acos(cos_angles)  # (M, K)
-        median_angles = angles.median(dim=-1).values if angles.numel() > 0 else torch.tensor([])  # (M,)
+        median_angles = (
+            angles.median(dim=-1).values
+            if angles.numel() > 0
+            else torch.tensor([])
+        )  # (M,)
 
-        predictions_dict["median_tri_angle"][idx] = np.rad2deg(median_angles) if median_angles.numel() > 0 else np.array([])
-
+        predictions_dict["median_tri_angle"][idx] = (
+            np.rad2deg(median_angles)
+            if median_angles.numel() > 0
+            else np.array([])
+        )
 
     for idx in indexes:
         poses = predictions_dict["extrinsics"][idx]
@@ -55,16 +62,23 @@ def initialize_mst_structures(predictions_dict, global_rotations):
             if i == 0:
                 continue
             idx_j = predictions_dict["indexes"][idx][i]
-            status = not (idx_j, idx_i) in rel_poses
+            status = (idx_j, idx_i) not in rel_poses
             star_idx_i = node_idx_to_star_idx[idx_i]
             star_idx_j = node_idx_to_star_idx[idx_j]
             score = pose_scores[0, i].item()
             if not status:
                 # If either edge has a small triangulation angle, scale is unreliable
-                angle_current = predictions_dict["median_tri_angle"][star_idx_i][i - 1]
+                angle_current = predictions_dict["median_tri_angle"][
+                    star_idx_i
+                ][i - 1]
                 reverse_pos = rel_poses[(idx_j, idx_i)][2]
-                angle_reverse = predictions_dict["median_tri_angle"][star_idx_j][reverse_pos - 1]
-                if angle_current < MIN_TRI_ANGLE or angle_reverse < MIN_TRI_ANGLE:
+                angle_reverse = predictions_dict["median_tri_angle"][
+                    star_idx_j
+                ][reverse_pos - 1]
+                if (
+                    angle_current < MIN_TRI_ANGLE
+                    or angle_reverse < MIN_TRI_ANGLE
+                ):
                     scales[(star_idx_j, star_idx_i)] = 1.0
                     scales[(star_idx_i, star_idx_j)] = 1.0
                 else:
@@ -75,14 +89,11 @@ def initialize_mst_structures(predictions_dict, global_rotations):
                     scales[(star_idx_i, star_idx_j)] = (
                         1.0 / scales[(star_idx_j, star_idx_i)]
                     )
-                score *= min(20, angle_current, angle_reverse) / 20  # downweight the edge if the triangulation angle is small
+                score *= (
+                    min(20, angle_current, angle_reverse) / 20
+                )  # downweight the edge if the triangulation angle is small
 
-            rel_poses[(idx_i, idx_j)] = (
-                poses[0, i].cpu(),
-                idx,
-                i,
-                score
-            )
+            rel_poses[(idx_i, idx_j)] = (poses[0, i].cpu(), idx, i, score)
 
     # Only consider the two side edges
     invalid_edges = []

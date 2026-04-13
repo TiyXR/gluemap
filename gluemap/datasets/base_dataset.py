@@ -1,13 +1,14 @@
 import logging
-import torch
 import os
-from tqdm import tqdm
+
 import imagesize
+import torch
+from tqdm import tqdm
 
 from gluemap.utils.load_fn import (
+    load_and_preprocess_images,
     load_and_preprocess_images_1024,
     load_and_preprocess_images_inner,
-    load_and_preprocess_images,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,19 +24,24 @@ class DemoBaseDataset:
             self.image_size = 512
 
         self.camera_model = (
-            args.camera_model if hasattr(args, "camera_model") else "SIMPLE_PINHOLE"
+            args.camera_model
+            if hasattr(args, "camera_model")
+            else "SIMPLE_PINHOLE"
         )
 
         self.sequential_edges = []  # list of (i, j) tuples, i < j, for immediate sequential neighbors
 
     def load_images(self, indexes, load_1024=False):
         image_paths = [
-            os.path.join(self.images_path[i], self.images_list[i]) for i in indexes
+            os.path.join(self.images_path[i], self.images_list[i])
+            for i in indexes
         ]
 
         # for the case with few images, load images beforehand is more efficient
         if hasattr(self, "has_preloaded"):
-            images = torch.stack([self.images[i] for i in indexes], dim=0).float()
+            images = torch.stack(
+                [self.images[i] for i in indexes], dim=0
+            ).float()
             images_ori = [self.images_ori[i] for i in indexes]
             images_change = [self.images_change[i] for i in indexes]
 
@@ -43,7 +49,9 @@ class DemoBaseDataset:
                 images_1024 = torch.stack(
                     [self.images_1024[i] for i in indexes], dim=0
                 ).float()
-                images_change_1024 = [self.images_change_1024[i] for i in indexes]
+                images_change_1024 = [
+                    self.images_change_1024[i] for i in indexes
+                ]
 
         else:
             if not hasattr(self, "images_ori"):
@@ -54,16 +62,18 @@ class DemoBaseDataset:
                     force_square=self.force_square,
                 )
             else:
-                images, images_ori, images_change = load_and_preprocess_images_inner(
-                    [self.images_ori[i] for i in indexes],
-                    image_size=self.image_size,
-                    patch_size=self.patch_size,
-                    force_square=self.force_square,
+                images, images_ori, images_change = (
+                    load_and_preprocess_images_inner(
+                        [self.images_ori[i] for i in indexes],
+                        image_size=self.image_size,
+                        patch_size=self.patch_size,
+                        force_square=self.force_square,
+                    )
                 )
 
             if load_1024:
-                images_1024, images_change_1024 = load_and_preprocess_images_1024(
-                    images_ori
+                images_1024, images_change_1024 = (
+                    load_and_preprocess_images_1024(images_ori)
                 )
 
         if not load_1024:
@@ -95,7 +105,10 @@ class DemoBaseDataset:
         # Check whether all images have the same size
         # If not, force all images to be square
         unique_shapes = set(images_shape_ori)
-        if len(unique_shapes) == 1 and images_shape_ori[0][0] < images_shape_ori[0][1]:
+        if (
+            len(unique_shapes) == 1
+            and images_shape_ori[0][0] < images_shape_ori[0][1]
+        ):
             self.force_square = False
         else:
             self.force_square = True
@@ -112,7 +125,9 @@ class DemoBaseDataset:
                 self.intrinsics_mapping[i] = shape_to_intrinsics_idx[shape]
         # Otherwise, each image has its own intrinsics
         else:
-            self.intrinsics_mapping = {i: i for i in range(len(self.images_list))}
+            self.intrinsics_mapping = {
+                i: i for i in range(len(self.images_list))
+            }
 
         # if the number of images is fewer than 200 images, directly load the images
         if len(self.images_list) < 200:
@@ -128,8 +143,8 @@ class DemoBaseDataset:
                     force_square=self.force_square,
                 )
             )
-            self.images_1024, self.images_change_1024 = load_and_preprocess_images_1024(
-                self.images_ori
+            self.images_1024, self.images_change_1024 = (
+                load_and_preprocess_images_1024(self.images_ori)
             )
         else:
             logger.warning("images are not preloaded!")

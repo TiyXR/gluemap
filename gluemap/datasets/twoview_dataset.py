@@ -1,8 +1,9 @@
 import logging
-import torch
 import os
-import numpy as np
+
 import faiss
+import numpy as np
+import torch
 
 from gluemap.datasets.base_dataset import DemoBaseDataset
 from gluemap.datasets.utils import get_image_list
@@ -26,7 +27,9 @@ class BaseTwoViewDataset(DemoBaseDataset):
             x.replace(args.images_path, "").strip("/") for x in img_list_full
         ]
 
-        self.images_path = [args.images_path for _ in range(len(self.images_list))]
+        self.images_path = [
+            args.images_path for _ in range(len(self.images_list))
+        ]
 
         # if salad descriptors are available, use them to construct pairs, else, use exhaustive matching
         self._construct_pairs(args, img_list_full)
@@ -45,9 +48,7 @@ class BaseTwoViewDataset(DemoBaseDataset):
             neighbors[self.pairs[i][0]].add(self.pairs[i][1])
             neighbors[self.pairs[i][1]].add(self.pairs[i][0])
 
-        self.neighbors = {
-            k: sorted(list(v)) for k, v in neighbors.items()
-        }
+        self.neighbors = {k: sorted(list(v)) for k, v in neighbors.items()}
         pass
 
     def __len__(self):
@@ -91,12 +92,17 @@ class BaseTwoViewDataset(DemoBaseDataset):
     def _construct_pairs(self, args, img_list):
         # TODO: extract the SALAD descriptors on the fly
 
-        descriptors_path = os.path.join(args.curr_processed, "salad_descriptors.pt")
+        descriptors_path = os.path.join(
+            args.curr_processed, "salad_descriptors.pt"
+        )
         # args.num_neighbors = 100
 
         logger.info(f"Number of neighbors for retrieval: {args.num_neighbors}")
 
-        if os.path.exists(descriptors_path) and len(self.images_list) > args.num_neighbors:
+        if (
+            os.path.exists(descriptors_path)
+            and len(self.images_list) > args.num_neighbors
+        ):
             descriptors_db = torch.load(descriptors_path, weights_only=False)
             # find the corresponding images and only keep the short list
             image_indexes = [
@@ -124,7 +130,9 @@ class BaseTwoViewDataset(DemoBaseDataset):
         chosen_indexes = np.arange(len(self.images_list))
         pairs = np.stack(
             [
-                np.tile(chosen_indexes[..., None], (1, predictions_extend.shape[1])),
+                np.tile(
+                    chosen_indexes[..., None], (1, predictions_extend.shape[1])
+                ),
                 predictions_extend[chosen_indexes],
             ],
             axis=-1,

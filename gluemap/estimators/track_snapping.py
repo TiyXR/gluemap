@@ -7,7 +7,6 @@ import pycolmap
 import torch
 from tqdm import tqdm
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,11 +14,15 @@ class TrackSnapping:
     def __init__(self, snapping_thres=1.0):
         self.snapping_thres = snapping_thres
 
-    def main(self, database_dir, predictions_dict, images_shape_ori, images_list):
+    def main(
+        self, database_dir, predictions_dict, images_shape_ori, images_list
+    ):
         database = pycolmap.Database.open(database_dir)
         images = database.read_all_images()
 
-        image_name_to_idx_db = {images[idx].name: idx for idx in range(len(images))}
+        image_name_to_idx_db = {
+            images[idx].name: idx for idx in range(len(images))
+        }
         image_name_to_standard_path = [str(Path(x)) for x in images_list]
 
         query_points_full = []
@@ -38,10 +41,14 @@ class TrackSnapping:
             scaling_factor = (
                 images_shape_ori[image_idx][0] + images_shape_ori[image_idx][1]
             ) / 1024
-            snapping_thres_dict[image_idx] = self.snapping_thres * scaling_factor
+            snapping_thres_dict[image_idx] = (
+                self.snapping_thres * scaling_factor
+            )
 
         logger.info("Start track snapping")
-        self._snap_tracks(predictions_dict, query_points_full, snapping_thres_dict)
+        self._snap_tracks(
+            predictions_dict, query_points_full, snapping_thres_dict
+        )
 
     def _snap_tracks(self, tracks_dict, query_points_full, snapping_thres):
         tracks_dict["scores"] = {}
@@ -56,7 +63,9 @@ class TrackSnapping:
             for i in range(N):
                 snapping_thres_dict[i] = snapping_thres
         elif not isinstance(snapping_thres, dict):
-            raise ValueError("Snapping threshold should be a float or a dictionary")
+            raise ValueError(
+                "Snapping threshold should be a float or a dictionary"
+            )
         else:
             snapping_thres_dict = snapping_thres
 
@@ -85,7 +94,7 @@ class TrackSnapping:
                         (tracks_dict["tracks"][idx][0, i].shape[0],), dtype=bool
                     )
                 else:
-                    is_close = (D < snapping_thres_dict[idx_inner]).reshape(-1)
+                    is_close = (snapping_thres_dict[idx_inner] > D).reshape(-1)
                     counter += (
                         is_close
                         * (tracks_dict["scores"][idx][0, i] > 0).cpu().numpy()

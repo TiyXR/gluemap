@@ -1,18 +1,17 @@
-import numpy as np
-import torch
-import networkx as nx
-from scipy.spatial.transform import Rotation
+import logging
 
+import networkx as nx
+import numpy as np
 import pyceres
 import pycolmap
 import pygluemap
+import torch
+from scipy.spatial.transform import Rotation
 
 from gluemap.math.geometry import (
-    rotation_matrix_to_quaternion,
     quaternion_to_rotation_matrix,
+    rotation_matrix_to_quaternion,
 )
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,9 @@ def collect_relative_rotations_ministar(prediction_dict):
 
 def _mst_init_rotations(prediction_dict, indexes):
     """Initialize rotations by chaining relative rotations along a maximum spanning tree."""
-    poses_rel, poses_rel_scores = collect_relative_rotations_ministar(prediction_dict)
+    poses_rel, poses_rel_scores = collect_relative_rotations_ministar(
+        prediction_dict
+    )
 
     # Build graph with score weights
     G = nx.Graph()
@@ -58,7 +59,9 @@ def _mst_init_rotations(prediction_dict, indexes):
     mst = nx.maximum_spanning_tree(G)
 
     # Initialize all to identity quaternion [w, x, y, z]
-    rotations = {idx: np.array([1.0, 0, 0, 0], dtype=np.float64) for idx in indexes}
+    rotations = {
+        idx: np.array([1.0, 0, 0, 0], dtype=np.float64) for idx in indexes
+    }
 
     # Pick root as the node with highest degree in MST
     if len(mst.nodes) == 0:
@@ -115,8 +118,11 @@ def rotation_averaging(prediction_dict, init_rotations=None):
     if init_rotations is not None:
         # Use provided rotation matrices as initialization
         rotations = {
-            idx: rotation_matrix_to_quaternion(init_rotations[idx]).astype(np.float64)
-            if idx in init_rotations else np.array([1.0, 0, 0, 0], dtype=np.float64)
+            idx: rotation_matrix_to_quaternion(init_rotations[idx]).astype(
+                np.float64
+            )
+            if idx in init_rotations
+            else np.array([1.0, 0, 0, 0], dtype=np.float64)
             for idx in indexes
         }
     else:
@@ -159,7 +165,9 @@ def rotation_averaging(prediction_dict, init_rotations=None):
         options.linear_solver_type = pyceres.LinearSolverType.DENSE_QR
         options.minimizer_progress_to_stdout = False
     else:
-        options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+        options.linear_solver_type = (
+            pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
+        )
         options.minimizer_progress_to_stdout = True
 
     options.num_threads = -1
@@ -191,7 +199,11 @@ def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
     # Build a minimal Reconstruction: one dummy camera + one image per index
     reconstruction = pycolmap.Reconstruction()
     camera = pycolmap.Camera(
-        camera_id=0, model="SIMPLE_PINHOLE", width=1, height=1, params=[1.0, 0.0, 0.0]
+        camera_id=0,
+        model="SIMPLE_PINHOLE",
+        width=1,
+        height=1,
+        params=[1.0, 0.0, 0.0],
     )
     reconstruction.add_camera_with_trivial_rig(camera)
     for idx in sorted(indexes):
@@ -215,7 +227,12 @@ def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
 
     pose_graph = pycolmap.PoseGraph()
     for pair, (score, idx_star, j, idx1, idx2) in best_edges.items():
-        pose_3x4 = prediction_dict["extrinsics"][idx_star][0, j].cpu().numpy().astype(np.float64)
+        pose_3x4 = (
+            prediction_dict["extrinsics"][idx_star][0, j]
+            .cpu()
+            .numpy()
+            .astype(np.float64)
+        )
         R = pose_3x4[:3, :3]
         t = pose_3x4[:3, 3]
         quat = Rotation.from_matrix(R).as_quat()  # (x, y, z, w)
@@ -233,7 +250,9 @@ def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
     options.weight_type = pycolmap.RotationWeightType.GEMAN_MCCLURE
 
     # Solve
-    success = pycolmap.run_rotation_averaging(options, pose_graph, reconstruction, [])
+    success = pycolmap.run_rotation_averaging(
+        options, pose_graph, reconstruction, []
+    )
     logger.info(f"Rotation averaging {'succeeded' if success else 'failed'}")
 
     # Extract rotations from reconstruction frames
@@ -241,7 +260,9 @@ def rotation_averaging_pycolmap(prediction_dict, max_rotation_error_deg=5.0):
     for idx in indexes:
         frame = reconstruction.frames[idx]
         if frame.has_pose():
-            rotations[idx] = np.array(frame.rig_from_world.rotation.matrix(), dtype=np.float64)
+            rotations[idx] = np.array(
+                frame.rig_from_world.rotation.matrix(), dtype=np.float64
+            )
         else:
             rotations[idx] = np.eye(3, dtype=np.float64)
 

@@ -1,5 +1,4 @@
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pycolmap
@@ -57,7 +56,8 @@ def compute_point_error(
             return float("inf")
         projected = camera.img_from_cam(X_cam)
         pixel_error = np.sqrt(
-            (projected[0] - observed[0]) ** 2 + (projected[1] - observed[1]) ** 2
+            (projected[0] - observed[0]) ** 2
+            + (projected[1] - observed[1]) ** 2
         )
         if error_type == ReprojectionErrorType.NORMALIZED:
             return pixel_error / camera.focal_length
@@ -123,10 +123,10 @@ def _compute_errors_batch(
 def compute_all_errors_from_reconstruction(
     reconstruction: pycolmap.Reconstruction,
     error_type: ReprojectionErrorType = ReprojectionErrorType.PIXEL,
-    negative_depth_observations: Optional[Dict[int, set]] = None,
-    virtual_point_start: Optional[Dict[int, int]] = None,
-    fisheye_cameras: Optional[Dict[int, pycolmap.Camera]] = None,
-) -> Dict[int, List[Tuple[int, int, float]]]:
+    negative_depth_observations: dict[int, set] | None = None,
+    virtual_point_start: dict[int, int] | None = None,
+    fisheye_cameras: dict[int, pycolmap.Camera] | None = None,
+) -> dict[int, list[tuple[int, int, float]]]:
     """
     Compute errors for all 3D point track observations in a reconstruction.
 
@@ -146,9 +146,9 @@ def compute_all_errors_from_reconstruction(
     """
     # --- First pass: gather observations per image ---
     # obs_by_image[image_id] = list of (point3D_id, pt_idx, world_xyz)
-    obs_by_image: Dict[int, List[Tuple[int, int, np.ndarray]]] = {}
+    obs_by_image: dict[int, list[tuple[int, int, np.ndarray]]] = {}
     # Track invalid observations (missing image/camera/out-of-bounds)
-    invalid_obs: Dict[int, List[Tuple[int, int]]] = {}
+    invalid_obs: dict[int, list[tuple[int, int]]] = {}
 
     for point3D_id, point3D in reconstruction.points3D.items():
         world_point = point3D.xyz
@@ -159,16 +159,22 @@ def compute_all_errors_from_reconstruction(
             image_id, pt_idx = elem.image_id, elem.point2D_idx
 
             if image_id not in reconstruction.images:
-                invalid_obs.setdefault(point3D_id, []).append((image_id, pt_idx))
+                invalid_obs.setdefault(point3D_id, []).append(
+                    (image_id, pt_idx)
+                )
                 continue
 
             image = reconstruction.images[image_id]
             if pt_idx >= len(image.points2D):
-                invalid_obs.setdefault(point3D_id, []).append((image_id, pt_idx))
+                invalid_obs.setdefault(point3D_id, []).append(
+                    (image_id, pt_idx)
+                )
                 continue
 
             if image.camera_id not in reconstruction.cameras:
-                invalid_obs.setdefault(point3D_id, []).append((image_id, pt_idx))
+                invalid_obs.setdefault(point3D_id, []).append(
+                    (image_id, pt_idx)
+                )
                 continue
 
             obs_by_image.setdefault(image_id, []).append(
@@ -177,7 +183,7 @@ def compute_all_errors_from_reconstruction(
 
     # --- Second pass: vectorized per-image error computation ---
     # error_results[(point3D_id, image_id, pt_idx)] = error
-    error_results: Dict[Tuple[int, int, int], float] = {}
+    error_results: dict[tuple[int, int, int], float] = {}
 
     for image_id, obs_list in obs_by_image.items():
         image = reconstruction.images[image_id]
@@ -210,18 +216,30 @@ def compute_all_errors_from_reconstruction(
             if not group:
                 continue
             _process_obs_group(
-                group, image, pose, cam, image_id,
-                negative_depth_observations, error_type, error_results,
+                group,
+                image,
+                pose,
+                cam,
+                image_id,
+                negative_depth_observations,
+                error_type,
+                error_results,
             )
 
         if has_fisheye and fisheye_obs:
             _process_obs_group(
-                fisheye_obs, image, pose, fisheye_cameras[camera_id],
-                image_id, negative_depth_observations, error_type, error_results,
+                fisheye_obs,
+                image,
+                pose,
+                fisheye_cameras[camera_id],
+                image_id,
+                negative_depth_observations,
+                error_type,
+                error_results,
             )
 
     # --- Third pass: assemble errors_per_track ---
-    errors_per_track: Dict[int, List[Tuple[int, int, float]]] = {}
+    errors_per_track: dict[int, list[tuple[int, int, float]]] = {}
 
     for point3D_id, point3D in reconstruction.points3D.items():
         world_point = point3D.xyz
@@ -248,14 +266,14 @@ def compute_all_errors_from_reconstruction(
 
 
 def _process_obs_group(
-    group: List[Tuple[int, int, np.ndarray]],
+    group: list[tuple[int, int, np.ndarray]],
     image: pycolmap.Image,
     pose,
     camera: pycolmap.Camera,
     image_id: int,
-    negative_depth_observations: Optional[Dict[int, set]],
+    negative_depth_observations: dict[int, set] | None,
     error_type: ReprojectionErrorType,
-    error_results: Dict[Tuple[int, int, int], float],
+    error_results: dict[tuple[int, int, int], float],
 ) -> None:
     """Process a group of observations for one image+camera, writing results into error_results."""
     point3D_ids = [g[0] for g in group]
@@ -267,13 +285,18 @@ def _process_obs_group(
     X_cam = pose * world_points  # (N, 3)
 
     # Build negative-depth mask
-    if negative_depth_observations is not None and image_id in negative_depth_observations:
+    if (
+        negative_depth_observations is not None
+        and image_id in negative_depth_observations
+    ):
         neg_set = negative_depth_observations[image_id]
         neg_mask = np.array([idx in neg_set for idx in pt_idxs], dtype=bool)
     else:
         neg_mask = np.zeros(len(group), dtype=bool)
 
-    errors = _compute_errors_batch(X_cam, observed, camera, neg_mask, error_type)
+    errors = _compute_errors_batch(
+        X_cam, observed, camera, neg_mask, error_type
+    )
 
     for i, (p3d_id, pt_idx) in enumerate(zip(point3D_ids, pt_idxs)):
         error_results[(p3d_id, image_id, pt_idx)] = float(errors[i])

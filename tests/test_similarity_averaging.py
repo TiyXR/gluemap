@@ -3,16 +3,15 @@
 import logging
 
 import numpy as np
-import pytest
 
 from gluemap.estimators.similarity_averaging import similarity_averaging
 from tests.helpers import (
-    create_synthetic_reconstruction,
-    extract_gt,
+    build_predictions_dict,
     build_star_topology_full,
     build_star_topology_sparse,
-    build_predictions_dict,
+    create_synthetic_reconstruction,
     evaluate_centers,
+    extract_gt,
     max_center_error,
 )
 
@@ -54,7 +53,9 @@ class TestSimilarityAveragingFixedScales:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=init_scales,
             max_num_iterations=200,
             fix_scales=True,
@@ -91,7 +92,9 @@ class TestSimilarityAveragingFixedScales:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=init_scales,
             max_num_iterations=200,
             fix_scales=True,
@@ -127,7 +130,9 @@ class TestSimilarityAveragingFreeScales:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,
@@ -159,7 +164,9 @@ class TestSimilarityAveragingFreeScales:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,
@@ -200,7 +207,9 @@ class TestSimilarityAveragingRobustness:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,
@@ -238,7 +247,9 @@ class TestSimilarityAveragingRobustness:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,
@@ -276,7 +287,9 @@ class TestSimilarityAveragingMultiRig:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,
@@ -310,7 +323,9 @@ class TestSimilarityAveragingMultiRig:
         recovered = similarity_averaging(
             predictions_dict,
             gt_rotations,
-            global_centers={k: v.astype(np.float64) for k, v in init_centers.items()},
+            global_centers={
+                k: v.astype(np.float64) for k, v in init_centers.items()
+            },
             global_scales=None,
             max_num_iterations=200,
             fix_scales=False,

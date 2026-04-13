@@ -1,20 +1,23 @@
 import logging
 import os
 import time
+
 import torch
 
 from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
-from gluemap.utils.colmap import write_to_colmap_format
 from gluemap.math.scaling import rescale_intrinsics
+from gluemap.utils.colmap import write_to_colmap_format
 
 
 def restore_intrinsics(intrinsics, images_change, inverse=False):
     scales_curr = [images_change[j] for j in range(len(images_change))]
     intrinscs_curr = [intrinsics[:, j] for j in range(len(scales_curr))]
-    intrinscs_curr = torch.stack(rescale_intrinsics(intrinscs_curr, scales_curr, inverse=inverse), dim=1)
+    intrinscs_curr = torch.stack(
+        rescale_intrinsics(intrinscs_curr, scales_curr, inverse=inverse), dim=1
+    )
     return intrinscs_curr
 
 
@@ -72,8 +75,15 @@ def _build_global_intrinsics(intrinsics, intrinsics_mapping, num_cameras):
 
 
 def run_direct_inference_pipeline(
-    args, dataset_pair, world_size, rank, device, dtype,
-    pairs=None, device_id="0", models=None,
+    args,
+    dataset_pair,
+    world_size,
+    rank,
+    device,
+    dtype,
+    pairs=None,
+    device_id="0",
+    models=None,
 ):
     """
     Direct backbone inference: load all images, run backbone, write COLMAP.
@@ -130,13 +140,19 @@ def run_direct_inference_pipeline(
         N = len(dataset_pair.images_list)
 
         from gluemap.utils.load_fn import load_and_preprocess_images
+
         image_paths = [
-            os.path.join(dataset_pair.images_path[i], dataset_pair.images_list[i])
+            os.path.join(
+                dataset_pair.images_path[i], dataset_pair.images_list[i]
+            )
             for i in range(N)
         ]
         force_square = getattr(dataset_pair, "force_square", True)
         images, images_ori, images_change = load_and_preprocess_images(
-            image_paths, image_size=518, patch_size=14, force_square=force_square,
+            image_paths,
+            image_size=518,
+            patch_size=14,
+            force_square=force_square,
         )
         images = images.unsqueeze(0).float()  # (1, N, 3, H, W)
         timing["image_loading"] = time.perf_counter() - t0
@@ -174,11 +190,14 @@ def run_direct_inference_pipeline(
 
         # Save cache
         if rank == 0:
-            torch.save({
-                "global_rotations": global_rotations,
-                "global_centers": global_centers,
-                "global_intrinsics": global_intrinsics,
-            }, cache_file)
+            torch.save(
+                {
+                    "global_rotations": global_rotations,
+                    "global_centers": global_centers,
+                    "global_intrinsics": global_intrinsics,
+                },
+                cache_file,
+            )
 
     # Step 5: Write COLMAP output (rank 0 only)
     if rank == 0:
@@ -203,15 +222,23 @@ def run_direct_inference_pipeline(
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
         logger.info(f"[Direct Inference Profiling] Backbone: {backbone}")
-        logger.info(f"  Model loading:    {timing.get('model_loading', 0):.2f}s")
-        logger.info(f"  Image loading:    {timing.get('image_loading', 0):.2f}s")
+        logger.info(
+            f"  Model loading:    {timing.get('model_loading', 0):.2f}s"
+        )
+        logger.info(
+            f"  Image loading:    {timing.get('image_loading', 0):.2f}s"
+        )
         logger.info(f"  Forward pass:     {timing.get('forward_pass', 0):.2f}s")
-        logger.info(f"  Pose extraction:  {timing.get('pose_extraction', 0):.2f}s")
+        logger.info(
+            f"  Pose extraction:  {timing.get('pose_extraction', 0):.2f}s"
+        )
         logger.info(f"  Write COLMAP:     {timing.get('write_colmap', 0):.2f}s")
         logger.info(f"  Total pipeline:   {timing['total_pipeline']:.2f}s")
 
         # Save timing
-        timing_path = os.path.join(args.curr_path, f"pipeline_timing_direct_{backbone}.pth")
+        timing_path = os.path.join(
+            args.curr_path, f"pipeline_timing_direct_{backbone}.pth"
+        )
         torch.save(timing, timing_path)
 
         return output_dir, timing

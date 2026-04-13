@@ -1,5 +1,5 @@
-from lightglue import SuperPoint, SIFT, ALIKED
 import torch
+from lightglue import ALIKED, SIFT, SuperPoint
 
 from gluemap.math.geometry import bilinear_interpolate_value
 
@@ -38,7 +38,9 @@ def get_query_points_from_extractors(
         Tensor of shape (1, N, 2) containing (x, y) keypoint coordinates, where
         N equals ``max_query_num`` when ``strict_num`` is True.
     """
-    pred_points = [extractor.extract(query_image)["keypoints"] for extractor in extractors]
+    pred_points = [
+        extractor.extract(query_image)["keypoints"] for extractor in extractors
+    ]
     query_points = torch.cat(pred_points, dim=1)
 
     # Remove points outside the mask
@@ -50,7 +52,9 @@ def get_query_points_from_extractors(
 
     if query_points.shape[1] < max_query_num:
         if query_points.shape[1] == 0:
-            query_points = torch.rand(1, max_query_num, 2, device=query_image.device)
+            query_points = torch.rand(
+                1, max_query_num, 2, device=query_image.device
+            )
             return query_points
 
     if query_points.shape[1] > max_query_num:
@@ -63,8 +67,11 @@ def get_query_points_from_extractors(
             scores = sim_score[
                 0,
                 (
-                    torch.clamp(query_points[0, :, 1], 0, img_width) // bin_width * bins
-                    + torch.clamp(query_points[0, :, 0], 0, img_width) // bin_width
+                    torch.clamp(query_points[0, :, 1], 0, img_width)
+                    // bin_width
+                    * bins
+                    + torch.clamp(query_points[0, :, 0], 0, img_width)
+                    // bin_width
                 ).long(),
             ].sum(dim=1)
             if bbox is not None:
@@ -82,7 +89,9 @@ def get_query_points_from_extractors(
                 scores, max_query_num, replacement=False
             )
         else:
-            random_point_indices = torch.randperm(query_points.shape[1])[:max_query_num]
+            random_point_indices = torch.randperm(query_points.shape[1])[
+                :max_query_num
+            ]
         query_points = query_points[:, random_point_indices, :]
     # If we required the strict number of points, we need to add some random points
     elif strict_num:
@@ -141,7 +150,8 @@ def get_query_points(
         if "sp" in method:
             extractor = (
                 SuperPoint(
-                    max_num_keypoints=max_query_num_raw, detection_threshold=det_thres
+                    max_num_keypoints=max_query_num_raw,
+                    detection_threshold=det_thres,
                 )
                 .to(query_image.device)
                 .eval()
@@ -149,18 +159,23 @@ def get_query_points(
         elif "sift" in method:
             # extractor = SIFT(max_num_keypoints=max_query_num_raw, backend="pycolmap_cpu").cuda().eval()
             extractor = (
-                SIFT(max_num_keypoints=max_query_num_raw).to(query_image.device).eval()
+                SIFT(max_num_keypoints=max_query_num_raw)
+                .to(query_image.device)
+                .eval()
             )
         elif "aliked" in method:
             extractor = (
                 ALIKED(
-                    max_num_keypoints=max_query_num_raw, detection_threshold=det_thres
+                    max_num_keypoints=max_query_num_raw,
+                    detection_threshold=det_thres,
                 )
                 .to(query_image.device)
                 .eval()
             )
         else:
-            raise NotImplementedError(f"query method {method} is not supprted now")
+            raise NotImplementedError(
+                f"query method {method} is not supprted now"
+            )
         extractors.append(extractor)
 
     return get_query_points_from_extractors(

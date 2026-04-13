@@ -1,6 +1,6 @@
 import torch
-from mapanything.utils.image import preprocess_inputs
 from mapanything.utils.geometry import closed_form_pose_inverse
+from mapanything.utils.image import preprocess_inputs
 
 from gluemap.ff_inference.local_inference import LocalInference
 
@@ -33,7 +33,10 @@ class MapAnythingLocalInference(LocalInference):
 
     @staticmethod
     def _compose_input_views(
-        images, global_rotations=None, global_centers=None, global_intrinsics=None
+        images,
+        global_rotations=None,
+        global_centers=None,
+        global_intrinsics=None,
     ):
         import numpy as np
 

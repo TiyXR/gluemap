@@ -6,9 +6,12 @@ import numpy as np
 import pycolmap
 import torch
 
+
 # TODO: add an option to generate grid like reconstructions
 # TODO: thoroughly verify the file
-def create_synthetic_reconstruction(num_frames=8, num_points3D=100, num_rigs=1, seed=0):
+def create_synthetic_reconstruction(
+    num_frames=8, num_points3D=100, num_rigs=1, seed=0
+):
     """Create a pycolmap synthetic reconstruction with known ground truth."""
     pycolmap.set_random_seed(seed)
     opts = pycolmap.SyntheticDatasetOptions()
@@ -139,7 +142,9 @@ def build_predictions_dict(
         predictions_dict["extrinsics"][idx_star] = extrinsics
 
         if not generate_points3d_virtual:
-            predictions_dict["median_tri_angle"][idx_star] = torch.full((n - 1,), 15.0)
+            predictions_dict["median_tri_angle"][idx_star] = torch.full(
+                (n - 1,), 15.0
+            )
         else:
             # Random 3D points in center camera frame with good depth spread
             xyz = np.zeros((num_points3d, 3))
@@ -187,7 +192,9 @@ def evaluate_centers(gt_reconstruction, gt_rotations, recovered_centers):
         max_proj_center_error=100.0,
     )
 
-    assert result is not None, "compare_reconstructions returned None (alignment failed)"
+    assert result is not None, (
+        "compare_reconstructions returned None (alignment failed)"
+    )
     return result["errors"]
 
 

@@ -17,14 +17,14 @@ class UnionFind:
             return x
         while self.parent[root] != root:
             root = self.parent[root]
-        
+
         # Path compression in the second pass
         curr = x
         while self.parent[curr] != root:
             next_node = self.parent[curr]
             self.parent[curr] = root
             curr = next_node
-            
+
         return root
 
     def union(self, x, y):

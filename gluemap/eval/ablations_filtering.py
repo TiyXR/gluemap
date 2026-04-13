@@ -1,15 +1,15 @@
 import logging
 import os
 import time
+
 import torch
-from gluemap.utils.colmap import write_to_colmap_format
 
 logger = logging.getLogger(__name__)
 
-from gluemap.controllers.twoview_inference import run_twoview_inference
-from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.star_collection import run_star_collection
+from gluemap.controllers.star_inference import run_star_inference
+from gluemap.controllers.twoview_inference import run_twoview_inference
 
 
 def add_ablation_args(parser):
@@ -28,7 +28,14 @@ def add_ablation_args(parser):
 
 
 def run_ablation_inference_pipeline(
-    args, dataset_pair, world_size, rank, device, dtype, pairs=None, device_id="0",
+    args,
+    dataset_pair,
+    world_size,
+    rank,
+    device,
+    dtype,
+    pairs=None,
+    device_id="0",
     models=None,
 ):
     """
@@ -72,7 +79,9 @@ def run_ablation_inference_pipeline(
 
     # Step 1: Two-view inference (or skip with ablation)
     if skip_dg:
-        logger.info("[Ablation] Skipping Doppelgangers: setting all pair scores to 1.0")
+        logger.info(
+            "[Ablation] Skipping Doppelgangers: setting all pair scores to 1.0"
+        )
         global_outputs = {
             "scores": torch.ones(len(dataset_pair)),
             "pairs": dataset_pair.pairs,
@@ -112,7 +121,9 @@ def run_ablation_inference_pipeline(
 
     # Ablation: override pose_scores to disable back-and-forth filtering
     if skip_bnf:
-        logger.info("[Ablation] Skipping back-and-forth filtering: setting all pose_scores to 1.0")
+        logger.info(
+            "[Ablation] Skipping back-and-forth filtering: setting all pose_scores to 1.0"
+        )
         for idx in range(len(predictions_dict["pose_scores"])):
             predictions_dict["pose_scores"][idx] = torch.ones_like(
                 predictions_dict["pose_scores"][idx]
@@ -156,12 +167,20 @@ def run_ablation_inference_pipeline(
             ablation_flags.append("skip_doppelgangers")
         if skip_bnf:
             ablation_flags.append("skip_back_and_forth")
-        logger.info(f"[Ablation Profiling] Active ablations: {', '.join(ablation_flags)}")
-        logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
-              f"inference={twoview_timing['total']:.2f}s")
-        logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-        logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
-              f"inference={star_timing['total']:.2f}s")
+        logger.info(
+            f"[Ablation Profiling] Active ablations: {', '.join(ablation_flags)}"
+        )
+        logger.info(
+            f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+            f"inference={twoview_timing['total']:.2f}s"
+        )
+        logger.info(
+            f"  Dataset generation:    {timing['dataset_generation']:.2f}s"
+        )
+        logger.info(
+            f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+            f"inference={star_timing['total']:.2f}s"
+        )
         logger.info(f"  Postprocessing:        {postproc_timing['total']:.2f}s")
         logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 

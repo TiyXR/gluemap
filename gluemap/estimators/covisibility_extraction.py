@@ -1,12 +1,12 @@
-import torch
-import networkx as nx
 import einops
+import networkx as nx
+import torch
 
 from gluemap.math.geometry import (
+    bilinear_interpolate_value,
+    project,
     project_tracks,
     unproject,
-    project,
-    bilinear_interpolate_value,
 )
 from gluemap.math.scaling import rescale_tracks_single
 
@@ -93,7 +93,9 @@ class CovisibilityExtraction:
                 depth_transformed.cpu(),
             )
 
-    def _calculate_virtual_tracks(self, depth, extrinsics, intrinsic, valid_mask):
+    def _calculate_virtual_tracks(
+        self, depth, extrinsics, intrinsic, valid_mask
+    ):
         # Use the valid to obtain a distribution of the depth
         # Assuming the first image has the identity matrix
         B, N, H, W, _ = depth.shape
@@ -137,9 +139,7 @@ class CovisibilityExtraction:
         image_rays = unproject(
             einops.rearrange(grids_coarse, "b h w d -> b (h w) d"),
             einops.rearrange(intrinsic[:, 0], "b d c -> b d c"),
-        ).reshape(
-            B, H // 14, W // 14, 3
-        )  # (B, H, W, 3)
+        ).reshape(B, H // 14, W // 14, 3)  # (B, H, W, 3)
 
         world_points = torch.einsum(
             "b h w d, b d c -> b h w c",
@@ -149,9 +149,7 @@ class CovisibilityExtraction:
 
         ori_depth = torch.where(
             valid_depth_mask, depth[:, 0][..., 0], median_depth
-        ).unsqueeze(
-            -1
-        )  # (B, H, W, 1)
+        ).unsqueeze(-1)  # (B, H, W, 1)
         selected_depth = ori_depth[:, 7::14, 7::14]
         # Add noise to the depth with 10% of the current depth as the noise
         noise = torch.randn_like(selected_depth) * 0.1 * selected_depth
@@ -227,12 +225,15 @@ class CovisibilityExtraction:
                 "b n h w c, b d c -> b n h w d",
                 world_points,
                 extrinsics[:, 0, :3, :3],
-            ) + extrinsics[:, :1, :3, 3].expand(-1, N, -1).unsqueeze(2).unsqueeze(3)
+            ) + extrinsics[:, :1, :3, 3].expand(-1, N, -1).unsqueeze(
+                2
+            ).unsqueeze(3)
             # Project the points to the image plane
             image_points_j = project(
                 einops.rearrange(world_points_j, "b n h w d -> (b n) (h w) d"),
                 einops.rearrange(
-                    intrinsic[:, :1].expand(-1, N, -1, -1), "b n d c -> (b n) d c"
+                    intrinsic[:, :1].expand(-1, N, -1, -1),
+                    "b n d c -> (b n) d c",
                 ),
             )
 
@@ -243,8 +244,12 @@ class CovisibilityExtraction:
             | (image_points_j[..., 1] >= H)
         ).reshape(B, N, H, W)
 
-        image_points_j[..., 0] = torch.clamp(image_points_j[..., 0], min=0, max=W)
-        image_points_j[..., 1] = torch.clamp(image_points_j[..., 1], min=0, max=H)
+        image_points_j[..., 0] = torch.clamp(
+            image_points_j[..., 0], min=0, max=W
+        )
+        image_points_j[..., 1] = torch.clamp(
+            image_points_j[..., 1], min=0, max=H
+        )
 
         # Transform the points from the other frames to the first frame
         if from_0_to_j:
@@ -264,14 +269,17 @@ class CovisibilityExtraction:
                 "b n h w c, b d c -> b n h w d",
                 world_points_j_prime,
                 extrinsics[:, 0, :3, :3],
-            ) + extrinsics[:, :1, :3, 3].expand(-1, N, -1).unsqueeze(2).unsqueeze(3)
+            ) + extrinsics[:, :1, :3, 3].expand(-1, N, -1).unsqueeze(
+                2
+            ).unsqueeze(3)
             # Project the points to the image plane
             image_points_i = project(
                 einops.rearrange(
                     world_points_i_prime, "b n h w d -> (b n) (h w) d"
                 ),
                 einops.rearrange(
-                    intrinsic[:, :1].expand(-1, N, -1, -1), "b n d c -> (b n) d c"
+                    intrinsic[:, :1].expand(-1, N, -1, -1),
+                    "b n d c -> (b n) d c",
                 ),
             ).reshape(B, N, H, W, 2)
 
@@ -311,10 +319,14 @@ class CovisibilityExtraction:
             torch.arange(0, W), torch.arange(0, H), indexing="xy"
         )
         grids = (
-            torch.stack((grid_x, grid_y), dim=-1).float().to(world_points.device)
+            torch.stack((grid_x, grid_y), dim=-1)
+            .float()
+            .to(world_points.device)
         )  # (H, W, 2)
 
-        image_points_j = image_points_j.reshape(B, N, H, W, 2)  # (B, N, H, W, 2)
+        image_points_j = image_points_j.reshape(
+            B, N, H, W, 2
+        )  # (B, N, H, W, 2)
         if images_change is not None:
             images_change_temp = images_change.clone().unsqueeze(-2)
             corners_x = torch.stack(
@@ -332,13 +344,19 @@ class CovisibilityExtraction:
                 dim=-1,
             )  # (B, N, 2)
             corners_x_new = (
-                (corners_x * images_change_temp[..., 0] + images_change_temp[..., 2])
+                (
+                    corners_x * images_change_temp[..., 0]
+                    + images_change_temp[..., 2]
+                )
                 .unsqueeze(-2)
                 .unsqueeze(-2)
                 .to(device=world_points.device)
             )
             corners_y_new = (
-                (corners_y * images_change_temp[..., 1] + images_change_temp[..., 3])
+                (
+                    corners_y * images_change_temp[..., 1]
+                    + images_change_temp[..., 3]
+                )
                 .unsqueeze(-2)
                 .unsqueeze(-2)
                 .to(device=world_points.device)
@@ -347,10 +365,22 @@ class CovisibilityExtraction:
             # Initial points should be in the range of [0, W] and [0, H]
             invalid_i2j = (
                 invalid_i2j
-                | (grids[..., 0].unsqueeze(0).unsqueeze(1) < corners_x_new[..., 0])
-                | (grids[..., 1].unsqueeze(0).unsqueeze(1) < corners_y_new[..., 0])
-                | (grids[..., 0].unsqueeze(0).unsqueeze(1) >= corners_x_new[..., 1])
-                | (grids[..., 1].unsqueeze(0).unsqueeze(1) >= corners_y_new[..., 1])
+                | (
+                    grids[..., 0].unsqueeze(0).unsqueeze(1)
+                    < corners_x_new[..., 0]
+                )
+                | (
+                    grids[..., 1].unsqueeze(0).unsqueeze(1)
+                    < corners_y_new[..., 0]
+                )
+                | (
+                    grids[..., 0].unsqueeze(0).unsqueeze(1)
+                    >= corners_x_new[..., 1]
+                )
+                | (
+                    grids[..., 1].unsqueeze(0).unsqueeze(1)
+                    >= corners_y_new[..., 1]
+                )
             )
 
             # Transformed points should be in the range of [0, W] and [0, H]
@@ -365,9 +395,7 @@ class CovisibilityExtraction:
             valid_number = (
                 (corners_x_new[..., 1] - corners_x_new[..., 0])
                 * (corners_y_new[..., 1] - corners_y_new[..., 0])
-            ).flatten(
-                -3, -1
-            )  # (B, N)
+            ).flatten(-3, -1)  # (B, N)
         else:
             valid_number = H * W
 
@@ -394,10 +422,10 @@ class CovisibilityExtraction:
 
         B, N, H, W, _ = world_points.shape
 
-        if not images_shape_ori is None:
-            assert (
-                not images_change is None
-            ), "If images_shape_ori is not None, images_change should not be None."
+        if images_shape_ori is not None:
+            assert images_change is not None, (
+                "If images_shape_ori is not None, images_change should not be None."
+            )
             assert images_change.shape == (
                 B,
                 N,
@@ -419,13 +447,15 @@ class CovisibilityExtraction:
                 images_shape_ori=images_shape_ori,
             )
         )
-        image_points_j, world_points_i_prime, invalid_i2j, _ = self._project_point(
-            world_points,
-            extrinsics,
-            intrinsic,
-            from_0_to_j=False,
-            images_change=images_change,
-            images_shape_ori=images_shape_ori,
+        image_points_j, world_points_i_prime, invalid_i2j, _ = (
+            self._project_point(
+                world_points,
+                extrinsics,
+                intrinsic,
+                from_0_to_j=False,
+                images_change=images_change,
+                images_shape_ori=images_shape_ori,
+            )
         )
 
         # Check the different between the projected points and the original grid
@@ -433,7 +463,9 @@ class CovisibilityExtraction:
             torch.arange(0, W), torch.arange(0, H), indexing="xy"
         )
         grids = (
-            torch.stack((grid_x, grid_y), dim=-1).float().to(world_points.device)
+            torch.stack((grid_x, grid_y), dim=-1)
+            .float()
+            .to(world_points.device)
         )  # (H, W, 2)
 
         errors_i = torch.norm(
@@ -509,7 +541,9 @@ class CovisibilityExtraction:
                     (
                         valid_i[j].item(),
                         valid_j[j].item(),
-                        -torch.log(scores_all[i, valid_i[j], valid_j[j]]).item(),
+                        -torch.log(
+                            scores_all[i, valid_i[j], valid_j[j]]
+                        ).item(),
                     )
                     for j in range(len(valid_i))
                 ]
@@ -520,7 +554,9 @@ class CovisibilityExtraction:
             G.add_weighted_edges_from(list(valid_edges))
 
             # Get the shortest distance between every nodes to the center
-            lengths = nx.single_source_dijkstra_path_length(G, 0, weight="weight")
+            lengths = nx.single_source_dijkstra_path_length(
+                G, 0, weight="weight"
+            )
             scores_inner[i] = torch.exp(
                 -torch.tensor(
                     [

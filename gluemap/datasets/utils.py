@@ -1,9 +1,10 @@
-import logging
-import torch
-import os
 import glob
-import numpy as np
+import logging
+import os
+
 import faiss
+import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,9 @@ def get_image_list(images_path):
     return img_list
 
 
-def establish_neighbors_sequential(image_names, num_neighbors=30, return_raw=False):
+def establish_neighbors_sequential(
+    image_names, num_neighbors=30, return_raw=False
+):
     N = len(image_names)
     num_neighbors = min(num_neighbors, N - 1)
 
@@ -52,7 +55,8 @@ def establish_neighbors_sequential(image_names, num_neighbors=30, return_raw=Fal
 
     neighbors_ori = torch.Tensor(neighbors_all).long()
     neighbors = torch.cat(
-        [torch.arange(N).unsqueeze(1).to(neighbors_ori.device), neighbors_ori], dim=1
+        [torch.arange(N).unsqueeze(1).to(neighbors_ori.device), neighbors_ori],
+        dim=1,
     )
 
     return neighbors
@@ -61,10 +65,11 @@ def establish_neighbors_sequential(image_names, num_neighbors=30, return_raw=Fal
 def retrieve_global_neighbors(args, neighbors_sequential, descriptors_all):
     logger.info("Establishing global neighbors...")
     neighbors_local = [
-        x[i].cpu().numpy() for x in neighbors_sequential for i in range(x.shape[0])
+        x[i].cpu().numpy()
+        for x in neighbors_sequential
+        for i in range(x.shape[0])
     ]
     if args.num_neighbors > 0:
-
         descriptors_db = torch.cat(descriptors_all, dim=0)
         embed_size = descriptors_db.shape[1]
         faiss_index = faiss.IndexFlatL2(embed_size)
@@ -72,7 +77,8 @@ def retrieve_global_neighbors(args, neighbors_sequential, descriptors_all):
 
         chosen_indexes = np.arange(descriptors_db.shape[0])
         sampled_neighbors = [
-            set(neighbors_local[i].tolist()) for i in range(len(neighbors_local))
+            set(neighbors_local[i].tolist())
+            for i in range(len(neighbors_local))
         ]
         distance_extend, predictions_extend = faiss_index.search(
             descriptors_db[chosen_indexes],
@@ -93,14 +99,18 @@ def retrieve_global_neighbors(args, neighbors_sequential, descriptors_all):
         ]
 
         # Build retrieval pairs directly (rows may have different lengths after filtering)
-        pairs_retrieval = np.array(
-            [
-                (i, predictions_extend[i][j])
-                for i in range(len(predictions_extend))
-                for j in chosen_indexes_item[i]
-            ],
-            dtype=int,
-        ).reshape(-1, 2) if any(len(c) > 0 for c in chosen_indexes_item) else np.zeros((0, 2), dtype=int)
+        pairs_retrieval = (
+            np.array(
+                [
+                    (i, predictions_extend[i][j])
+                    for i in range(len(predictions_extend))
+                    for j in chosen_indexes_item[i]
+                ],
+                dtype=int,
+            ).reshape(-1, 2)
+            if any(len(c) > 0 for c in chosen_indexes_item)
+            else np.zeros((0, 2), dtype=int)
+        )
     else:
         pairs_retrieval = np.zeros((0, 2), dtype=int)
 
@@ -131,8 +141,7 @@ def retrieve_global_neighbors(args, neighbors_sequential, descriptors_all):
     # collect back and forth
     pairs = np.concatenate([pairs, pairs[:, ::-1]], axis=0)
     pairs = pairs[
-        (pairs[:, 0] >= 0) & (pairs[:, 1] >= 0) &
-        (pairs[:, 0] < pairs[:, 1])
+        (pairs[:, 0] >= 0) & (pairs[:, 1] >= 0) & (pairs[:, 0] < pairs[:, 1])
     ]  # only keep valid pairs where the first index is less than the second
     pairs = np.unique(pairs, axis=0)  # remove duplicates
     return pairs

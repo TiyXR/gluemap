@@ -1,27 +1,21 @@
+import logging
 
+import networkx as nx
 import numpy as np
 import torch
-import networkx as nx
 
-from gluemap.estimators.rotation_averaging import rotation_averaging, rotation_averaging_pycolmap
 from gluemap.estimators.intrinsics_averaging import intrinsics_averaging
+from gluemap.estimators.rotation_averaging import (
+    rotation_averaging,
+    rotation_averaging_pycolmap,
+)
 from gluemap.estimators.similarity_averaging import (
     similarity_averaging,
-    similarity_averaging_with_depth,
 )
-from gluemap.estimators.bundle_adjustment import bundle_adjustment
-from gluemap.controllers.bundle_adjustment import initialize_world_points
-from gluemap.estimators.track_establishment import (
-    establish_tracks_from_tracks_dict,
-    TrackEstablishmentOptions,
-)
-
 from gluemap.math.geometry import restore_identity
 from gluemap.math.mst_initialization import initialize_mst_structures
 
-import logging
 logger = logging.getLogger(__name__)
-
 
 
 # This class is purely optimization based, so we do not need to store the model
@@ -31,7 +25,9 @@ class GlobalGluer:
 
         # self.valid_threshold = args.valid_threshold
         self.valid_threshold_pose = (
-            args.valid_pose_threshold if hasattr(args, "valid_pose_threshold") else 0.05
+            args.valid_pose_threshold
+            if hasattr(args, "valid_pose_threshold")
+            else 0.05
         )
 
         # self.skip_optimization = False
@@ -42,14 +38,20 @@ class GlobalGluer:
         self.thres_consistency = np.deg2rad(10.0)  # degrees
         self.angle_threshold = 5.0  # degrees
         self.boost_sequential = (
-            True if hasattr(args, "is_sequential") and args.is_sequential else False
+            True
+            if hasattr(args, "is_sequential") and args.is_sequential
+            else False
         )
-        self.use_ceres_rotation_averaging = getattr(args, "use_ceres_rotation_averaging", True)
+        self.use_ceres_rotation_averaging = getattr(
+            args, "use_ceres_rotation_averaging", True
+        )
 
     def main(self, predictions_dict, intrinsics_mapping, camera_model, num_img):
         self.N = num_img
         # Refine the graph structure
-        predictions_dict, valid_edges = self._refine_graph_structure(predictions_dict)
+        predictions_dict, valid_edges = self._refine_graph_structure(
+            predictions_dict
+        )
 
         # Estimate the intrinsics
         global_intrinsics = self._estimate_intrinsics(
@@ -73,7 +75,9 @@ class GlobalGluer:
         predictions_dict["scores"] = {}
         for idx in range(len(predictions_dict["indexes"])):
             predictions_dict["scores"][idx] = torch.where(
-                predictions_dict["vis"][idx] > 0.05, predictions_dict["vis"][idx], 0.0
+                predictions_dict["vis"][idx] > 0.05,
+                predictions_dict["vis"][idx],
+                0.0,
             )
         # Perform two way check for filtering simple outliers
         self._filter_inconsistent_edges(predictions_dict)
@@ -112,7 +116,9 @@ class GlobalGluer:
 
                     error_r = torch.acos(
                         torch.clamp(
-                            ((R12 @ R21).trace() - 1) / 2, -1.0 + 1e-6, 1.0 - 1e-6
+                            ((R12 @ R21).trace() - 1) / 2,
+                            -1.0 + 1e-6,
+                            1.0 - 1e-6,
                         )
                     )
 
@@ -155,7 +161,8 @@ class GlobalGluer:
         indexes = range(len(predictions_dict["indexes"]))
         for idx in indexes:
             valid_j = torch.where(
-                predictions_dict["pose_scores"][idx][0] > self.valid_threshold_pose
+                predictions_dict["pose_scores"][idx][0]
+                > self.valid_threshold_pose
             )[0]
             valid_edges.update(
                 set(
@@ -181,7 +188,9 @@ class GlobalGluer:
         # Find the connected components
         components = list(nx.connected_components(G))
         if (len(components) == 1) and (len(components[0]) == N):
-            logger.info(f"Edge connectivity of the graph: {nx.edge_connectivity(G)}")
+            logger.info(
+                f"Edge connectivity of the graph: {nx.edge_connectivity(G)}"
+            )
             return
 
         components = [list(x) for x in components]
@@ -204,13 +213,17 @@ class GlobalGluer:
                 if i == 0:
                     continue
 
-                if image_id_to_cluster_id[idx1] != image_id_to_cluster_id[idx_inner]:
+                if (
+                    image_id_to_cluster_id[idx1]
+                    != image_id_to_cluster_id[idx_inner]
+                ):
                     predictions_dict["pose_scores"][idx][0, i] += 1e-2
                     logger.debug(f"{idx1} {idx_inner} cross component")
                     valid_edges.add((idx1, idx_inner))
 
     def _global_structure_estimation(
-        self, predictions_dict,
+        self,
+        predictions_dict,
     ):
         # Double sequential edge weights (neighboring frames with index diff <= 10)
         if self.boost_sequential:
@@ -220,7 +233,9 @@ class GlobalGluer:
             # Original two-pass: RA → filter → RA → filter
             global_rotations = rotation_averaging(predictions_dict)
             self._filter_invalid_edges(predictions_dict, global_rotations)
-            global_rotations = rotation_averaging(predictions_dict, global_rotations)
+            global_rotations = rotation_averaging(
+                predictions_dict, global_rotations
+            )
             self._filter_invalid_edges(predictions_dict, global_rotations)
         else:
             global_rotations = rotation_averaging_pycolmap(
@@ -322,9 +337,13 @@ class GlobalGluer:
 
         return global_rotations, global_centers
 
-    def _estimate_intrinsics(self, predictions_dict, intrinsics_mapping, camera_model):
+    def _estimate_intrinsics(
+        self, predictions_dict, intrinsics_mapping, camera_model
+    ):
         indexes = range(len(predictions_dict["indexes"]))
-        intrinsics_all = [predictions_dict["intrinsics"][idx] for idx in indexes]
+        intrinsics_all = [
+            predictions_dict["intrinsics"][idx] for idx in indexes
+        ]
         members = [predictions_dict["indexes"][idx] for idx in indexes]
 
         global_intrinsics = intrinsics_averaging(
@@ -341,7 +360,10 @@ class GlobalGluer:
             valid_edges_curr = (
                 torch.where(predictions_dict["pose_scores"][idx][0] > 0)[0]
             ).tolist()
-            if len(valid_edges_curr) == predictions_dict["pose_scores"][idx].shape[1]:
+            if (
+                len(valid_edges_curr)
+                == predictions_dict["pose_scores"][idx].shape[1]
+            ):
                 continue
             for key in predictions_dict.keys():
                 if key == "indexes":
@@ -384,7 +406,8 @@ class GlobalGluer:
             ).unsqueeze(0)
 
             diff = (
-                rotations_global @ rotation_local.transpose(-1, -2).cpu().double()
+                rotations_global
+                @ rotation_local.transpose(-1, -2).cpu().double()
             )  # (N, 3, 3)
 
             errors = torch.acos(
@@ -447,35 +470,45 @@ class GlobalGluer:
 
             rotations = torch.from_numpy(
                 np.stack(
-                    [global_rotations[idx] for idx in predictions_dict["indexes"][idx]]
+                    [
+                        global_rotations[idx]
+                        for idx in predictions_dict["indexes"][idx]
+                    ]
                 )
             ).unsqueeze(0)
             translations = torch.from_numpy(
                 np.stack(
                     [
-                        -global_rotations[idx] @ global_centers[idx].reshape(3, 1)
+                        -global_rotations[idx]
+                        @ global_centers[idx].reshape(3, 1)
                         for idx in predictions_dict["indexes"][idx]
                     ]
                 )
             ).unsqueeze(0)
-            extrinsics = torch.cat([rotations, translations], dim=-1)  # (B, N, 3, 4)
+            extrinsics = torch.cat(
+                [rotations, translations], dim=-1
+            )  # (B, N, 3, 4)
             extrinsics = restore_identity(extrinsics)
             translation_global = extrinsics[0, :, :3, 3]
 
             # Normalize
             safe_norm_global = torch.clamp(
-                torch.linalg.norm(translation_global, dim=-1, keepdim=True), min=1e-6
+                torch.linalg.norm(translation_global, dim=-1, keepdim=True),
+                min=1e-6,
             )
             translation_global = translation_global / safe_norm_global
             safe_norm_local = torch.clamp(
-                torch.linalg.norm(translation_local, dim=-1, keepdim=True), min=1e-6
+                torch.linalg.norm(translation_local, dim=-1, keepdim=True),
+                min=1e-6,
             )
             translation_local = translation_local / safe_norm_local
 
             # Compare the directions
             errors_trans = torch.acos(
                 torch.clamp(
-                    torch.einsum("bi,bi->b", translation_global, translation_local),
+                    torch.einsum(
+                        "bi,bi->b", translation_global, translation_local
+                    ),
                     min=-1.0 + 1e-6,
                     max=1.0 - 1e-6,
                 )
@@ -495,7 +528,9 @@ class GlobalGluer:
                     max=1.0 - 1e-6,
                 )
             )
-            invalid_mask = (errors_rot > thres_rot) | (errors_trans > thres_trans)
+            invalid_mask = (errors_rot > thres_rot) | (
+                errors_trans > thres_trans
+            )
             invalid_mask = invalid_mask * (
                 predictions_dict["pose_scores"][idx][0].cpu() > 0
             )
@@ -530,13 +565,17 @@ class GlobalGluer:
             for i, neighbor_idx in enumerate(predictions_dict["indexes"][idx]):
                 if i == 0:
                     continue
-                edge = (min(center_idx, neighbor_idx), max(center_idx, neighbor_idx))
+                edge = (
+                    min(center_idx, neighbor_idx),
+                    max(center_idx, neighbor_idx),
+                )
                 if edge in seq_edges:
                     # predictions_dict["pose_scores"][idx][0, i] *= 1 + boost_factor * (1 / abs(center_idx - neighbor_idx))
                     predictions_dict["pose_scores"][idx][0, i] *= 2
                     num_boosted += 1
                 else:
                     predictions_dict["pose_scores"][idx][0, i] /= 1
-                    
-        logger.info(f"Boosted {num_boosted} sequential edges by factor {boost_factor}")
 
+        logger.info(
+            f"Boosted {num_boosted} sequential edges by factor {boost_factor}"
+        )

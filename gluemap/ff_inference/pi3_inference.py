@@ -1,7 +1,6 @@
 # Functions are adpated from https://github.com/yyfz/Pi3/issues/29
 from functools import partial
 
-from typing import Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -44,14 +43,22 @@ class Pi3LocalInference(LocalInference):
         original_height, original_width = points.shape[-3:-1]
         aspect_ratio = original_width / original_height
 
-        fx = focal / 2 * (1 + aspect_ratio**2) ** 0.5 / aspect_ratio * original_width
+        fx = (
+            focal
+            / 2
+            * (1 + aspect_ratio**2) ** 0.5
+            / aspect_ratio
+            * original_width
+        )
         fy = focal / 2 * (1 + aspect_ratio**2) ** 0.5 * original_height
 
         cx = original_width // 2
         cy = original_height // 2
 
         batch_shape = fx.shape
-        intrinsics = torch.zeros(*batch_shape, 3, 3, device=fx.device, dtype=fx.dtype)
+        intrinsics = torch.zeros(
+            *batch_shape, 3, 3, device=fx.device, dtype=fx.dtype
+        )
         intrinsics[..., 0, 0] = fx
         intrinsics[..., 1, 1] = fy
         intrinsics[..., 0, 2] = cx
@@ -61,7 +68,8 @@ class Pi3LocalInference(LocalInference):
         result["shift"] = shift
 
         extrinsics = (
-            torch.linalg.inv(result["camera_poses"]) @ result["camera_poses"][:, :1]
+            torch.linalg.inv(result["camera_poses"])
+            @ result["camera_poses"][:, :1]
         )
         depth = Pi3LocalInference._get_shifted_depth_map(result)
         result["depth"] = depth.unsqueeze(-1)
@@ -84,7 +92,7 @@ class Pi3LocalInference(LocalInference):
         points: torch.Tensor,
         mask: torch.Tensor = None,
         focal: torch.Tensor = None,
-        downsample_size: Tuple[int, int] = (64, 64),
+        downsample_size: tuple[int, int] = (64, 64),
     ):
         """
         Recover the depth map and FoV from a point map with unknown z shift and focal.
@@ -119,7 +127,9 @@ class Pi3LocalInference(LocalInference):
         ).permute(0, 2, 3, 1)
         uv_lr = (
             F.interpolate(
-                uv.unsqueeze(0).permute(0, 3, 1, 2), downsample_size, mode="nearest"
+                uv.unsqueeze(0).permute(0, 3, 1, 2),
+                downsample_size,
+                mode="nearest",
             )
             .squeeze(0)
             .permute(1, 2, 0)
@@ -128,7 +138,9 @@ class Pi3LocalInference(LocalInference):
             None
             if mask is None
             else F.interpolate(
-                mask.to(torch.float32).unsqueeze(1), downsample_size, mode="nearest"
+                mask.to(torch.float32).unsqueeze(1),
+                downsample_size,
+                mode="nearest",
             ).squeeze(1)
             > 0
         )
@@ -140,7 +152,9 @@ class Pi3LocalInference(LocalInference):
         optim_shift, optim_focal = [], []
         for i in range(points.shape[0]):
             points_lr_i_np = (
-                points_lr_np[i] if mask is None else points_lr_np[i][mask_lr_np[i]]
+                points_lr_np[i]
+                if mask is None
+                else points_lr_np[i][mask_lr_np[i]]
             )
             uv_lr_i_np = uv_lr_np if mask is None else uv_lr_np[mask_lr_np[i]]
             if uv_lr_i_np.shape[0] < 2:
@@ -213,12 +227,16 @@ class Pi3LocalInference(LocalInference):
             xyz[..., 2].reshape(-1),
         )
 
-        def fn(uv: np.ndarray, xy: np.ndarray, z: np.ndarray, shift: np.ndarray):
+        def fn(
+            uv: np.ndarray, xy: np.ndarray, z: np.ndarray, shift: np.ndarray
+        ):
             xy_proj = xy / (z + shift)[:, None]
             f = (xy_proj * uv).sum() / np.square(xy_proj).sum()
             return (f * xy_proj - uv).ravel()
 
-        solution = least_squares(partial(fn, uv, xy, z), x0=0, ftol=1e-3, method="lm")
+        solution = least_squares(
+            partial(fn, uv, xy, z), x0=0, ftol=1e-3, method="lm"
+        )
         optim_shift = solution["x"].squeeze().astype(np.float32)
 
         xy_proj = xy / (z + optim_shift)[:, None]
@@ -235,9 +253,13 @@ class Pi3LocalInference(LocalInference):
             xyz[..., 2].reshape(-1),
         )
 
-        def fn(uv: np.ndarray, xy: np.ndarray, z: np.ndarray, shift: np.ndarray):
+        def fn(
+            uv: np.ndarray, xy: np.ndarray, z: np.ndarray, shift: np.ndarray
+        ):
             xy_proj = xy / (z + shift)[:, None]
             return (focal * xy_proj - uv).ravel()
 
-        solution = least_squares(partial(fn, uv, xy, z), x0=0, ftol=1e-3, method="lm")
+        solution = least_squares(
+            partial(fn, uv, xy, z), x0=0, ftol=1e-3, method="lm"
+        )
         return solution["x"].squeeze().astype(np.float32)

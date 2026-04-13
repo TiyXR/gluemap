@@ -1,7 +1,6 @@
-import torch
 import os
-import numpy as np
-import faiss
+
+import torch
 
 from gluemap.datasets.twoview_dataset import BaseTwoViewDataset
 from gluemap.datasets.utils import (
@@ -18,11 +17,13 @@ class SequentialTwoViewDataset(BaseTwoViewDataset):
         img_list_full, img_list_used = super()._get_image_list(args)
         if args.sample_frequency > 1:
             img_list_used = img_list_used[:: args.sample_frequency]
-            
+
         return img_list_full, img_list_used
-    
+
     def _construct_pairs(self, args, img_list):
-        descriptors_path = os.path.join(args.curr_processed, "salad_descriptors.pt")
+        descriptors_path = os.path.join(
+            args.curr_processed, "salad_descriptors.pt"
+        )
 
         if os.path.exists(descriptors_path):
             descriptors_db = torch.load(descriptors_path, weights_only=False)
@@ -44,7 +45,9 @@ class SequentialTwoViewDataset(BaseTwoViewDataset):
         )  # N, num_neighbors + 1
 
         # retrieve global neighbors based on SALAD descriptors
-        self.pairs = retrieve_global_neighbors(args, [neighbors], [descriptors_db])
+        self.pairs = retrieve_global_neighbors(
+            args, [neighbors], [descriptors_db]
+        )
 
         # All sequential neighbors within the window
         seq_set = set()

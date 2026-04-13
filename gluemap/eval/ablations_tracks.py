@@ -1,18 +1,26 @@
 import logging
 import os
 import time
+
 import torch
 
 logger = logging.getLogger(__name__)
 
-from gluemap.controllers.twoview_inference import run_twoview_inference
-from gluemap.controllers.star_inference import run_star_inference
 from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.star_collection import run_star_collection
+from gluemap.controllers.star_inference import run_star_inference
+from gluemap.controllers.twoview_inference import run_twoview_inference
 
 
 def run_track_ablation_pipeline(
-    args, dataset_pair, world_size, rank, device, dtype, pairs=None, device_id="0",
+    args,
+    dataset_pair,
+    world_size,
+    rank,
+    device,
+    dtype,
+    pairs=None,
+    device_id="0",
     models=None,
 ):
     """
@@ -99,9 +107,9 @@ def run_track_ablation_pipeline(
         mode_timings = {}
 
         for mode in track_modes:
-            logger.info(f"{'#'*60}")
+            logger.info(f"{'#' * 60}")
             logger.info(f"# Track ablation mode: {mode}")
-            logger.info(f"{'#'*60}")
+            logger.info(f"{'#' * 60}")
 
             # Set track mode and output suffix on args
             args.track_mode = mode
@@ -127,15 +135,25 @@ def run_track_ablation_pipeline(
         timing["total_pipeline"] = time.perf_counter() - t_pipeline_start
 
         # Print summary
-        logger.info(f"[Track Ablation Profiling] Modes: {', '.join(track_modes)}")
-        logger.info(f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
-              f"inference={twoview_timing['total']:.2f}s")
-        logger.info(f"  Dataset generation:    {timing['dataset_generation']:.2f}s")
-        logger.info(f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
-              f"inference={star_timing['total']:.2f}s")
+        logger.info(
+            f"[Track Ablation Profiling] Modes: {', '.join(track_modes)}"
+        )
+        logger.info(
+            f"  Two-view (load+infer): model_load={twoview_timing.get('model_loading', 0):.2f}s, "
+            f"inference={twoview_timing['total']:.2f}s"
+        )
+        logger.info(
+            f"  Dataset generation:    {timing['dataset_generation']:.2f}s"
+        )
+        logger.info(
+            f"  Star (load+infer):     model_load={star_timing.get('model_loading', 0):.2f}s, "
+            f"inference={star_timing['total']:.2f}s"
+        )
         for mode in track_modes:
             mt = mode_timings[mode]
-            logger.info(f"  Mode {mode}: wall_time={mt['wall_time']:.2f}s, total={mt['total']:.2f}s")
+            logger.info(
+                f"  Mode {mode}: wall_time={mt['wall_time']:.2f}s, total={mt['total']:.2f}s"
+            )
         logger.info(f"  Total pipeline:        {timing['total_pipeline']:.2f}s")
 
         # Save per-dataset timing

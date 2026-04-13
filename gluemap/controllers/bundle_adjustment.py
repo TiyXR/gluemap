@@ -6,25 +6,25 @@ It separates track establishment from BA optimization and supports multiple
 filtering iterations until convergence.
 """
 
+import logging
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
+
 import numpy as np
 import pycolmap
 
 from gluemap.estimators.bundle_adjustment import bundle_adjustment
-from gluemap.utils.colmap import camera_from_intrinsics_matrix
 from gluemap.math.reprojection_error import (
-    compute_point_error,
-    compute_all_errors_from_reconstruction,
     ReprojectionErrorType,
+    compute_all_errors_from_reconstruction,
+    compute_point_error,
 )
+from gluemap.utils.colmap import camera_from_intrinsics_matrix
 
-from collections import defaultdict
-import logging
 logger = logging.getLogger(__name__)
 
 
-def build_virtual_point_start(pts2d_idx_inv: Dict[int, List]) -> Dict[int, int]:
+def build_virtual_point_start(pts2d_idx_inv: dict[int, list]) -> dict[int, int]:
     """
     Build virtual_point_start dict from pts2d_idx_inv.
 
@@ -37,13 +37,15 @@ def build_virtual_point_start(pts2d_idx_inv: Dict[int, List]) -> Dict[int, int]:
     Returns:
         Dict[image_id, int] - index where virtual points start for each image
     """
-    return {image_id: len(pts_list) for image_id, pts_list in pts2d_idx_inv.items()}
+    return {
+        image_id: len(pts_list) for image_id, pts_list in pts2d_idx_inv.items()
+    }
 
 
 def build_negative_depth_observations(
-    pts2d_idx_inv: Dict[int, List],
-    images_points2d_virtual_isnegative: Optional[Dict[int, List]],
-) -> Dict[int, set]:
+    pts2d_idx_inv: dict[int, list],
+    images_points2d_virtual_isnegative: dict[int, list] | None,
+) -> dict[int, set]:
     """
     Convert old negative depth format to Dict[image_id, Set[point2D_idx]].
 
@@ -78,14 +80,14 @@ def build_negative_depth_observations(
 
 
 def build_reconstruction_for_ba(
-    global_rotations: Dict[int, np.ndarray],
-    global_centers: Dict[int, np.ndarray],
-    global_intrinsics: List,
-    intrinsics_mapping: Dict[int, int],
-    points3D: Dict[int, pycolmap.Point3D],
-    keypoints_per_image: Dict[int, np.ndarray],
-    image_sizes: Optional[List[Tuple[int, int]]] = None,
-    images_list: Optional[List[str]] = None,
+    global_rotations: dict[int, np.ndarray],
+    global_centers: dict[int, np.ndarray],
+    global_intrinsics: list,
+    intrinsics_mapping: dict[int, int],
+    points3D: dict[int, pycolmap.Point3D],
+    keypoints_per_image: dict[int, np.ndarray],
+    image_sizes: list[tuple[int, int]] | None = None,
+    images_list: list[str] | None = None,
     camera_model: str = "SIMPLE_PINHOLE",
 ) -> pycolmap.Reconstruction:
     """
@@ -154,16 +156,16 @@ def build_reconstruction_for_ba(
         # Set pose: cam_from_world
         # t = -R @ center
         t = -R @ center
-        cam_from_world = pycolmap.Rigid3d(
-            pycolmap.Rotation3d(R), t
-        )
+        cam_from_world = pycolmap.Rigid3d(pycolmap.Rotation3d(R), t)
         reconstruction.add_image_with_trivial_frame(image, cam_from_world)
 
     # Add 3D points
     # Note: add_point3D returns the assigned ID, we can't specify it
     # We need to track the mapping if IDs change
     for point3D_id, point3D in points3D.items():
-        xyz = point3D.xyz.reshape(3, 1) if point3D.xyz.ndim == 1 else point3D.xyz
+        xyz = (
+            point3D.xyz.reshape(3, 1) if point3D.xyz.ndim == 1 else point3D.xyz
+        )
         reconstruction.add_point3D(xyz, point3D.track)
 
     return reconstruction
@@ -171,7 +173,12 @@ def build_reconstruction_for_ba(
 
 def extract_results_from_reconstruction(
     reconstruction: pycolmap.Reconstruction,
-) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray], List, Dict[int, pycolmap.Point3D]]:
+) -> tuple[
+    dict[int, np.ndarray],
+    dict[int, np.ndarray],
+    list,
+    dict[int, pycolmap.Point3D],
+]:
     """
     Extract BA results from reconstruction back to separate data structures.
 
@@ -199,7 +206,9 @@ def extract_results_from_reconstruction(
         global_centers[image_id] = center
 
     # Build intrinsics list
-    max_camera_id = max(reconstruction.cameras.keys()) if reconstruction.cameras else -1
+    max_camera_id = (
+        max(reconstruction.cameras.keys()) if reconstruction.cameras else -1
+    )
     global_intrinsics = [None] * (max_camera_id + 1)
 
     for camera_id, camera in reconstruction.cameras.items():
@@ -343,7 +352,9 @@ def initialize_world_points(
         is_real_point = False
         for elem in elements:
             image_id, pt_idx = elem.image_id, elem.point2D_idx
-            if image_id in pts2d_idx_inv and pt_idx < len(pts2d_idx_inv[image_id]):
+            if image_id in pts2d_idx_inv and pt_idx < len(
+                pts2d_idx_inv[image_id]
+            ):
                 is_real_point = True
                 break
 
@@ -372,7 +383,9 @@ def initialize_world_points(
             )
 
             # Get confidence weight
-            conf = predictions_dict["cam_points_conf"][idx_star][0, pos, j].item()
+            conf = predictions_dict["cam_points_conf"][idx_star][
+                0, pos, j
+            ].item()
             if conf < 0.01:
                 continue
 
@@ -381,7 +394,10 @@ def initialize_world_points(
                 continue
 
             # Transform to world coordinates: X_world = R^T @ X_cam + center
-            if image_id not in global_rotations or image_id not in global_centers:
+            if (
+                image_id not in global_rotations
+                or image_id not in global_centers
+            ):
                 continue
 
             R = global_rotations[image_id]
@@ -434,7 +450,9 @@ def initialize_world_points(
         else:
             inlier_mask[point3D_id] = [False] * len(elements)
 
-    logger.info(f"Average inliers per real track: {total_inlier_count / max(num_initialized_real,1):.2f}")
+    logger.info(
+        f"Average inliers per real track: {total_inlier_count / max(num_initialized_real, 1):.2f}"
+    )
 
     # ==========================================================================
     # Loop 2: Virtual points - use directly without RANSAC (only pos==0)
@@ -442,7 +460,10 @@ def initialize_world_points(
     total_virtual_inlier_count = 0
     total_virtual_outlier_count = 0
     inlier_count_per_pair = defaultdict(lambda: defaultdict(int))
-    if pts2d_idx_virtual_inv is not None and "points3d_virtual" in predictions_dict:
+    if (
+        pts2d_idx_virtual_inv is not None
+        and "points3d_virtual" in predictions_dict
+    ):
         for point3D_id, point3D in list(points3D.items()):
             elements = list(point3D.track.elements)
 
@@ -462,7 +483,9 @@ def initialize_world_points(
                 num_real_pts = len(pts2d_idx_inv.get(image_id, []))
                 virtual_idx = pt_idx - num_real_pts
 
-                if virtual_idx < 0 or virtual_idx >= len(pts2d_idx_virtual_inv[image_id]):
+                if virtual_idx < 0 or virtual_idx >= len(
+                    pts2d_idx_virtual_inv[image_id]
+                ):
                     break
 
                 idx_star, pos, j = pts2d_idx_virtual_inv[image_id][virtual_idx]
@@ -533,26 +556,32 @@ def initialize_world_points(
                     # Mark all as outliers if not enough inliers
                     inlier_mask[point3D_id] = [False] * len(elements)
 
-    logger.info(f"Virtual points: {total_virtual_inlier_count} inliers, {total_virtual_outlier_count} outliers")
+    logger.info(
+        f"Virtual points: {total_virtual_inlier_count} inliers, {total_virtual_outlier_count} outliers"
+    )
     if num_initialized_virtual > 0:
-        logger.info(f"Average inliers per virtual track: {total_virtual_inlier_count / num_initialized_virtual:.2f}")
+        logger.info(
+            f"Average inliers per virtual track: {total_virtual_inlier_count / num_initialized_virtual:.2f}"
+        )
 
     # Prune outliers from real tracks (modify points3D in place)
     prune_track_outliers(points3D, inlier_mask)
 
     logger.info(f"Tracks: {num_tracks_before} -> {len(points3D)} after pruning")
     logger.info(f"Initialized {num_initialized_real} real points (with RANSAC)")
-    logger.info(f"Initialized {num_initialized_virtual} virtual points (direct)")
+    logger.info(
+        f"Initialized {num_initialized_virtual} virtual points (direct)"
+    )
 
     return points3D
 
 
 def filter_observations_by_error(
-    points3D: Dict[int, pycolmap.Point3D],
-    errors_per_track: Dict[int, List[Tuple[int, int, float]]],
+    points3D: dict[int, pycolmap.Point3D],
+    errors_per_track: dict[int, list[tuple[int, int, float]]],
     reproj_threshold: float,
     min_track_length: int,
-) -> Tuple[Dict[int, pycolmap.Point3D], int, int]:
+) -> tuple[dict[int, pycolmap.Point3D], int, int]:
     """
     Filter observations with high reprojection errors from tracks.
 
@@ -605,8 +634,8 @@ def filter_observations_by_error(
 
 def iterative_bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
-    negative_depth_observations: Dict[int, set],
-    virtual_point_start: Dict[int, int],
+    negative_depth_observations: dict[int, set],
+    virtual_point_start: dict[int, int],
     options: IterativeBAOptions = None,
     fisheye_intrinsics_params=None,
 ) -> pycolmap.Reconstruction:
@@ -633,7 +662,10 @@ def iterative_bundle_adjustment(
     if fisheye_intrinsics_params is not None:
         fisheye_cameras = {}
         for camera_id, camera in reconstruction.cameras.items():
-            if camera_id < len(fisheye_intrinsics_params) and fisheye_intrinsics_params[camera_id] is not None:
+            if (
+                camera_id < len(fisheye_intrinsics_params)
+                and fisheye_intrinsics_params[camera_id] is not None
+            ):
                 fisheye_cameras[camera_id] = pycolmap.Camera(
                     model=pycolmap.CameraModelId.SIMPLE_FISHEYE,
                     width=camera.width,
@@ -642,9 +674,13 @@ def iterative_bundle_adjustment(
                     camera_id=camera_id,
                 )
 
-    logger.info(f"Starting iterative BA with {len(reconstruction.points3D)} tracks")
+    logger.info(
+        f"Starting iterative BA with {len(reconstruction.points3D)} tracks"
+    )
     logger.info(f"  Max filter iterations: {options.max_filter_iterations}")
-    logger.info(f"  Normalized reproj threshold: {options.normalized_reproj_threshold}")
+    logger.info(
+        f"  Normalized reproj threshold: {options.normalized_reproj_threshold}"
+    )
     logger.info(f"  Min track length: {options.min_track_length}")
 
     # Count initial observations
@@ -660,7 +696,9 @@ def iterative_bundle_adjustment(
         scaling = max(3 - iteration, 1)
         current_threshold = scaling * options.normalized_reproj_threshold
 
-        logger.info(f"=== Iteration {iteration + 1}/{options.max_filter_iterations} ===")
+        logger.info(
+            f"=== Iteration {iteration + 1}/{options.max_filter_iterations} ==="
+        )
         logger.info(f"Tracks: {len(reconstruction.points3D)}")
         logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
@@ -696,35 +734,55 @@ def iterative_bundle_adjustment(
             )
 
             # Print error statistics before filtering
-            all_errors = [e for errs in errors_per_track.values() for _, _, e in errs if e < float("inf")]
+            all_errors = [
+                e
+                for errs in errors_per_track.values()
+                for _, _, e in errs
+                if e < float("inf")
+            ]
             if len(all_errors) > 0:
-                logger.debug(f"Normalized reprojection errors (threshold={current_threshold:.4f}):")
-                logger.debug(f"  Mean: {np.mean(all_errors):.6f}, Median: {np.median(all_errors):.6f}")
-                logger.debug(f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%")
+                logger.debug(
+                    f"Normalized reprojection errors (threshold={current_threshold:.4f}):"
+                )
+                logger.debug(
+                    f"  Mean: {np.mean(all_errors):.6f}, Median: {np.median(all_errors):.6f}"
+                )
+                logger.debug(
+                    f"  < {current_threshold}: {100 * np.sum(np.array(all_errors) < current_threshold) / len(all_errors):.1f}%"
+                )
 
             # Filter observations with high errors
             # Note: filter_observations_by_error modifies reconstruction.points3D in-place
             points3D_dict = dict(reconstruction.points3D)
-            points3D_dict, obs_removed, tracks_removed = filter_observations_by_error(
-                points3D_dict,
-                errors_per_track,
-                current_threshold,
-                options.min_track_length,
+            points3D_dict, obs_removed, tracks_removed = (
+                filter_observations_by_error(
+                    points3D_dict,
+                    errors_per_track,
+                    current_threshold,
+                    options.min_track_length,
+                )
             )
             # Update reconstruction points3D (remove filtered tracks)
             for point3D_id in list(reconstruction.points3D.keys()):
                 if point3D_id not in points3D_dict:
                     del reconstruction.points3D[point3D_id]
                 else:
-                    reconstruction.points3D[point3D_id] = points3D_dict[point3D_id]
+                    reconstruction.points3D[point3D_id] = points3D_dict[
+                        point3D_id
+                    ]
 
             total_filtered += obs_removed
 
-            logger.info(f"Filtered: {obs_removed} observations, {tracks_removed} tracks removed")
+            logger.info(
+                f"Filtered: {obs_removed} observations, {tracks_removed} tracks removed"
+            )
 
             # Check if enough tracks were filtered (> 0.1% of points)
             num_points = len(reconstruction.points3D)
-            if num_points > 0 and total_filtered > options.convergence_threshold * num_points:
+            if (
+                num_points > 0
+                and total_filtered > options.convergence_threshold * num_points
+            ):
                 # Enough filtered, break inner loop to run BA again
                 should_stop = False
                 iteration += 1
@@ -733,7 +791,9 @@ def iterative_bundle_adjustment(
                 # Too few filtered, tighten threshold and filter again without BA
                 iteration += 1
                 if iteration < options.max_filter_iterations:
-                    logger.debug(f"Low removal ({total_filtered} total), tightening threshold (iteration -> {iteration + 1})")
+                    logger.debug(
+                        f"Low removal ({total_filtered} total), tightening threshold (iteration -> {iteration + 1})"
+                    )
 
         if should_stop:
             # Max iterations reached during tightening, stop outer loop
@@ -741,12 +801,15 @@ def iterative_bundle_adjustment(
             break
 
         total_observations = sum(
-            len(list(p.track.elements)) for p in reconstruction.points3D.values()
+            len(list(p.track.elements))
+            for p in reconstruction.points3D.values()
         )
 
     total_observations = sum(
         len(list(p.track.elements)) for p in reconstruction.points3D.values()
     )
-    logger.info(f"Final: {len(reconstruction.points3D)} tracks, {total_observations} observations")
+    logger.info(
+        f"Final: {len(reconstruction.points3D)} tracks, {total_observations} observations"
+    )
 
     return reconstruction

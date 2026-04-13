@@ -1,9 +1,10 @@
+import logging
+
 import numpy as np
 import torch
 
 from gluemap.math.geometry import project_tracks, restore_identity
 
-import logging
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +63,12 @@ class VirtualTrackPreparation:
         )
 
     def _collect_extrinsics_intrinsics_centered(
-        self, global_rotations, global_centers, global_intrinsics, intrinsics_mapping, indexes
+        self,
+        global_rotations,
+        global_centers,
+        global_intrinsics,
+        intrinsics_mapping,
+        indexes,
     ):
         rotations = torch.from_numpy(
             np.stack([global_rotations[idx] for idx in indexes])
@@ -76,10 +82,13 @@ class VirtualTrackPreparation:
             )
         ).unsqueeze(0)
 
-        extrinsics = torch.cat([rotations, translations], dim=-1)  # (B, N, 3, 4)
+        extrinsics = torch.cat(
+            [rotations, translations], dim=-1
+        )  # (B, N, 3, 4)
         intrinsics = (
             torch.stack(
-                [global_intrinsics[intrinsics_mapping[idx]] for idx in indexes], dim=1
+                [global_intrinsics[intrinsics_mapping[idx]] for idx in indexes],
+                dim=1,
             )
             .cpu()
             .to(torch.float64)
@@ -106,7 +115,9 @@ class VirtualTrackPreparation:
                 .cpu()
                 .to(torch.float64)
             )
-            extrinsics = predictions_dict["extrinsics"][idx].cpu().to(torch.float64)
+            extrinsics = (
+                predictions_dict["extrinsics"][idx].cpu().to(torch.float64)
+            )
             (
                 predictions_dict["tracks_virtual"][idx],
                 _,
@@ -141,13 +152,17 @@ class VirtualTrackPreparation:
                     sample_num = min(self.min_num, len(valid_idx))
                     rand_columns = torch.randperm(len(valid_idx))[:sample_num]
 
-                    selected_idx = selected_idx.union(set(valid_idx[rand_columns].tolist()))
+                    selected_idx = selected_idx.union(
+                        set(valid_idx[rand_columns].tolist())
+                    )
 
                 max_selected_num = max(max_selected_num, len(selected_idx))
 
                 selected_idx_all.append(selected_idx)
                 if len(invalid_index) > 0:
-                    logger.info(f"{len(invalid_index)} / {N-1} images are not covered")
+                    logger.info(
+                        f"{len(invalid_index)} / {N - 1} images are not covered"
+                    )
 
             selected_idx_all = [list(selected_idx_all[i]) for i in range(B)]
             max_selected_num = max(max_selected_num, self.num_desired_tracks)
@@ -177,10 +192,14 @@ class VirtualTrackPreparation:
             predictions_dict["tracks_virtual"][idx] = torch.gather(
                 track_virtual,
                 2,
-                selected_idx_list.unsqueeze(-1).unsqueeze(1).expand(-1, N, -1, 2),
+                selected_idx_list.unsqueeze(-1)
+                .unsqueeze(1)
+                .expand(-1, N, -1, 2),
             )  # (B, N, K', 2)
             predictions_dict["points3d_virtual"][idx] = torch.gather(
-                sampled_points, 1, selected_idx_list.unsqueeze(-1).expand(-1, -1, 3)
+                sampled_points,
+                1,
+                selected_idx_list.unsqueeze(-1).expand(-1, -1, 3),
             )  # (B, K', 3)
             predictions_dict["valid_virtual"][idx] = torch.gather(
                 valid_mask, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
@@ -188,7 +207,9 @@ class VirtualTrackPreparation:
 
             if is_negative is not None:
                 predictions_dict["isnegative_virtual"][idx] = torch.gather(
-                    is_negative, 2, selected_idx_list.unsqueeze(1).expand(-1, N, -1)
+                    is_negative,
+                    2,
+                    selected_idx_list.unsqueeze(1).expand(-1, N, -1),
                 )  # (B, N, K')
 
     def _update_virtual_tracks_global(
@@ -204,25 +225,33 @@ class VirtualTrackPreparation:
             predictions_dict["isnegative_virtual"] = {}
 
         for idx in indexes:
-            extrinsics, intrinsics = self._collect_extrinsics_intrinsics_centered(
-                global_rotations,
-                global_centers,
-                global_intrinsics,
-                intrinsics_mapping,
-                predictions_dict["indexes"][idx],
+            extrinsics, intrinsics = (
+                self._collect_extrinsics_intrinsics_centered(
+                    global_rotations,
+                    global_centers,
+                    global_intrinsics,
+                    intrinsics_mapping,
+                    predictions_dict["indexes"][idx],
+                )
             )
-            num_virtual_points = predictions_dict["points3d_virtual"][idx].shape[-2]
+            num_virtual_points = predictions_dict["points3d_virtual"][
+                idx
+            ].shape[-2]
             num_tracks_chosen = int(num_virtual_points * self.update_ratio)
 
             (
-                predictions_dict["tracks_virtual"][idx][..., :num_tracks_chosen, :],
+                predictions_dict["tracks_virtual"][idx][
+                    ..., :num_tracks_chosen, :
+                ],
                 _,
                 predictions_dict["valid_virtual"][idx][..., :num_tracks_chosen],
-                predictions_dict["isnegative_virtual"][idx][..., :num_tracks_chosen],
+                predictions_dict["isnegative_virtual"][idx][
+                    ..., :num_tracks_chosen
+                ],
             ) = project_tracks(
-                predictions_dict["points3d_virtual"][idx][:, :num_tracks_chosen].to(
-                    torch.float64
-                ),
+                predictions_dict["points3d_virtual"][idx][
+                    :, :num_tracks_chosen
+                ].to(torch.float64),
                 extrinsics,
                 intrinsics,
                 angle_threshold=self.angle_threshold,
@@ -231,7 +260,8 @@ class VirtualTrackPreparation:
             if "pose_inconsistent" in predictions_dict:
                 invalid_idx = predictions_dict["pose_inconsistent"][idx]
                 tracks_insufficient = (
-                    predictions_dict["scores"][idx].sum(dim=-1)[0] < num_virtual_points
+                    predictions_dict["scores"][idx].sum(dim=-1)[0]
+                    < num_virtual_points
                 )
                 if not invalid_idx.any():
                     continue

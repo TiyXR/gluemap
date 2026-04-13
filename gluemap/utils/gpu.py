@@ -1,10 +1,11 @@
 import logging
 import os
-import torch
-import torch.distributed as dist
 import pickle
 import shutil
 from typing import Any
+
+import torch
+import torch.distributed as dist
 
 from gluemap.utils.model_loader import load_models
 
@@ -13,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 def init_distributed_mode(args):
     if getattr(args, "cpu", False):
-        logger.info("Running on CPU (--cpu flag set), distributed mode disabled")
+        logger.info(
+            "Running on CPU (--cpu flag set), distributed mode disabled"
+        )
         setup_for_distributed(is_master=True)
         args.distributed = False
         return
@@ -40,7 +43,9 @@ def init_distributed_mode(args):
     os.environ["NCCL_NET"] = "Socket"
     os.environ["NCCL_IB_DISABLE"] = "1"
 
-    logger.info(f"| distributed init (rank {args.rank}): {args.dist_url}, gpu {args.gpu}")
+    logger.info(
+        f"| distributed init (rank {args.rank}): {args.dist_url}, gpu {args.gpu}"
+    )
     torch.distributed.init_process_group(
         backend=args.dist_backend,
         init_method=args.dist_url,
