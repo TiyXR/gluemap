@@ -2,7 +2,7 @@ import logging
 import os
 import time
 import torch
-from gluemap.utils.colmap_io import write_to_colmap_format
+from gluemap.utils.colmap import write_to_colmap_format
 
 logger = logging.getLogger(__name__)
 

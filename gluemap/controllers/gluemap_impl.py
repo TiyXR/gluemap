@@ -4,9 +4,9 @@ import logging
 import torch
 
 logger = logging.getLogger(__name__)
-from gluemap.utils.colmap_io import write_to_colmap_format
 from gluemap.utils.colmap import (
     prepare_sift_database,
+    write_to_colmap_format,
 )
 
 from gluemap.controllers.twoview_inference import run_twoview_inference

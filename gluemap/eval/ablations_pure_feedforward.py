@@ -7,7 +7,7 @@ from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)
-from gluemap.utils.colmap_io import write_to_colmap_format
+from gluemap.utils.colmap import write_to_colmap_format
 from gluemap.math.scaling import rescale_intrinsics
 
 
