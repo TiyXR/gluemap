@@ -32,7 +32,6 @@ from gluemap.utils.prepare_prior import (
     prepare_glomap_prior,
     merge_colmap_databases,
 )
-from gluemap.utils.viz import draw_covisibility_graph, draw_covisibility_graph_from_predictions
 
 import logging
 logger = logging.getLogger(__name__)
