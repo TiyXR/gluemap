@@ -651,25 +651,17 @@ def prepare_sift_database(
             f.write(f"{images_list[i]} {images_list[j]}\n")
 
     if extraction_method == "sift":
-        # Run matching
-        # pycolmap.verify_matches(datbase_dir, dir_write + "/pairs.txt")
-        cmd = (
-            "colmap matches_importer --match_type pairs --database_path "
-            + datbase_dir
-            + " --match_list_path "
-            + dir_write
-            + "/pairs.txt --FeatureMatching.gpu_index "
+        pairs_path = dir_write + "/pairs.txt"
+        matching_options = pycolmap.FeatureMatchingOptions()
+        matching_options.gpu_index = ",".join(
+            str(idx) for idx in range(torch.cuda.device_count())
         )
-        # Get the available GPU index
-        gpus = [idx for idx in range(torch.cuda.device_count())]
-        cmd += str(",".join(map(str, gpus)))
-
-        ite_num = 0
-        while ite_num < 10:
-            logger.info(cmd)
-            status = os.system(cmd)
-            if status == 0:
-                break
-            ite_num += 1
+        pairing_options = pycolmap.ImportedPairingOptions()
+        pairing_options.match_list_path = pairs_path
+        pycolmap.match_image_pairs(
+            database_path=datbase_dir,
+            matching_options=matching_options,
+            pairing_options=pairing_options,
+        )
 
     return True
