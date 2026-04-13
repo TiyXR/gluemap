@@ -3,6 +3,7 @@ import torch
 
 from gluemap.math.geometry import bilinear_interpolate_value
 
+
 def get_query_points(
     query_image,
     query_method,
@@ -10,12 +11,37 @@ def get_query_points(
     det_thres=0.005,
     sim_score=None,
     bbox=None,
-    mask=None, # should be of size (B, H, W)
+    mask=None,  # should be of size (B, H, W)
     expand_ratio=1,
     strict_num=True,
 ):
-    # Run superpoint and sift on the target frame
-    # Feel free to modify for your own
+    """Extract keypoints from a query image using one or more feature detectors.
+
+    Detects keypoints using the specified method(s) (e.g. "sp", "sift", "aliked",
+    combined with "+"), optionally filters them by a binary mask and/or bounding box,
+    and returns exactly ``max_query_num`` points when ``strict_num`` is True by either
+    subsampling (weighted by ``sim_score`` if provided) or padding with random points.
+
+    Args:
+        query_image: Input image tensor of shape (1, C, H, W).
+        query_method: Detector name(s) joined by "+", e.g. "sp+sift".
+        max_query_num: Target number of keypoints to return.
+        det_thres: Detection threshold forwarded to the feature extractor.
+        sim_score: Optional similarity score tensor used to weight keypoint sampling
+            when more points are detected than ``max_query_num``.
+        bbox: Optional bounding box tensor of shape (1, 1, 4) as (x1, y1, x2, y2).
+            Points outside the box receive zero sampling weight.
+        mask: Optional binary mask of shape (B, H, W). Points where the mask value
+            is below 0.5 are discarded.
+        expand_ratio: Multiplier on ``max_query_num`` passed to the extractor to
+            over-detect before subsampling.
+        strict_num: If True, pad with random points when fewer than ``max_query_num``
+            keypoints are detected.
+
+    Returns:
+        Tensor of shape (1, N, 2) containing (x, y) keypoint coordinates, where
+        N equals ``max_query_num`` when ``strict_num`` is True.
+    """
     max_query_num_raw = int(max_query_num * expand_ratio)
 
     methods = query_method.split("+")
@@ -32,7 +58,9 @@ def get_query_points(
             )
         elif "sift" in method:
             # extractor = SIFT(max_num_keypoints=max_query_num_raw, backend="pycolmap_cpu").cuda().eval()
-            extractor = SIFT(max_num_keypoints=max_query_num_raw).to(query_image.device).eval()
+            extractor = (
+                SIFT(max_num_keypoints=max_query_num_raw).to(query_image.device).eval()
+            )
         elif "aliked" in method:
             extractor = (
                 ALIKED(
@@ -49,12 +77,14 @@ def get_query_points(
         pred_points.append(query_points)
 
     query_points = torch.cat(pred_points, dim=1)
-    
+
     # Remove points outside the mask
     if mask is not None:
-        is_valid = bilinear_interpolate_value(mask.unsqueeze(1).float(), query_points).squeeze(-1)
+        is_valid = bilinear_interpolate_value(
+            mask.unsqueeze(1).float(), query_points
+        ).squeeze(-1)
         query_points = query_points[is_valid > 0.5].unsqueeze(0)
-    
+
     if query_points.shape[1] < max_query_num:
         if query_points.shape[1] == 0:
             query_points = torch.rand(1, max_query_num, 2, device=query_image.device)
@@ -99,7 +129,5 @@ def get_query_points(
         rand_points[..., 0] *= query_image.shape[-1]  # width
         rand_points[..., 1] *= query_image.shape[-2]  # height
         query_points = torch.cat([query_points, rand_points], dim=1)
-        
 
-    return query_points # since by default, the query points with have a + 0.5 offset
-
+    return query_points  # since by default, the query points with have a + 0.5 offset
