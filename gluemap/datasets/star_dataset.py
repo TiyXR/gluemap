@@ -1,11 +1,12 @@
 import logging
 import numpy as np
 import networkx as nx
+from lightglue import ALIKED
 from tqdm import tqdm
 
 from gluemap.datasets.base_dataset import DemoBaseDataset
 from gluemap.utils.load_fn import calculate_image_shapes
-from gluemap.utils.model_utils import get_query_points
+from gluemap.estimators.feature_extraction import get_query_points_from_extractors
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,11 @@ class BaseStarDataset(DemoBaseDataset):
         self.num_tracks = (
             args.num_track_per_img if hasattr(args, "num_track_per_img") else 1024
         )
+
+        # Build the keypoint extractor once and reuse it across __getitem__ calls.
+        # Moved to the query image's device on first use.
+        self.query_extractors = [ALIKED(max_num_keypoints=self.num_tracks, detection_threshold=0.005).eval()]
+        self._extractors_device = None
 
         self.query_points = None  # needs to be initialized
         self.valid_edges = None  # needs to be initialized
@@ -211,8 +217,16 @@ class BaseStarDataset(DemoBaseDataset):
             image_paths,
         ) = self.load_images(indexes, load_1024=True)
 
-        query_points = get_query_points(
-            images_1024[:1], "aliked", self.num_tracks, sim_score=None, strict_num=False
+        query_image = images_1024[:1]
+        if self._extractors_device != query_image.device:
+            self.query_extractors = [e.to(query_image.device) for e in self.query_extractors]
+            self._extractors_device = query_image.device
+        query_points = get_query_points_from_extractors(
+            query_image,
+            self.query_extractors,
+            max_query_num=self.num_tracks,
+            sim_score=None,
+            strict_num=False,
         )[0]
 
         global_rotations = None
