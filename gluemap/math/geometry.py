@@ -4,8 +4,6 @@ import torch
 import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
 
-# from e2esfm.models.utils import unproject
-
 
 def rotation_matrix_to_quaternion(R, w_first=True):
     if isinstance(R, torch.Tensor):
@@ -25,35 +23,6 @@ def quaternion_to_rotation_matrix(q, w_first=True):
         return Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
     else:
         return Rotation.from_quat(q).as_matrix()
-
-
-# def undistort_tracks(tracks, indexes, intrinsics):
-#     # For each image, undistort the tracks
-#     tracks_undistored = {}
-
-#     rays = []
-#     for i, idx in enumerate(indexes):
-#         rays.append(unproject(tracks[:, i], intrinsics[idx]))
-
-#     rays = torch.stack(rays, dim=1)
-
-#     return rays / torch.clamp(torch.norm(rays, dim=-1, keepdim=True), min=1e-5)
-
-
-# def get_tracks_dict_indexes(tracks_dict):
-#     """
-#     Args:
-#         tracks_dict (dict): Dictionary containing the tracks
-#     Returns:
-#         indexes (list): List of indexes of the tracks
-#     """
-#     if isinstance(tracks_dict["indexes"], dict):
-#         indexes = list(tracks_dict["indexes"].keys())
-#     elif isinstance(tracks_dict["indexes"], list):
-#         indexes = list(range(len(tracks_dict["indexes"])))
-
-
-#     return indexes
 
 
 def restore_identity(extrinsics):

@@ -8,14 +8,11 @@ from gluemap.datasets.base_dataset import DemoBaseDataset
 
 logger = logging.getLogger(__name__)
 
-# from gluemap.datasets.twoview_dataset import BaseTwoViewDataset
 from gluemap.datasets.utils import (
     establish_neighbors_sequential,
     get_image_list,
     retrieve_global_neighbors,
 )
-
-# from
 
 
 class MultiSequencePairs(DemoBaseDataset):

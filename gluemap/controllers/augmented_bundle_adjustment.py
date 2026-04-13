@@ -866,14 +866,6 @@ def run_refinement_pipeline(
             f"ba={iter_timing['ba']:.2f}s, total={iter_timing['total']:.2f}s"
         )
 
-        # # Step 10: Write bundle adjusted results to COLMAP format
-        # file_dir = "bundle_adjusted_thres0.5_iter" + str(outer_iter + 1)
-        # print(
-        #     "Writing bundle adjusted reconstruction:", args.curr_path + "/" + file_dir
-        # )
-        # os.makedirs(args.curr_path + "/" + file_dir, exist_ok=True)
-        # reconstruction.write(args.curr_path + "/" + file_dir)
-
     # Clean up triangulated reconstruction output
     if os.path.exists(triangulated_output_path):
         shutil.rmtree(triangulated_output_path)

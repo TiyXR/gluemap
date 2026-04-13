@@ -176,12 +176,6 @@ def load_and_preprocess_images_1024(images_ori):
             align_corners=False,
         ).squeeze(0)
 
-        # # Center crop height if it's larger than 518
-        # start_y = 0
-        # if new_height > 518:
-        #     start_y = (new_height - 518) // 2
-        #     img = img[:, start_y : start_y + 518, :]
-
         shapes.add((img.shape[1], img.shape[2]))
         images.append(img)
         images_change.append([new_width / width, new_height / height, 0, 0])

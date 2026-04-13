@@ -742,10 +742,7 @@ def convert_to_colmap_format(
                     {"point3d": global_tracks[idx][j], "tracks": []}
                 )
                 points3d_idx.append(idx * max_track_length + j)
-
-                # for i, idx_inner in enumerate(predictions_dict["indexes"][idx]):
-                #     if scores[0, i, j] <= 0:
-                #         continue
+                
                 valid_idx = np.where(valid)[0].tolist()
                 for i in valid_idx:
                     idx_inner = predictions_dict["indexes"][idx][i]

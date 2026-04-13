@@ -285,56 +285,6 @@ class GlobalGluer:
                 for i in range(self.N)
             }
 
-        # # Establish tracks for bundle adjustment
-        # track_options = TrackEstablishmentOptions(track_min_num_views_per_track=2)
-        # (
-        #     points3D,
-        #     keypoints_per_image,
-        #     pts2d_idx_all,
-        #     pts2d_idx_virtual_all,
-        #     pts2d_idx_inv,
-        #     pts2d_idx_virtual_inv,
-        #     image_to_point3D,
-        #     images_points2d_virtual_isnegative,
-        # ) = establish_tracks_from_tracks_dict(
-        #     tracks_dict=predictions_dict,
-        #     num_images=self.N,
-        #     options=track_options,
-        #     add_tracks=True,
-        #     add_virtual_points=True,
-        #     device="cuda",
-        # )
-
-        # # Initialize 3D world points
-        # points3D = initialize_world_points(
-        #     predictions_dict,
-        #     global_rotations,
-        #     global_centers,
-        #     points3D,
-        #     pts2d_idx_inv,
-        #     pts2d_idx_virtual_inv,
-        #     keypoints_per_image=keypoints_per_image,
-        #     intrinsics_params=intrinsics_params,
-        #     intrinsics_mapping=intrinsics_mapping,
-        #     reproj_threshold=10.0,
-        # )
-
-        # global_rotations, global_centers, global_intrinsics, points3D = bundle_adjustment(
-        #     predictions_dict,
-        #     global_rotations,
-        #     global_centers,
-        #     global_intrinsics,
-        #     intrinsics_mapping,
-        #     points3D=points3D,
-        #     keypoints_per_image=keypoints_per_image,
-        #     pts2d_idx_inv=pts2d_idx_inv,
-        #     pts2d_idx_virtual_inv=pts2d_idx_virtual_inv,
-        #     images_points2d_virtual_isnegative=images_points2d_virtual_isnegative,
-        #     max_num_iterations=200,
-        #     camera_model=camera_model,
-        #     skip_world_points_init=True,  # Already initialized above
-        # )
-
         return global_rotations, global_centers
 
     def _estimate_intrinsics(
