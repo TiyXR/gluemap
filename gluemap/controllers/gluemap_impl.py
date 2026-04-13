@@ -5,7 +5,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
-from gluemap.utils.prepare_prior import (
+from gluemap.utils.colmap_utils import (
     prepare_sift_database,
 )
 

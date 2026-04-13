@@ -19,7 +19,7 @@ from gluemap.controllers.bundle_adjustment import (
     build_negative_depth_observations,
     filter_observations_by_error,
 )
-from gluemap.math.errors import (
+from gluemap.math.reprojection_error import (
     compute_all_errors_from_reconstruction,
     ReprojectionErrorType,
 )
@@ -27,8 +27,8 @@ from gluemap.estimators.track_establishment import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
-from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
-from gluemap.utils.prepare_prior import (
+from gluemap.utils.colmap_utils import (
+    camera_from_intrinsics_matrix,
     prepare_glomap_prior,
     merge_colmap_databases,
 )
