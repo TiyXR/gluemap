@@ -6,7 +6,7 @@ from pi3.models.pi3 import Pi3
 from pi3.models.pi3x import Pi3X
 from vggt.models.vggt import VGGT
 from mapanything.models.mapanything.model import MapAnything
-from thirdparty.vggsfm.vggsfm_tracker import TrackerPredictor
+from vggsfm.vggsfm_tracker import TrackerPredictor
 
 # Import VPRModel with salad on sys.path, temporarily swapping 'models' in
 # sys.modules to avoid namespace collision with croco's models directory.
