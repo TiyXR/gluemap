@@ -12,6 +12,21 @@ from gluemap.controllers.gluemap_impl import run_postprocessing_pipeline
 from gluemap.controllers.star_collection import run_star_collection
 
 
+def add_ablation_args(parser):
+    """Add ablation-specific CLI flags to an argument parser."""
+    parser.add_argument(
+        "--skip_doppelgangers",
+        action="store_true",
+        help="Ablation: skip DG model, treat all pairs as valid (score=1.0)",
+    )
+    parser.add_argument(
+        "--skip_back_and_forth",
+        action="store_true",
+        help="Ablation: set all pose_scores to 1.0 after star inference, disabling consistency filtering",
+    )
+    return parser
+
+
 def run_ablation_inference_pipeline(
     args, dataset_pair, world_size, rank, device, dtype, pairs=None, device_id="0",
     models=None,

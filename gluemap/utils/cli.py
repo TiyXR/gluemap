@@ -164,18 +164,6 @@ def get_args_parser():
         help="use GT intrinsics from the ground truth reconstruction (requires gt_path in config)",
     )
 
-    # Ablation flags
-    parser.add_argument(
-        "--skip_doppelgangers",
-        action="store_true",
-        help="Ablation: skip DG model, treat all pairs as valid (score=1.0)",
-    )
-    parser.add_argument(
-        "--skip_back_and_forth",
-        action="store_true",
-        help="Ablation: set all pose_scores to 1.0 after star inference, disabling consistency filtering",
-    )
-
     parser.add_argument(
         "--config",
         type=str,
