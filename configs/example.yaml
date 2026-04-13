@@ -1,0 +1,45 @@
+# Model selection
+chosen_model: pi3
+
+# Model paths
+path_feedforward: ""
+path_retrieval: ""
+path_tracker: ""
+path_dg: ""
+
+# IO
+images_path: /path/to/images
+write_path: results/
+temp_path: ./tmp
+
+# Processing
+num_track_per_img: 1024
+max_num_tracks: null
+camera_model: SIMPLE_PINHOLE
+share_intrinsics: false
+num_neighbors: 100
+num_neighbors_sequential: 30
+
+# Inference
+batch_size: 30
+retrieval_batch_size: 30
+num_workers: 4
+
+# Thresholds
+valid_pose_threshold: 0.05
+valid_dg_threshold: 0.8
+
+# Pipeline control
+force_load: false
+rerun_from: null
+skip_refinement: false
+coarse_only: false
+disable_tracking: false
+
+# Ground truth intrinsics
+gt_intrinsics_path: null
+use_gt_intrinsics: false
+
+# Sequential mode (demo.py only)
+is_sequential: false
+sample_frequency: 1
