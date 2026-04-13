@@ -12,11 +12,13 @@ from typing import Dict, List, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
 import numpy as np
+import torch
+from tqdm import tqdm
+from scipy.spatial import cKDTree
 
 import pycolmap
 
 from gluemap.math.union_find import UnionFind
-from gluemap.utils.prepare_prior import establish_keypoints_and_correspondences
 
 import logging
 
@@ -72,7 +74,7 @@ class TrackEstablishment:
             pts2d_idx_virtual_all,
             pts2d_idx_inv,
             pts2d_idx_virtual_inv,
-        ) = establish_keypoints_and_correspondences(
+        ) = self.establish_keypoints_and_correspondences(
             tracks_dict=tracks_dict,
             N=num_images,
             add_tracks=add_tracks,
@@ -96,6 +98,269 @@ class TrackEstablishment:
             pts2d_idx_virtual_inv,
             image_to_point3D,
             images_points2d_virtual_isnegative,
+        )
+
+    def establish_keypoints_and_correspondences(
+        self,
+        tracks_dict,
+        N,
+        add_tracks,
+        add_virtual_points,
+        device="cuda",
+        use_1_indexed=True,
+    ):
+        """
+        Establish keypoints and correspondences from tracks.
+
+        This function collects 2D points from tracks, builds point index mappings,
+        and establishes correspondences between image pairs.
+
+        Args:
+            tracks_dict: Dictionary containing tracks, scores, indexes, etc.
+            N: Number of images
+            add_tracks: Whether to add real tracks
+            add_virtual_points: Whether to add virtual points
+            device: CUDA device for tensor operations
+            use_1_indexed: If True, correspondences use 1-indexed image IDs (COLMAP style).
+                           If False, use 0-indexed image IDs.
+
+        Returns:
+            keypoints_per_image: Dict mapping image_id to keypoints numpy array
+            correspondences: Dict mapping (image_id1, image_id2) to list of (pt_idx1, pt_idx2)
+            images_points2d: Dict mapping image_id to list of 2D points
+            images_points2d_virtual: Dict mapping image_id to list of virtual 2D points
+            images_points2d_virtual_isnegative: Dict mapping image_id to list of is_negative flags
+        """
+        indexes = range(len(tracks_dict["indexes"]))
+
+        # Initialize data structures
+        images_points2d = {i: [] for i in range(N)}  # (image_id, [point_2d, ...])
+        images_points2d_virtual = {i: [] for i in range(N)}  # (image_id, [point_2d, ...])
+        images_points2d_virtual_isnegative = {
+            i: [] for i in range(N)
+        }  # (image_id, [is_negative, ...])
+
+        N_indexes = {idx: tracks_dict["tracks"][idx].shape[-3] for idx in indexes}
+        pts2d_idx_all = {
+            idx: np.ones([N_indexes[idx], tracks_dict["tracks"][idx].shape[-2]], dtype=int)
+            * -1
+            for idx in indexes
+        }  # N x K
+
+        if add_virtual_points or not add_tracks:
+            pts2d_idx_virtual_all = {
+                idx: np.zeros(
+                    [N_indexes[idx], tracks_dict["tracks_virtual"][idx].shape[-2]],
+                    dtype=int,
+                )
+                for idx in indexes
+            }  # N x K
+        else:
+            pts2d_idx_virtual_all = None
+
+        # Initialize inverse maps: image_id -> list of (idx, i, j) tuples
+        pts2d_idx_inv = {i: [] for i in range(N)}  # inverse map for real tracks
+
+        if add_virtual_points or not add_tracks:
+            pts2d_idx_virtual_inv = {i: [] for i in range(N)}  # inverse map for virtual
+        else:
+            pts2d_idx_virtual_inv = None
+
+        # Add the points
+        logger.info("Adding points to dictionary...")
+        for idx in tqdm(indexes):
+            scores = tracks_dict["scores"][idx]
+            if add_tracks:
+                for i in range(tracks_dict["tracks"][idx].shape[1]):
+                    valid = scores[0, i, :] > 0.0
+
+                    valid_idx = np.where(valid)[0].tolist()
+
+                    idx_inner = tracks_dict["indexes"][idx][i]
+
+                    indexes_pts = list(
+                        range(
+                            len(images_points2d[idx_inner]),
+                            len(images_points2d[idx_inner]) + len(valid_idx),
+                        )
+                    )
+                    pts2d_idx_all[idx][i, valid_idx] = indexes_pts
+                    images_points2d[idx_inner] += [
+                        tracks_dict["tracks"][idx][0, i, j] for j in valid_idx
+                    ]
+                    # Build inverse map: for each point added, record its origin (idx, i, j)
+                    for j in valid_idx:
+                        pts2d_idx_inv[idx_inner].append((idx, i, j))
+
+            if not add_virtual_points and add_tracks:
+                continue
+
+            for i in range(tracks_dict["tracks_virtual"][idx].shape[1]):
+                scores = tracks_dict["valid_virtual"][idx]
+                valid = scores[0, i, :] > 0.0
+
+                valid_idx = np.where(valid)[0].tolist()
+                idx_inner = tracks_dict["indexes"][idx][i]
+
+                indexes_pts = list(
+                    range(
+                        len(images_points2d_virtual[idx_inner]),
+                        len(images_points2d_virtual[idx_inner]) + len(valid_idx),
+                    )
+                )
+                pts2d_idx_virtual_all[idx][i, valid_idx] = indexes_pts
+                images_points2d_virtual[idx_inner] += [
+                    tracks_dict["tracks_virtual"][idx][0, i, j] for j in valid_idx
+                ]
+                images_points2d_virtual_isnegative[idx_inner] += (
+                    tracks_dict["isnegative_virtual"][idx][0, i, valid_idx]
+                    .cpu()
+                    .numpy()
+                    .astype(int)
+                    .tolist()
+                )
+                # Build inverse map for virtual points
+                for j in valid_idx:
+                    pts2d_idx_virtual_inv[idx_inner].append((idx, i, j))
+
+        # Build keypoints per image
+        keypoints_per_image = {}
+
+        logger.info("Constructing correspondences...")
+        for idx in tqdm(range(N)):
+            uf_pts2d = UnionFind()
+            if len(images_points2d[idx]) == 0 and len(images_points2d_virtual[idx]) == 0:
+                continue
+
+            if len(images_points2d[idx]) == 0:
+                images_points2d_virtual_tensor = torch.stack(
+                    images_points2d_virtual[idx], dim=0
+                ).to(torch.float32)
+
+                # Store keypoints for this image
+                keypoints_per_image[idx] = images_points2d_virtual_tensor.cpu().numpy()
+
+                continue
+
+            # Use KDTree for efficient near-duplicate detection (O(N) memory vs O(N^2))
+            images_points2d_tensor = (
+                torch.stack(images_points2d[idx], dim=0).to(torch.float32)
+            )
+
+            # Find near-duplicate points using KDTree on CPU
+            pts_np = images_points2d_tensor.numpy()
+            tree = cKDTree(pts_np)
+            pairs = tree.query_pairs(r=1e-3, output_type='ndarray')
+            for i, j in pairs:
+                uf_pts2d.union(int(i), int(j))
+
+            if len(images_points2d_virtual[idx]) > 0:
+                images_points2d_virtual_tensor = torch.stack(
+                    images_points2d_virtual[idx], dim=0
+                ).to(torch.float32)
+                images_points2d_tensor = torch.cat(
+                    [images_points2d_tensor, images_points2d_virtual_tensor], dim=0
+                )
+
+            # Store keypoints for this image
+            keypoints_per_image[idx] = images_points2d_tensor.cpu().numpy()
+
+            # Update the indexes in pts2d_idx_all and pts2d_idx_virtual_all
+            for idx_inner in indexes:
+                for i in range(tracks_dict["tracks"][idx_inner].shape[1]):
+                    if tracks_dict["indexes"][idx_inner][i] != idx:
+                        continue
+                    for j in range(tracks_dict["tracks"][idx_inner].shape[2]):
+                        if pts2d_idx_all[idx_inner][i, j] == -1:
+                            continue
+                        pts2d_idx_all[idx_inner][i, j] = uf_pts2d.find(
+                            pts2d_idx_all[idx_inner][i, j]
+                        )
+
+            uf_pts2d.clear()
+
+        # Establish the concrete correspondences
+        # Just change the point index a bit if two points are very close to each other
+        correspondences = (
+            {}
+        )  # key is (image_id1, image_id2), value is a list of (point2d_id1, point2d_id2)
+        logger.info("Concatenating tracks...")
+        for idx in tqdm(indexes):
+
+            # Note: since in GLOMAP, blind concatenation is used, so we only need to consider the pairs with the center image as one of the image
+            for i, idx_inner in enumerate(tracks_dict["indexes"][idx]):
+                if i == 0:
+                    continue
+                if idx_inner < tracks_dict["indexes"][idx][0]:
+                    i1 = i
+                    i2 = 0
+                    idx_inner1 = idx_inner
+                    idx_inner2 = tracks_dict["indexes"][idx][0]
+                else:
+                    i1 = 0
+                    i2 = i
+                    idx_inner1 = tracks_dict["indexes"][idx][0]
+                    idx_inner2 = idx_inner
+
+                offset = 1 if use_1_indexed else 0
+                key = (idx_inner1 + offset, idx_inner2 + offset)
+
+                if add_tracks:
+                    scores = tracks_dict["scores"][idx].cpu()
+                    common_points = (scores[0, i1, :] * scores[0, i2, :]) > 0.0
+                    index_j = np.where(common_points)[0]
+
+                    corres_real = np.stack(
+                        [pts2d_idx_all[idx][i1, index_j], pts2d_idx_all[idx][i2, index_j]],
+                        axis=1,
+                    )
+                else:
+                    corres_real = []
+
+                # Add the virtual correspondences
+                if add_virtual_points:
+                    scores_virtual = tracks_dict["valid_virtual"][idx]
+                    len1 = len(images_points2d[idx_inner1])
+                    len2 = len(images_points2d[idx_inner2])
+                    common_points_virtual = (
+                        scores_virtual[0, i1, :] * scores_virtual[0, i2, :]
+                    ) > 0.0
+                    index_virtual_j = np.where(common_points_virtual)[0]
+                    corres_virtual = np.stack(
+                        [
+                            pts2d_idx_virtual_all[idx][i1, index_virtual_j] + len1,
+                            pts2d_idx_virtual_all[idx][i2, index_virtual_j] + len2,
+                        ],
+                        axis=1,
+                    )
+                else:
+                    corres_virtual = []
+
+                if key not in correspondences:
+                    correspondences[key] = []
+
+                if len(corres_real) > 0:
+                    correspondences[key].append(corres_real)
+                if len(corres_virtual) > 0:
+                    correspondences[key].append(corres_virtual)
+
+        for key in correspondences.keys():
+            if len(correspondences[key]) == 0:
+                continue
+            correspondences[key] = np.unique(
+                np.concatenate(correspondences[key]), axis=0
+            ).tolist()
+
+        return (
+            keypoints_per_image,
+            correspondences,
+            images_points2d,
+            images_points2d_virtual,
+            images_points2d_virtual_isnegative,
+            pts2d_idx_all,
+            pts2d_idx_virtual_all,
+            pts2d_idx_inv,
+            pts2d_idx_virtual_inv,
         )
 
     def _establish_tracks(
