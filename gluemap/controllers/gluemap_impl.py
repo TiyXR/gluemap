@@ -16,7 +16,6 @@ from gluemap.controllers.augmented_bundle_adjustment import run_refinement_pipel
 from gluemap.estimators.virtual_tracks import VirtualTrackPreparation
 from gluemap.estimators.track_snapping import TrackSnapping
 from gluemap.controllers.star_collection import run_star_collection
-from gluemap.utils.misc import get_tracks_dict_indexes
 from gluemap.math.scaling import rescale_tracks, rescale_intrinsics, keep_inframes
 
 from gluemap.estimators.rotation_averaging import collect_relative_rotations_ministar
@@ -297,7 +296,7 @@ class GlueMapPipeline:
 
     @staticmethod
     def restore_image_shape(predictions_dict, images_change, images_shape_ori, valid_threshold=0.05):
-        index = get_tracks_dict_indexes(predictions_dict)
+        index = range(len(predictions_dict["indexes"]))
         for idx in index:
             rescale_tracks(predictions_dict, images_change, [idx])
             keep_inframes(predictions_dict, images_shape_ori, [idx])

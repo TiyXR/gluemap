@@ -27,7 +27,6 @@ import shutil
 
 from scipy.spatial import cKDTree
 
-from gluemap.utils.misc import get_tracks_dict_indexes
 from gluemap.math.union_find import UnionFind
 from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 
@@ -431,7 +430,7 @@ def establish_keypoints_and_correspondences(
         images_points2d_virtual: Dict mapping image_id to list of virtual 2D points
         images_points2d_virtual_isnegative: Dict mapping image_id to list of is_negative flags
     """
-    indexes = get_tracks_dict_indexes(tracks_dict)
+    indexes = range(len(tracks_dict["indexes"]))
 
     # Initialize data structures
     images_points2d = {i: [] for i in range(N)}  # (image_id, [point_2d, ...])
@@ -685,7 +684,7 @@ def prepare_glomap_prior(
         os.makedirs(dir_write)
 
     # Perform intrinsics averaging here
-    indexes = get_tracks_dict_indexes(tracks_dict)
+    indexes = range(len(tracks_dict["indexes"]))
     members = [tracks_dict["indexes"][idx] for idx in indexes]
 
     # Write colmap database + prior

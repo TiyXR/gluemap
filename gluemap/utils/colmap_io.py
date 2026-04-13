@@ -3,7 +3,6 @@ import os
 import numpy as np
 
 
-from gluemap.utils.misc import get_tracks_dict_indexes
 from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
 
 
@@ -47,7 +46,7 @@ def convert_to_colmap_format(
     points3d = []  # point_3d
 
     if indexes is None and not pose_only:
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
 
     if not pose_only:
         max_track_length = max([predictions_dict["tracks"][idx].shape[2] for idx in indexes])

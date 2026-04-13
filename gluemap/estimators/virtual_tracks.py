@@ -2,7 +2,6 @@ import numpy as np
 import torch
 
 from gluemap.math.geometry import project_tracks, restore_identity
-from gluemap.utils.misc import get_tracks_dict_indexes
 
 import logging
 logger = logging.getLogger(__name__)
@@ -37,7 +36,7 @@ class VirtualTrackPreparation:
         3. Re-project a subset of virtual tracks using global poses, with extra
            updates for edges marked as pose-inconsistent.
         """
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
 
         self._update_virtual_tracks(
             predictions_dict, global_intrinsics, intrinsics_mapping, indexes

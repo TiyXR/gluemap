@@ -1,4 +1,3 @@
-from gluemap.utils.misc import get_tracks_dict_indexes
 
 
 def rescale_intrinsics(global_intrinsics, intrinsics_scales, inverse=False):
@@ -25,7 +24,7 @@ def rescale_intrinsics(global_intrinsics, intrinsics_scales, inverse=False):
 
 def keep_inframes(tracks_dict, image_shape_ori, indexes=None):
     if indexes is None:
-        indexes = get_tracks_dict_indexes(tracks_dict)
+        indexes = range(len(tracks_dict["indexes"]))
 
     for idx in indexes:
         index = tracks_dict["indexes"][idx]
@@ -76,7 +75,7 @@ def rescale_tracks(tracks_dict, image_changes_full, indexes=None, reverse=False)
     Rescale the tracks to the original image size.
     """
     if indexes is None:
-        get_tracks_dict_indexes(tracks_dict)
+        range(len(tracks_dict["indexes"]))
 
     # image_changes_full: (x_scale, y_scale, x_shift, y_shift)
     for idx in indexes:

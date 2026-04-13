@@ -2,14 +2,13 @@ import numpy as np
 import torch
 import networkx as nx
 
-from gluemap.utils.misc import get_tracks_dict_indexes
 
 MIN_TRI_ANGLE = 1  # degrees, minimum median triangulation angle for reliable scale estimation
 
 
 def initialize_mst_structures(predictions_dict, global_rotations):
     N = max(global_rotations.keys()) + 1
-    indexes = get_tracks_dict_indexes(predictions_dict)
+    indexes = range(len(predictions_dict["indexes"]))
 
     rel_poses = {}
     scales = {}  # (i,j): s_j / s_i

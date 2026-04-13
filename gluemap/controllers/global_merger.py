@@ -16,7 +16,6 @@ from gluemap.estimators.track_establishment import (
     TrackEstablishmentOptions,
 )
 
-from gluemap.utils.misc import get_tracks_dict_indexes
 from gluemap.math.geometry import restore_identity
 from gluemap.math.mst_initialization import initialize_mst_structures
 
@@ -72,7 +71,7 @@ class GlobalGluer:
     # Suppress edges which are too weak, and connect the missing edges
     def _refine_graph_structure(self, predictions_dict):
         predictions_dict["scores"] = {}
-        for idx in get_tracks_dict_indexes(predictions_dict):
+        for idx in range(len(predictions_dict["indexes"])):
             predictions_dict["scores"][idx] = torch.where(
                 predictions_dict["vis"][idx] > 0.05, predictions_dict["vis"][idx], 0.0
             )
@@ -91,7 +90,7 @@ class GlobalGluer:
         return predictions_dict, valid_edges
 
     def _filter_inconsistent_edges(self, predictions_dict):
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
 
         rel_poses = {}
         # inconsistent_edges = set()
@@ -153,7 +152,7 @@ class GlobalGluer:
     def _collect_valid_edges(self, predictions_dict):
         # Here, the score already considers the n^2 visibility, so we can just use the pose scores
         valid_edges = set()
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         for idx in indexes:
             valid_j = torch.where(
                 predictions_dict["pose_scores"][idx][0] > self.valid_threshold_pose
@@ -324,7 +323,7 @@ class GlobalGluer:
         return global_rotations, global_centers
 
     def _estimate_intrinsics(self, predictions_dict, intrinsics_mapping, camera_model):
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         intrinsics_all = [predictions_dict["intrinsics"][idx] for idx in indexes]
         members = [predictions_dict["indexes"][idx] for idx in indexes]
 
@@ -335,7 +334,7 @@ class GlobalGluer:
         return global_intrinsics
 
     def _prune_invisible_pairs(self, predictions_dict):
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         for idx in indexes:
             if len(predictions_dict["indexes"][idx]) == 1:
                 continue
@@ -366,7 +365,7 @@ class GlobalGluer:
                     #     breakpoint()
 
     def _filter_invalid_edges(self, predictions_dict, global_rotations):
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         thres = np.deg2rad(self.max_rot_error)
         num_filtered = 0
         num_total = 0
@@ -434,7 +433,7 @@ class GlobalGluer:
     def _mark_inconsistent_edges(
         self, predictions_dict, global_rotations, global_centers
     ):
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         thres_rot = np.deg2rad(1.0)
         thres_trans = np.deg2rad(5.0)
         num_filtered = 0
@@ -522,7 +521,7 @@ class GlobalGluer:
             predictions_dict: Dictionary containing pose_scores and indexes
             boost_factor: Factor to multiply the weight by (default: 2.0)
         """
-        indexes = get_tracks_dict_indexes(predictions_dict)
+        indexes = range(len(predictions_dict["indexes"]))
         seq_edges = getattr(self, "sequential_edges", set())
         num_boosted = 0
 

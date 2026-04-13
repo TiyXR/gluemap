@@ -7,7 +7,6 @@ import pycolmap
 import torch
 from tqdm import tqdm
 
-from gluemap.utils.misc import get_tracks_dict_indexes
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +45,7 @@ class TrackSnapping:
 
     def _snap_tracks(self, tracks_dict, query_points_full, snapping_thres):
         tracks_dict["scores"] = {}
-        for idx in get_tracks_dict_indexes(tracks_dict):
+        for idx in range(len(tracks_dict["indexes"])):
             tracks_dict["scores"][idx] = torch.where(
                 tracks_dict["vis"][idx] > 0.05, tracks_dict["vis"][idx], 0.0
             )
@@ -71,7 +70,7 @@ class TrackSnapping:
         for key in snapping_thres_dict.keys():
             snapping_thres_dict[key] = snapping_thres_dict[key] ** 2
 
-        indexes = get_tracks_dict_indexes(tracks_dict)
+        indexes = range(len(tracks_dict["indexes"]))
         counter_valid = 0
         tracks_dict["is_close"] = {}
         logger.info("Indexing and snapping points...")
