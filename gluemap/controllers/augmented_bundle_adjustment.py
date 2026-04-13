@@ -477,18 +477,12 @@ def run_refinement_pipeline(
         log_message = "Creating tracks database (empty, no prior tracks)..."
 
     # Step 1c: Create database with tracks (or empty)
-    # Note: poses_rel and poses_rel_scores are only used for prior.txt, not database creation
-    # We pass empty dicts since we only need the database
     logger.info(log_message)
     t0 = time.perf_counter()
     prepare_glomap_prior(
         args.curr_path,
         dataset_pair.images_shape_ori,
         dataset_pair.images_list,
-        global_rotations,
-        global_centers,
-        {},  # poses_rel - not needed for database creation
-        {},  # poses_rel_scores - not needed for database creation
         global_intrinsics,
         predictions_dict,
         dataset_pair.intrinsics_mapping,

@@ -463,10 +463,6 @@ def prepare_glomap_prior(
     dir_write,
     images_shape_ori,
     images_list,
-    global_rotations,
-    global_centers,
-    poses_rel,
-    poses_rel_scores,
     global_intrinsics,
     tracks_dict,
     intrinsics_mapping,
@@ -482,17 +478,13 @@ def prepare_glomap_prior(
     indexes = range(len(tracks_dict["indexes"]))
     members = [tracks_dict["indexes"][idx] for idx in indexes]
 
-    # Write colmap database + prior
+    # Write colmap database
     prepare_database_prior(
         dir_write,
         images_shape_ori,
         tracks_dict,
-        global_rotations,
-        global_centers,
         global_intrinsics,
         intrinsics_mapping,
-        poses_rel,
-        poses_rel_scores,
         images_list,
         camera_model=camera_model,
         add_tracks=add_tracks,
@@ -505,12 +497,8 @@ def prepare_database_prior(
     dir_write,
     images_shape_ori,
     tracks_dict,
-    global_rotations,
-    global_centers,
     global_intrinsics,
     intrinsics_mapping,
-    poses_rel,
-    poses_rel_scores,
     images_list,
     camera_model="SIMPLE_RADIAL",
     add_tracks=True,
@@ -551,9 +539,9 @@ def prepare_database_prior(
     (
         keypoints_per_image,
         correspondences,
-        images_points2d,
-        images_points2d_virtual,
-        images_points2d_virtual_isnegative,
+        _,
+        _,
+        _,
         _,
         _,
         _,
@@ -601,147 +589,6 @@ def prepare_database_prior(
         database.write_matches(image_id1, image_id2, np.array(correspondences[key]))
 
     database.close()
-
-    # Required data structures
-    #    - num_image num_pair
-    #    - N lines of image prior info:
-    #      IMAGE_NAME VIRTUAL_START
-    #    - M lines of image pair info:
-    #      IMAGE_NAME_1 IMAGE_NAME_2 QW QX QY QZ TX TY TZ WEIGHT
-
-    # Need to calculate the number of valid poses, so we prepare the relative poses to be written first
-    lines = []
-    for key in poses_rel.keys():
-        idx1 = key[0]
-        idx2 = key[1]
-        if idx1 >= idx2 and (idx2, idx1) in poses_rel.keys():
-            continue
-
-        cam2_from_cam1 = pycolmap.Rigid3d(poses_rel[key])
-        score = poses_rel_scores[key]
-        # If both way is available, write the average as the prior
-        if (idx2, idx1) in poses_rel.keys():
-
-            cam1_from_cam2 = pycolmap.Rigid3d(poses_rel[(idx2, idx1)])
-            cam2_from_cam1_v2 = cam1_from_cam2.inverse()
-
-            # Take the average of the two as the prior
-            quat_sum = cam2_from_cam1.rotation.quat + cam2_from_cam1_v2.rotation.quat
-            cam2_from_cam1.rotation.quat = quat_sum / np.linalg.norm(quat_sum)
-
-            # Since the translation are not with the same scale, so need to scale both to unit length
-            trans_sum = cam2_from_cam1.translation / np.linalg.norm(
-                cam2_from_cam1.translation
-            ) + cam2_from_cam1_v2.translation / np.linalg.norm(
-                cam2_from_cam1_v2.translation
-            )
-            cam2_from_cam1.translation = trans_sum / 2
-
-            score = (score + poses_rel_scores[(idx2, idx1)]) / 2
-
-        if score <= 0:
-            continue
-        qx, qy, qz, qw = cam2_from_cam1.rotation.quat
-        tx, ty, tz = cam2_from_cam1.translation
-        weight = score
-
-        lines.append(
-            images_list[idx1]
-            + " "
-            + images_list[idx2]
-            + " "
-            + str(qw)
-            + " "
-            + str(qx)
-            + " "
-            + str(qy)
-            + " "
-            + str(qz)
-            + " "
-            + str(tx)
-            + " "
-            + str(ty)
-            + " "
-            + str(tz)
-            + " "
-            + str(weight)
-            + "\n"
-        )
-
-    num_valid_pose = len(lines)
-    file = open(dir_write + "/prior.txt", "w")
-
-    file.write(str(len(images_list)) + " " + str(num_valid_pose) + "\n")
-    # if add_virtual_points:
-    # else:
-    #     file.write("0 " + str(num_valid_pose) + "\n")
-
-    for i in range(len(images_list)):
-        # file.write(images_list[i] + " " + str(len(images_points2d[i])) + "\n")
-
-        cam_from_world = pycolmap.Rigid3d(
-            np.concatenate(
-                [global_rotations[i][:3, :3].T, global_centers[i].reshape(3, 1)], axis=1
-            )
-        ).inverse()
-        qx, qy, qz, qw = cam_from_world.rotation.quat
-        tx, ty, tz = cam_from_world.translation
-        if add_virtual_points or not add_tracks:
-            file.write(
-                images_list[i]
-                + " "
-                + str(qw)
-                + " "
-                + str(qx)
-                + " "
-                + str(qy)
-                + " "
-                + str(qz)
-                + " "
-                + str(tx)
-                + " "
-                + str(ty)
-                + " "
-                + str(tz)
-                + " "
-                + str(len(images_points2d[i]))
-                + "\n"
-            )
-            is_negative_index = (
-                np.arange(len(images_points2d_virtual[i]))[
-                    np.array(images_points2d_virtual_isnegative[i]) == 1
-                ]
-                + len(images_points2d[i])
-            ).tolist()
-            file.write(
-                " ".join(map(str, [len(is_negative_index)] + is_negative_index)) + "\n"
-            )
-        else:
-            file.write(
-                images_list[i]
-                + " "
-                + str(qw)
-                + " "
-                + str(qx)
-                + " "
-                + str(qy)
-                + " "
-                + str(qz)
-                + " "
-                + str(tx)
-                + " "
-                + str(ty)
-                + " "
-                + str(tz)
-                + " -1\n"
-            )
-            file.write("0\n")
-
-    for line in lines:
-        file.write(line)
-
-    file.close()
-    # return database
 
 
 # for the case pairs are directly given, set the selected_seeds to None and neighbors to the pairs
