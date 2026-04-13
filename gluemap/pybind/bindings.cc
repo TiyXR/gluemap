@@ -119,24 +119,12 @@ PYBIND11_MODULE(pygluemap, m)
         &ScaledObsPairwiseDirectionError::Create<const Eigen::Vector3d &>,
         py::arg("translation_obs"));
 
-  m.def("Point3DConsistencyError",
-        &Point3DConsistencyError::Create<const Eigen::Vector3d &, const Eigen::Vector3d &>,
-        py::arg("point3d_1"), py::arg("point3d_2"));
-
-  m.def("Point3DConsistencySameCamError",
-        &Point3DConsistencySameCamError::Create<const Eigen::Vector3d &, const Eigen::Vector3d &>,
-        py::arg("point3d_1"), py::arg("point3d_2"));
-
-  m.def("DepthConsistencySameCamError",
-        &DepthConsistencySameCamError::Create<const double, const double>,
-        py::arg("depth_1"), py::arg("depth_2"));
-
-//   m.def(
-//       "ReprojErrorCost",
-//       &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor, const Eigen::Vector2d &>,
-//       "camera_model_id"_a,
-//       "point2D"_a,
-//       "Reprojection error.");
+  m.def(
+      "ReprojErrorCost",
+      &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor, const Eigen::Vector2d &>,
+      "camera_model_id"_a,
+      "point2D"_a,
+      "Reprojection error.");
 
   m.def(
       "ReprojErrorCostWithNegativeDepth",
@@ -144,11 +132,6 @@ PYBIND11_MODULE(pygluemap, m)
       "camera_model_id"_a,
       "point2D"_a,
       "Reprojection error with negative depth.");
-
-  m.def("DepthRegularizationCost",
-        &DepthRegularizationFunctor::Create<double>,
-        py::arg("initial_depth"),
-        "Depth regularization cost.");
 
   // Manifold creation helpers for 7D pose (quaternion + translation)
   m.def("CreatePoseManifold",
