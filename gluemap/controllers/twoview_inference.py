@@ -8,7 +8,7 @@ import numpy as np
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from gluemap.utils.gpu_utils import all_gather_object_cpu
+from gluemap.utils.gpu import all_gather_object_cpu
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)

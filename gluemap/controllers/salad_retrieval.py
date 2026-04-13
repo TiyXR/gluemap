@@ -6,7 +6,7 @@ import torch
 from tqdm import tqdm
 
 from gluemap.datasets.utils import get_image_list
-from gluemap.utils.gpu_utils import synchronize
+from gluemap.utils.gpu import synchronize
 from gluemap.utils.load_fn import load_and_preprocess_images
 from gluemap.utils.model_loader import load_models
 from gluemap.controllers.pipeline_wrapper import invalidate_cache_from

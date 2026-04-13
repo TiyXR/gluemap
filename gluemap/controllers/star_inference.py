@@ -9,7 +9,7 @@ from tqdm import tqdm
 from gluemap.estimators.covisibility_extraction import CovisibilityExtraction
 from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.estimators.track_inference import TrackInference
-from gluemap.utils.gpu_utils import all_gather_object_cpu
+from gluemap.utils.gpu import all_gather_object_cpu
 from gluemap.utils.model_loader import load_models
 
 logger = logging.getLogger(__name__)

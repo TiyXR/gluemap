@@ -5,7 +5,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 from gluemap.utils.colmap_io import write_to_colmap_format
-from gluemap.utils.colmap_utils import (
+from gluemap.utils.colmap import (
     prepare_sift_database,
 )
 
@@ -189,7 +189,7 @@ class GlueMapPipeline:
 
         # Override with GT intrinsics if requested (after global mapping)
         if getattr(args, "gt_intrinsics_path", None):
-            from gluemap.utils.colmap_utils import extract_gt_intrinsics
+            from gluemap.utils.colmap import extract_gt_intrinsics
 
             gt_intrinsics = extract_gt_intrinsics(
                 args.gt_intrinsics_path,

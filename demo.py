@@ -2,7 +2,7 @@ from gluemap.datasets.twoview_dataset import BaseTwoViewDataset
 from gluemap.datasets.sequential_twoview_dataset import SequentialTwoViewDataset
 
 from gluemap.utils.cli import get_args_parser, parse_args_with_config
-from gluemap.utils.gpu_utils import init_distributed
+from gluemap.utils.gpu import init_distributed
 from gluemap.controllers.salad_retrieval import run_preprocessing_pipeline
 from gluemap.controllers.gluemap_impl import run_inference_pipeline
 

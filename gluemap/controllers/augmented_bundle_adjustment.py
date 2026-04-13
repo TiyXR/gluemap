@@ -27,7 +27,7 @@ from gluemap.estimators.track_establishment import (
     establish_tracks_from_tracks_dict,
     TrackEstablishmentOptions,
 )
-from gluemap.utils.colmap_utils import (
+from gluemap.utils.colmap import (
     camera_from_intrinsics_matrix,
     prepare_glomap_prior,
     merge_colmap_databases,

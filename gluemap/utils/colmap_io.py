@@ -3,7 +3,7 @@ import os
 import numpy as np
 
 
-from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
+from gluemap.utils.colmap import camera_from_intrinsics_matrix
 
 
 def convert_to_colmap_format(

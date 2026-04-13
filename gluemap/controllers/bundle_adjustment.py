@@ -12,7 +12,7 @@ import numpy as np
 import pycolmap
 
 from gluemap.estimators.bundle_adjustment import bundle_adjustment
-from gluemap.utils.colmap_utils import camera_from_intrinsics_matrix
+from gluemap.utils.colmap import camera_from_intrinsics_matrix
 from gluemap.math.reprojection_error import (
     compute_point_error,
     compute_all_errors_from_reconstruction,
