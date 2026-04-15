@@ -30,13 +30,37 @@ class SaladRetrievalPipeline:
         self.file_name = file_name
         self.device = device
         self.dtype = dtype
+        self.preloaded_models = models
+        self.model = None
+        self.model_loading_time = 0.0
+        self._owns_model = False
 
-        if models is not None and "salad" in models:
-            self.model = models["salad"]
+    def _load_model(self):
+        if self.model is not None:
+            return self.model
+        t0 = time.perf_counter()
+        if (
+            self.preloaded_models is not None
+            and "salad" in self.preloaded_models
+        ):
+            self.model = self.preloaded_models["salad"]
             self.device = next(self.model.parameters()).device
         else:
-            loaded, self.device = load_models(args, keys={"salad"})
+            loaded, self.device = load_models(self.args, keys={"salad"})
             self.model = loaded["salad"]
+            self._owns_model = True
+        self.model_loading_time = time.perf_counter() - t0
+        return self.model
+
+    def _release_model(self):
+        """Free the SALAD model if we own it (i.e. not caller-supplied)."""
+        if not self._owns_model or self.model is None:
+            return
+        del self.model
+        self.model = None
+        self._owns_model = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _maybe_delete_retrieval_cache(self):
         if getattr(self.args, "rerun_from", None) != "retrieval":
@@ -49,6 +73,7 @@ class SaladRetrievalPipeline:
 
     @torch.no_grad()
     def _compute_descriptors(self):
+        model = self._load_model()
         batch_size = self.args.retrieval_batch_size
         images_list = get_image_list(self.args.images_path)
 
@@ -62,7 +87,7 @@ class SaladRetrievalPipeline:
                 patch_size=14,
                 force_square=True,
             )
-            output = self.model(images.to(self.device)).cpu()
+            output = model(images.to(self.device)).cpu()
             descriptors.append(output)
 
         descriptors = torch.cat(descriptors)
@@ -92,28 +117,29 @@ class SaladRetrievalPipeline:
         self._maybe_delete_retrieval_cache()
 
         t0 = time.perf_counter()
-        # Model already loaded in __init__
-        t1 = time.perf_counter()
         self._run_retrieval()
         t2 = time.perf_counter()
 
+        # Model loading is now lazy: model_loading_time is 0 on cache hit,
+        # and the time spent inside _load_model() on cache miss. Subtract it
+        # from salad_retrieval so the two fields are non-overlapping.
+        retrieval_only = (t2 - t0) - self.model_loading_time
         timing = {
-            "model_loading": t1 - t0,
-            "salad_retrieval": t2 - t1,
+            "model_loading": self.model_loading_time,
+            "salad_retrieval": retrieval_only,
             "total": t2 - t0,
         }
         if self.rank == 0:
             logger.info(
-                f"[Profiling] Preprocessing: model_loading={t1 - t0:.2f}s, "
-                f"salad_retrieval={t2 - t1:.2f}s, total={t2 - t0:.2f}s"
+                f"[Profiling] Preprocessing: model_loading={self.model_loading_time:.2f}s, "
+                f"salad_retrieval={retrieval_only:.2f}s, total={t2 - t0:.2f}s"
             )
 
+        self._release_model()
         return ({"salad": self.model}, self.device), timing
 
     def run_multi(self, datasets):
         t0 = time.perf_counter()
-        # Model already loaded in __init__
-        t1 = time.perf_counter()
 
         images_path_root = self.args.images_path
         retrieval_times = {}
@@ -132,18 +158,23 @@ class SaladRetrievalPipeline:
         self.args.curr_path = self.args.write_path
 
         t2 = time.perf_counter()
+        # Model loading is lazy and happens on the first cache-miss dataset.
+        # Subtract it from that dataset's retrieval time so the per-dataset
+        # numbers reflect pure retrieval cost.
+        retrieval_total = sum(retrieval_times.values()) - self.model_loading_time
         timing = {
-            "model_loading": t1 - t0,
-            "salad_retrieval": sum(retrieval_times.values()),
+            "model_loading": self.model_loading_time,
+            "salad_retrieval": retrieval_total,
             "salad_retrieval_per_dataset": retrieval_times,
             "total": t2 - t0,
         }
         if self.rank == 0:
             logger.info(
-                f"[Profiling] Preprocessing multi: model_loading={t1 - t0:.2f}s, "
-                f"salad_retrieval={sum(retrieval_times.values()):.2f}s, total={t2 - t0:.2f}s"
+                f"[Profiling] Preprocessing multi: model_loading={self.model_loading_time:.2f}s, "
+                f"salad_retrieval={retrieval_total:.2f}s, total={t2 - t0:.2f}s"
             )
 
+        self._release_model()
         return ({"salad": self.model}, self.device), timing
 
 
