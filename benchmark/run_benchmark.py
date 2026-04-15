@@ -3,8 +3,6 @@
 import argparse
 import os
 import re
-import sys
-import time
 from typing import Dict, Any, Tuple, Optional, List
 
 import torch
@@ -13,6 +11,7 @@ from gluemap.datasets.twoview_dataset import BaseTwoViewDataset
 from gluemap.datasets.sequential_twoview_dataset import SequentialTwoViewDataset
 from gluemap.datasets.multi_sequence_twoview_dataset import MultiSequencePairs
 from gluemap.utils.gpu import init_distributed
+from gluemap.utils.cli import get_args_parser
 from gluemap.controllers.salad_retrieval import (
     run_preprocessing_pipeline,
     run_preprocessing_pipeline_multi,
@@ -36,78 +35,70 @@ from benchmark.evaluate import (
     compare_reconstructions,
 )
 
+# Config keys that are benchmark-structural (dataset discovery, evaluation settings,
+# per-dataset overrides) — excluded when forwarding config values to the args namespace.
+_BENCHMARK_STRUCTURAL_KEYS = frozenset({
+    "benchmark", "evaluation", "dataset_groups", "experiments",
+    "images_pattern", "gt_pattern", "output_pattern", "_base_",
+    "images_path", "write_path",  # passed explicitly as function args
+    "pipeline",  # old nested style — ignored; use flat keys instead
+})
+
+# Defaults for benchmark-only flags not present in get_args_parser().
+_BENCHMARK_EXTRA_DEFAULTS: Dict[str, Any] = {
+    "is_sequential": False,
+    "sample_frequency": 1,
+    "multi_sequence": False,
+    "subfolder_regex": None,
+    "skip_doppelgangers": False,
+    "skip_back_and_forth": False,
+    "backbone_ablation": False,
+    "track_ablation": False,
+    "track_modes": ["SPV"],
+    "direct_inference": False,
+}
+
 
 def create_args_from_config(
     config: Dict[str, Any],
     images_path: str,
     write_path: str,
     images_list: Optional[List[str]] = None,
-) -> argparse.Namespace:
-    """Create an argparse.Namespace from config dictionary.
+) -> "argparse.Namespace":
+    """Create an argparse.Namespace from a benchmark config dictionary.
+
+    Starts from cli.py parser defaults, applies benchmark-only extra defaults,
+    then overlays all flat config values (excluding benchmark-structural keys).
+    Dataset-specific paths are set last.
+
+    Configs should use the same flat key names as configs/example.yaml
+    (e.g. path_feedforward, path_retrieval, path_tracker, path_dg, chosen_model, …).
 
     Args:
-        config: Configuration dictionary
-        images_path: Path to images for this dataset
-        write_path: Path to write results for this dataset
-        images_list: Optional list of image filenames to use (None means all images)
+        config: Configuration dictionary loaded from YAML.
+        images_path: Path to images for this dataset.
+        write_path: Path to write results for this dataset.
+        images_list: Optional list of image filenames (None = all images).
 
     Returns:
-        argparse.Namespace with all required arguments
+        argparse.Namespace ready to pass into the pipeline.
     """
-    checkpoints = config.get("checkpoints", {})
-    pipeline = config.get("pipeline", {})
+    # 1. Start from cli.py defaults — single source of truth for pipeline knobs.
+    args = get_args_parser().parse_args([])
 
-    args = argparse.Namespace(
-        # Paths
-        images_path=images_path,
-        write_path=write_path,
-        path_pi3=checkpoints.get("pi3", ""),
-        path_pi3x=checkpoints.get("pi3x", ""),
-        path_vggt=checkpoints.get("vggt", ""),
-        path_map_anything=checkpoints.get("map_anything", ""),
-        path_map_anything_v1_1=checkpoints.get("map_anything_v1_1", ""),
-        path_salad=checkpoints.get("salad", ""),
-        path_vggsfm_tracker=checkpoints.get("vggsfm_tracker", ""),
-        path_dg=checkpoints.get("doppelgangers", ""),
-        temp_path=config.get("temp_path", "./tmp"),
-        # Pipeline options
-        chosen_model=pipeline.get("chosen_model", "pi3"),
-        share_intrinsics=pipeline.get("share_intrinsics", True),
-        is_sequential=pipeline.get("is_sequential", False),
-        sample_frequency=pipeline.get("sample_frequency", 1),
-        camera_model=pipeline.get("camera_model", "SIMPLE_PINHOLE"),
-        num_neighbors=pipeline.get("num_neighbors", 100),
-        num_neighbors_sequential=pipeline.get("num_neighbors_sequential", 30),
-        force_load=pipeline.get("force_load", True),
-        rerun_from=pipeline.get("rerun_from", None),
-        coarse_only=pipeline.get("coarse_only", False),
-        skip_refinement=pipeline.get("skip_refinement", False),
-        disable_tracking=pipeline.get("disable_tracking", False),
-        use_gt_intrinsics=pipeline.get("use_gt_intrinsics", False),
-        gt_intrinsics_path=None,
-        # Other defaults
-        num_track_per_img=pipeline.get("num_track_per_img", 1024),
-        max_num_tracks=pipeline.get("max_num_tracks", None),
-        valid_pose_threshold=pipeline.get("valid_pose_threshold", 0.05),
-        num_workers=pipeline.get("num_workers", 4),
-        batch_size=pipeline.get("batch_size", 30),
-        retrieval_batch_size=pipeline.get("retrieval_batch_size", 30),
-        valid_dg_threshold=pipeline.get("valid_dg_threshold", 0.8),
-        save_result=True,
-        dist_url="env://",
-        # Image list for experiment mode (None means use all images)
-        images_list=images_list,
-        # Multi-sequence options (e.g., LaMAR with multiple ios folders per scene)
-        multi_sequence=pipeline.get("multi_sequence", False),
-        subfolder_regex=pipeline.get("subfolder_regex", None),
-        # Ablation flags
-        skip_doppelgangers=pipeline.get("skip_doppelgangers", False),
-        skip_back_and_forth=pipeline.get("skip_back_and_forth", False),
-        backbone_ablation=pipeline.get("backbone_ablation", False),
-        track_ablation=pipeline.get("track_ablation", False),
-        track_modes=pipeline.get("track_modes", ["SPV"]),
-        direct_inference=pipeline.get("direct_inference", False),
-    )
+    # 2. Apply benchmark-only defaults for flags not in the cli parser.
+    for key, value in _BENCHMARK_EXTRA_DEFAULTS.items():
+        setattr(args, key, value)
+
+    # 3. Overlay flat config values, skipping benchmark-structural keys.
+    for key, value in config.items():
+        if key not in _BENCHMARK_STRUCTURAL_KEYS:
+            setattr(args, key, value)
+
+    # 4. Dataset-specific overrides (always take precedence over config).
+    args.images_path = images_path
+    args.write_path = write_path
+    args.images_list = images_list
 
     return args
 
@@ -332,7 +323,8 @@ def run_benchmark(
     all_timing = {}
 
     for dataset_name, images_path, gt_path, output_path, images_list, preprocess_path in datasets:
-        try:
+        # try:
+        if True:
             metrics, dataset_timing = run_single_dataset(
                 config,
                 dataset_name,
@@ -353,7 +345,8 @@ def run_benchmark(
                 all_timing[dataset_name] = dataset_timing
                 print(f"\nCompleted {dataset_name}: {metrics}")
 
-        except Exception as e:
+        # except Exception as e:
+        else:
             if rank == 0:
                 failures[dataset_name] = str(e)
                 print(f"\nFailed on {dataset_name}: {e}")

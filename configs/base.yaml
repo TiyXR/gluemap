@@ -1,0 +1,57 @@
+# Base configuration for GlueMap benchmarks.
+# Shared model paths and pipeline defaults — inherit with: _base_: "base.yaml"
+# All keys are flat and match cli.py / configs/example.yaml arg names.
+
+# Model paths (matching get_args_parser() arg names)
+path_feedforward: "checkpoints/pi3.safetensors"
+path_retrieval:   "checkpoints/dino_salad.ckpt"
+path_tracker:     "checkpoints/vggsfm_v2_0_0_track_predictor.bin"
+path_dg:          "checkpoints/checkpoint-dg+visym.pth"
+
+# Pipeline options
+chosen_model: "pi3"   # pi3, pi3x, vggt, map_anything
+share_intrinsics: true
+camera_model: "SIMPLE_PINHOLE"
+num_neighbors: 100
+num_neighbors_sequential: 30
+force_load: true
+rerun_from: null      # retrieval | twoview | star | null (no forced rerun)
+coarse_only: false
+skip_refinement: false
+num_track_per_img: 1024
+max_num_tracks: null
+valid_pose_threshold: 0.05
+num_workers: 4
+batch_size: 30
+retrieval_batch_size: 30
+valid_dg_threshold: 0.8
+disable_tracking: false
+use_gt_intrinsics: false
+temp_path: "./tmp"
+
+# Sequential mode
+is_sequential: false
+sample_frequency: 1
+
+# Multi-sequence mode (e.g. LaMAR)
+multi_sequence: false
+subfolder_regex: null
+
+# Ablation flags
+skip_doppelgangers: false
+skip_back_and_forth: false
+backbone_ablation: false
+track_ablation: false
+track_modes: ["SPV"]
+direct_inference: false
+
+# Benchmark control (structural — not forwarded as pipeline args)
+benchmark:
+  continue_on_error: true
+  preload_models: true
+
+# Evaluation settings
+evaluation:
+  pose_thresholds: [3, 10, 30]
+  error_metric: "pose"   # pose | rotation | translation
+  use_evo: false
