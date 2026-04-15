@@ -95,6 +95,10 @@ class GlueMapPipeline:
         )
         timing["star_inference"] = star_timing
 
+        # Release extractor models from GPU — not needed after star inference
+        dataset.query_extractors = []
+        dataset._extractors_device = None
+
         # Move predictions_dict tensors to CPU to free GPU memory before postprocessing
         for key, value in predictions_dict.items():
             if isinstance(value, torch.Tensor):
