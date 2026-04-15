@@ -140,6 +140,8 @@ class StarInferencePipeline:
         self.device = device
         self.dtype = dtype
         self.preloaded_models = preloaded_models
+        self.models = None
+        self._owns_models = False
 
     def _make_dataloader(self, dataset):
         if self.args.distributed:
@@ -163,18 +165,34 @@ class StarInferencePipeline:
 
     def _load_models(self):
         chosen_model = getattr(self.args, "chosen_model", "pi3")
+        if self.models is not None:
+            return self.models, chosen_model
         if (
             self.preloaded_models is not None
             and chosen_model in self.preloaded_models
         ):
-            return self.preloaded_models, chosen_model
+            self.models = self.preloaded_models
+            return self.models, chosen_model
         model_keys = (
             {chosen_model}
             if getattr(self.args, "disable_tracking", False)
             else {chosen_model, "vggsfm"}
         )
         models, self.device = load_models(self.args, keys=model_keys)
-        return models, chosen_model
+        self.models = models
+        self._owns_models = True
+        return self.models, chosen_model
+
+    def _release_models(self):
+        """Free star-inference models if we own them (i.e. not caller-supplied)."""
+        if not self._owns_models or self.models is None:
+            return
+        for name in list(self.models):
+            del self.models[name]
+        self.models = None
+        self._owns_models = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _create_batch_inference(self, models, chosen_model):
         return BatchInferenceStar(
@@ -343,6 +361,7 @@ class StarInferencePipeline:
                 f"tracking={sum(tracking_times):.2f}s"
             )
 
+        self._release_models()
         return predictions_dict, star_timing
 
 

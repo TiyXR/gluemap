@@ -98,6 +98,8 @@ class TwoViewInferencePipeline:
         self.device = device
         self.dtype = dtype
         self.preloaded_models = preloaded_models
+        self.model = None
+        self._owns_model = False
 
     def _make_dataloader(self, dataset_pair):
         if self.args.distributed:
@@ -120,10 +122,26 @@ class TwoViewInferencePipeline:
         )
 
     def _load_model(self):
+        if self.model is not None:
+            return self.model
         if self.preloaded_models is not None and "dg" in self.preloaded_models:
-            return self.preloaded_models["dg"]
-        loaded, self.device = load_models(self.args, keys={"dg"})
-        return loaded["dg"]
+            self.model = self.preloaded_models["dg"]
+            self.device = next(self.model.parameters()).device
+        else:
+            loaded, self.device = load_models(self.args, keys={"dg"})
+            self.model = loaded["dg"]
+            self._owns_model = True
+        return self.model
+
+    def _release_model(self):
+        """Free the DG model if we own it (i.e. not caller-supplied)."""
+        if not self._owns_model or self.model is None:
+            return
+        del self.model
+        self.model = None
+        self._owns_model = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def _run_inference(self, data_loader):
         all_outputs = []
@@ -280,6 +298,7 @@ class TwoViewInferencePipeline:
                 f"mean={sum(batch_times) / len(batch_times):.3f}s/batch"
             )
 
+        self._release_model()
         return global_outputs, twoview_timing
 
 
