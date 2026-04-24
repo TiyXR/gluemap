@@ -28,7 +28,7 @@ You need development headers + CMake configs for:
 - METIS (Ceres pulls it in transitively)
 - Boost (headers only)
 - OpenMP
-- pybind11 ≥ 2.12 (also fetched automatically as a build dep, but it's
+- pybind11 ≥ 3.0 (also fetched automatically as a build dep, but it's
   fine to have it in the env)
 
 ### Option A — conda / micromamba (recommended)
@@ -106,7 +106,49 @@ For a non-editable install drop the `-e`.
 pip install -e ".[dev]"   # ruff + pytest
 ```
 
-## 4. Verify
+## 4. Download model checkpoints
+
+The demo configs (`configs/base.yaml`) expect four checkpoints under
+`checkpoints/`. They are not bundled — download them from each model's
+upstream release:
+
+| Config key | File | Source |
+|---|---|---|
+| `path_feedforward` | `pi3.safetensors` | HF `yyfz233/Pi3` |
+| `path_retrieval` | `dino_salad.ckpt` | github.com/serizba/salad release `v1.0.0` |
+| `path_tracker` | `vggsfm_v2_0_0_track_predictor.bin` | HF `facebook/VGGSfM` (`vggsfm_v2_tracker.pt`, renamed) |
+| `path_dg` | `checkpoint-dg+visym.pth` | HF `doppelgangers25/doppelgangers_plusplus` |
+
+Quickest setup from the repo root:
+
+```
+mkdir -p checkpoints
+
+# SALAD retrieval
+wget -O checkpoints/dino_salad.ckpt \
+    https://github.com/serizba/salad/releases/download/v1.0.0/dino_salad.ckpt
+
+# VGGSfM tracker (renamed to match base.yaml)
+wget -O checkpoints/vggsfm_v2_0_0_track_predictor.bin \
+    https://huggingface.co/facebook/VGGSfM/resolve/main/vggsfm_v2_tracker.pt
+
+# Pi3 multiview model (huggingface_hub already in env)
+hf download yyfz233/Pi3 model.safetensors --local-dir checkpoints
+mv checkpoints/model.safetensors checkpoints/pi3.safetensors
+
+# Doppelgangers++
+hf download doppelgangers25/doppelgangers_plusplus \
+    checkpoint-dg+visym.pth --local-dir checkpoints
+```
+
+If you switch `chosen_model` to `vggt` or `map_anything`, fetch the
+matching backbone instead of `pi3.safetensors`:
+
+- VGGT: `https://huggingface.co/facebook/VGGT-1B/resolve/main/model.pt`
+- MapAnything: set `path_feedforward: facebook/map-anything` (it's a HF
+  repo ID, not a file path — `MapAnything.from_pretrained` resolves it).
+
+## 5. Verify
 
 ```
 python -c "import gluemap; import pygluemap; print(pygluemap.__file__)"

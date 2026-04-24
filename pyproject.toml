@@ -1,5 +1,5 @@
 [build-system]
-requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+requires = ["scikit-build-core>=0.10", "pybind11>=3.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -38,6 +38,7 @@ dependencies = [
     "scikit-learn==1.8.0",
     "uniception==0.1.7",
     "pytorch-lightning==2.6.1",
+    "pytorch-metric-learning==2.9.0",
     "lightglue @ git+https://github.com/cvg/LightGlue.git@eb42fee2d71449efb0aa5c10549752b5d75384d8",
 ]
 
