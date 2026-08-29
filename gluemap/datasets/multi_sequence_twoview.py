@@ -49,7 +49,7 @@ class MultiSequencePairs(DemoBaseDataset):
 
         # Now, use all the images in the folder
         self.images_list = [
-            x.replace(self.images_path_root, "").strip("/") for x in img_list
+            os.path.relpath(x, self.images_path_root) for x in img_list
         ]
 
         self.images_path = [

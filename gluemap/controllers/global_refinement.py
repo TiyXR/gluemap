@@ -371,6 +371,9 @@ def run_refinement_pipeline(
         normalized_reproj_threshold=1e-2,
         min_track_length=2,
         fix_rotations_first_pass=False,
+        linear_solver_type=getattr(
+            args, "bundle_adjustment_solver", "auto"
+        ),
     )
 
     # Step 5: Build reconstruction from current data
@@ -400,6 +403,7 @@ def run_refinement_pipeline(
     triangulated_output_path = args.curr_path + "/coarse_triangulated"
 
     iteration_timings = []
+    solver_iterations = []
     for outer_iter in range(num_refinement_iterations):
         logger.info(f"{'=' * 60}")
         logger.info(
@@ -494,12 +498,24 @@ def run_refinement_pipeline(
 
         # Step 8: Run iterative bundle adjustment
         t_ba_start = time.perf_counter()
-        reconstruction, virtual_reconstruction = iterative_bundle_adjustment(
+        reconstruction, virtual_reconstruction, summaries = iterative_bundle_adjustment(
             reconstruction,
             virtual_reconstruction,
             negative_depth_observations_1indexed,
             options=ba_options,
         )
+        for inner_iter, summary in enumerate(summaries, start=1):
+            ceres = summary.ceres_summary
+            solver_iterations.append(
+                {
+                    "stage": "augmented-bundle-adjustment",
+                    "iteration": outer_iter * ba_options.max_filter_iterations
+                    + inner_iter,
+                    "termination": summary.termination_type.name,
+                    "initial_cost": float(ceres.initial_cost),
+                    "final_cost": float(ceres.final_cost),
+                }
+            )
         t_ba_end = time.perf_counter()
 
         iter_timing = {
@@ -533,6 +549,7 @@ def run_refinement_pipeline(
     refinement_timing["write_output"] = time.perf_counter() - t0
 
     refinement_timing["iterations"] = iteration_timings
+    refinement_timing["solver_iterations"] = solver_iterations
     refinement_timing["total"] = time.perf_counter() - t_refinement_start
 
     logger.info("[Profiling] Refinement Summary:")

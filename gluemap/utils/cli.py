@@ -29,7 +29,7 @@ def load_config(config_path: str) -> dict[str, Any]:
     deep-merge over the base.
     """
     path = Path(config_path)
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
 
     if "_base_" in config:
@@ -91,6 +91,12 @@ def get_args_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="whether the images are sequentially ordered",
+    )
+    parser.add_argument(
+        "--use_ceres_rotation_averaging",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="use GLUEMAP's Ceres rotation averaging instead of PyCOLMAP",
     )
     parser.add_argument(
         "--sample_frequency",
@@ -243,6 +249,18 @@ def get_args_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="only output coarse results, skip all refinement steps",
+    )
+    parser.add_argument(
+        "--num_refinement_iterations",
+        default=2,
+        type=int,
+        help="number of global triangulation and bundle-adjustment passes",
+    )
+    parser.add_argument(
+        "--bundle_adjustment_solver",
+        choices=["auto", "dense-schur"],
+        default="auto",
+        help="Ceres linear solver selection used by bundle adjustment",
     )
 
     parser.add_argument(

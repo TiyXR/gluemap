@@ -268,8 +268,9 @@ def rotation_averaging_pycolmap(
 
     # Build a minimal Reconstruction: one dummy camera + one image per index
     reconstruction = pycolmap.Reconstruction()
+    colmap_ids = {idx: idx + 1 for idx in indexes}
     camera = pycolmap.Camera(
-        camera_id=0,
+        camera_id=1,
         model="SIMPLE_PINHOLE",
         width=1,
         height=1,
@@ -277,7 +278,7 @@ def rotation_averaging_pycolmap(
     )
     reconstruction.add_camera_with_trivial_rig(camera)
     for idx in sorted(indexes):
-        image = pycolmap.Image(image_id=idx, camera_id=0)
+        image = pycolmap.Image(image_id=colmap_ids[idx], camera_id=1)
         reconstruction.add_image_with_trivial_frame(image)
 
     # Build PoseGraph: collect best-scoring edge per (i, j) pair
@@ -312,7 +313,7 @@ def rotation_averaging_pycolmap(
         )
         edge = pycolmap.PoseGraphEdge(cam2_from_cam1=rigid)
         edge.num_matches = max(int(score * 1000), 1)
-        pose_graph.add_edge(idx1, idx2, edge)
+        pose_graph.add_edge(colmap_ids[idx1], colmap_ids[idx2], edge)
 
     # Configure options
     options = pycolmap.RotationEstimatorOptions()
@@ -328,7 +329,7 @@ def rotation_averaging_pycolmap(
     # Extract rotations from reconstruction frames
     rotations = {}
     for idx in indexes:
-        frame = reconstruction.frames[idx]
+        frame = reconstruction.frames[colmap_ids[idx]]
         if frame.has_pose():
             rotations[idx] = np.array(
                 frame.rig_from_world.rotation.matrix(), dtype=np.float64

@@ -176,8 +176,17 @@ def init_distributed(
     rank = get_rank()
     world_size = get_world_size()
 
-    # Dummy load models to get device
-    _, device = load_models(args, keys=set())
+    # Cached post-processing does not need a feed-forward checkpoint merely
+    # to discover the device. Individual stages still load their model if
+    # the corresponding cache is absent.
+    if getattr(args, "force_load", False):
+        device = torch.device(
+            "cpu"
+            if getattr(args, "cpu", False) or not torch.cuda.is_available()
+            else "cuda"
+        )
+    else:
+        _, device = load_models(args, keys=set())
     dtype = torch.float32 if device.type == "cpu" else torch.bfloat16
 
     return rank, world_size, device, dtype

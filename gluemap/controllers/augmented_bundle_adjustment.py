@@ -242,6 +242,9 @@ class IterativeBAOptions:
     # Whether to filter virtual points same as real tracks
     filter_virtual_points: bool = True
 
+    # Ceres linear solver selected by the product profile.
+    linear_solver_type: str = "auto"
+
 
 def prune_track_outliers(
     points3D: dict[int, pycolmap.Point3D],
@@ -457,7 +460,11 @@ def iterative_bundle_adjustment(
     virtual_reconstruction: pycolmap.Reconstruction | None,
     negative_depth_observations: dict[int, set],
     options: IterativeBAOptions = None,
-) -> tuple[pycolmap.Reconstruction, pycolmap.Reconstruction | None]:
+) -> tuple[
+    pycolmap.Reconstruction,
+    pycolmap.Reconstruction | None,
+    list[object],
+]:
     """
     Run iterative bundle adjustment with reprojection error filtering.
 
@@ -519,6 +526,7 @@ def iterative_bundle_adjustment(
 
     real_obs, virt_obs = _count_observations()
     logger.info(f"Initial observations: real={real_obs}, virtual={virt_obs}")
+    summaries: list[object] = []
 
     # Iterative filtering loop (outer loop runs BA, inner loop tightens
     # threshold)
@@ -543,12 +551,14 @@ def iterative_bundle_adjustment(
         logger.info(f"Threshold scaling: {scaling}x -> {current_threshold:.4f}")
 
         # Run BA via bundle_adjustment
-        reconstruction, virtual_reconstruction, _summary = bundle_adjustment(
+        reconstruction, virtual_reconstruction, summary = bundle_adjustment(
             reconstruction,
             virtual_reconstruction,
             negative_depth_observations,
             max_num_iterations=options.max_ba_iterations,
+            linear_solver_type=options.linear_solver_type,
         )
+        summaries.append(summary)
 
         # Inner loop: filter and tighten threshold when too few tracks filtered
         # (matches C++ IterativeBundleAdjustment pattern)
@@ -634,4 +644,4 @@ def iterative_bundle_adjustment(
         f"{final_virtual_tracks} virtual tracks ({virt_obs} obs)"
     )
 
-    return reconstruction, virtual_reconstruction
+    return reconstruction, virtual_reconstruction, summaries

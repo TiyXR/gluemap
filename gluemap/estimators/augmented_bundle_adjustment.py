@@ -93,7 +93,7 @@ def _add_virtual_track_residuals(
     reference_reconstruction: pycolmap.Reconstruction,
     negative_depth_observations: dict[int, set[int]],
     loss_function: pyceres.LossFunction | None | object = _DEFAULT_LOSS,
-) -> None:
+) -> list[object]:
     """
     Add reprojection residuals for virtual tracks to an existing ceres problem.
 
@@ -120,12 +120,16 @@ def _add_virtual_track_residuals(
             residuals, or ``None`` for the trivial (squared) loss. If left
             at the sentinel ``_DEFAULT_LOSS``, defaults to Arctan for
             backward compatibility.
+
+    Returns:
+        Strong Python references to the virtual cost functions. They must
+        remain alive until the Ceres solve completes on Windows.
     """
     if (
         virtual_reconstruction is None
         or len(virtual_reconstruction.points3D) == 0
     ):
-        return
+        return []
 
     # Default to Arctan loss for backward compatibility.
     if loss_function is _DEFAULT_LOSS:
@@ -142,6 +146,7 @@ def _add_virtual_track_residuals(
     num_negative = 0
     num_skipped = 0
     num_none = 0
+    cost_handles: list[object] = []
 
     for point3D in virtual_reconstruction.points3D.values():
         world_point = point3D.xyz
@@ -194,6 +199,7 @@ def _add_virtual_track_residuals(
                 loss_function,
                 [world_point, cam_pose, camera_params],
             )
+            cost_handles.append(cost)
             num_constraints += 1
 
     logger.info(
@@ -201,6 +207,7 @@ def _add_virtual_track_residuals(
         f"({num_negative} with negative depth, "
         f"{num_skipped} skipped, {num_none} with no xyz)"
     )
+    return cost_handles
 
 
 def bundle_adjustment(
@@ -210,6 +217,7 @@ def bundle_adjustment(
     max_num_iterations: int = 200,
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
+    linear_solver_type: str = "auto",
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -253,12 +261,29 @@ def bundle_adjustment(
         f"{num_virtual} virtual tracks"
     )
 
+    if num_virtual > 0 and not hasattr(pycolmap.BundleAdjuster, "problem"):
+        logger.warning(
+            "PyCOLMAP does not expose BundleAdjuster.problem; "
+            "dropping %d virtual tracks and running pure-real BA",
+            num_virtual,
+        )
+        virtual_reconstruction = None
+        num_virtual = 0
+
     # --- Build pycolmap BA over the real reconstruction --------------------
     ba_options = pycolmap.BundleAdjustmentOptions()
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
     ba_options.ceres.auto_select_solver_type = True
+    if linear_solver_type == "dense-schur":
+        ba_options.ceres.auto_select_solver_type = False
+        ba_options.ceres.solver_options.linear_solver_type = (
+            pyceres.LinearSolverType.DENSE_SCHUR
+        )
+    elif linear_solver_type != "auto":
+        raise ValueError(f"Unsupported BA solver: {linear_solver_type}")
+    ba_options.ceres.use_gpu = False
     ba_options.ceres.loss_function_type = _pycolmap_loss_type(loss_type_normal)
 
     ba_config = pycolmap.BundleAdjustmentConfig()
@@ -271,6 +296,16 @@ def bundle_adjustment(
     bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
         ba_options, ba_config, reconstruction
     )
+
+    if num_virtual == 0 and not hasattr(bundle_adjuster, "problem"):
+        logger.info(
+            "PyCOLMAP does not expose BundleAdjuster.problem; "
+            "using the public pure-real bundle adjustment solver"
+        )
+        summary = bundle_adjuster.solve()
+        logger.info(str(summary))
+        return reconstruction, virtual_reconstruction, summary
+
     problem = bundle_adjuster.problem
 
     logger.info(
@@ -281,7 +316,7 @@ def bundle_adjustment(
     )
 
     # --- Append virtual residuals to the same problem ----------------------
-    _add_virtual_track_residuals(
+    virtual_cost_handles = _add_virtual_track_residuals(
         problem,
         virtual_reconstruction=virtual_reconstruction,
         reference_reconstruction=reconstruction,
@@ -295,12 +330,11 @@ def bundle_adjustment(
         f"{problem.num_parameter_blocks()} parameter blocks, "
         f"{problem.num_residuals()} residuals"
     )
+    logger.info("Holding %d virtual costs through solve", len(virtual_cost_handles))
 
     # --- Solve -------------------------------------------------------------
-    solver_options = ba_options.ceres.create_solver_options(ba_config, problem)
-    summary = pyceres.SolverSummary()
-    pygluemap.solve_cuda(solver_options, problem, summary)
-    logger.info(summary.BriefReport())
+    summary = bundle_adjuster.solve()
+    logger.info(str(summary))
 
     # --- Sync poses/intrinsics into the virtual reconstruction -------------
     # Only the real reconstruction's numpy buffers flowed into the ceres

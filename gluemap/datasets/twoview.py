@@ -37,11 +37,11 @@ class BaseTwoViewDataset(DemoBaseDataset):
 
         # Now, use all the images in the folder
         self.images_list = [
-            x.replace(args.images_path, "").strip("/") for x in img_list_used
+            os.path.relpath(x, args.images_path) for x in img_list_used
         ]
 
         self.images_list_full = [
-            x.replace(args.images_path, "").strip("/") for x in img_list_full
+            os.path.relpath(x, args.images_path) for x in img_list_full
         ]
 
         self.images_path = [
