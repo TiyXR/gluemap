@@ -34,14 +34,25 @@ if (CERES_HAS_CUDA)
     target_compile_definitions(pygluemap PRIVATE CERES_HAS_CUDA)
 endif()
 
-# Bake the directories of linked libraries (Ceres, etc.) into the
-# extension's RPATH so loading pygluemap also picks up the matching
-# libstdc++ / libceres from $CONDA_PREFIX/lib at runtime, without
-# requiring the user to set LD_LIBRARY_PATH.
-set_target_properties(pygluemap PROPERTIES
-    BUILD_WITH_INSTALL_RPATH TRUE
-    INSTALL_RPATH_USE_LINK_PATH TRUE
-)
+# The immutable Linux package is installed at a declared path.  Let its
+# builder provide that stable RPATH instead of baking a temporary build or
+# bind-mount directory into the wheel.  Local editable builds keep the
+# historical link-path behaviour when no explicit value is provided.
+set(GLUEMAP_RUNTIME_RPATH "" CACHE STRING
+    "Explicit runtime library search path for packaged pygluemap builds")
+if (GLUEMAP_RUNTIME_RPATH)
+    set_target_properties(pygluemap PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${GLUEMAP_RUNTIME_RPATH}"
+        INSTALL_RPATH_USE_LINK_PATH FALSE
+        INSTALL_REMOVE_ENVIRONMENT_RPATH TRUE
+    )
+else()
+    set_target_properties(pygluemap PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+    )
+endif()
 
 # scikit-build-core sets CMAKE_INSTALL_PREFIX to the wheel staging dir;
 # combined with `wheel.install-dir = "/"` in pyproject.toml, this lands

@@ -66,7 +66,9 @@ void SolveCUDA(const ceres::Solver::Options &input_options,
   switch (options.linear_solver_type) {
   case ceres::SPARSE_NORMAL_CHOLESKY:
   case ceres::SPARSE_SCHUR:
+#ifndef CERES_NO_CUDSS
     options.sparse_linear_algebra_library_type = ceres::CUDA_SPARSE;
+#endif
     break;
   case ceres::DENSE_NORMAL_CHOLESKY:
   case ceres::DENSE_SCHUR:
@@ -84,6 +86,14 @@ void SolveCUDA(const ceres::Solver::Options &input_options,
 
 bool IsCUDAAvailable() {
 #ifdef CERES_HAS_CUDA
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool IsCUDSSAvailable() {
+#if defined(CERES_HAS_CUDA) && !defined(CERES_NO_CUDSS)
   return true;
 #else
   return false;
@@ -136,6 +146,10 @@ PYBIND11_MODULE(pygluemap, m) {
 
   m.def("is_cuda_available", &IsCUDAAvailable,
         "Returns True if the module was compiled with CUDA support.");
+
+  m.def("is_cuda_sparse_available", &IsCUDSSAvailable,
+        "Returns True if the module was compiled with CUDA sparse/cuDSS "
+        "support.");
 
   // Numpy-based track selection: returns point3D IDs to delete.
   // Python then calls reconstruction.delete_point3d(id) for each.
