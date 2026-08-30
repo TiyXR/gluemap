@@ -468,6 +468,36 @@ class ActiveTrackStore:
             )
         return dict(values)
 
+    def _components_for_frames(
+        self, frame_ids: Iterable[int]
+    ) -> tuple[dict[str, list[TrackObservation]], int]:
+        """Build component views from the active frame index only.
+
+        Long-running stores deliberately retain observations until a durable
+        grouped release.  Gate evaluation must therefore start from
+        ``_observations_by_frame`` instead of walking every retained history
+        observation and discarding almost all of them afterwards.
+        """
+        values: dict[str, list[TrackObservation]] = defaultdict(list)
+        source_observation_count = 0
+        for frame_id in sorted(set(int(value) for value in frame_ids)):
+            for observation_uid in sorted(
+                self._observations_by_frame.get(frame_id, ())
+            ):
+                source_observation_count += 1
+                root = self._union_find.find(observation_uid)
+                values[self._component_uid_by_root[root]].append(
+                    self._observations[observation_uid]
+                )
+        for observations in values.values():
+            observations.sort(
+                key=lambda value: (
+                    value.geometry_ordinal,
+                    value.observation_uid,
+                )
+            )
+        return dict(values), source_observation_count
+
     def _grid_cell(self, observation: TrackObservation) -> tuple[int, int]:
         column = min(
             self.budget.coverage_grid_columns - 1,
@@ -611,14 +641,25 @@ class ActiveTrackStore:
                 freeze_through,
                 allow_terminal_freeze=allow_terminal_freeze,
             )
-        components = self._components()
         if not values:
             return [], []
+        frame_sets = active_frame_sets or [
+            tuple(range(first, last + 1)) for first, last, _ in values
+        ]
+        if len(frame_sets) != len(values):
+            raise ActiveTrackStoreError("active frame-set batch size differs")
+        active_frame_union = set().union(*(set(value) for value in frame_sets))
+        components, component_source_observation_count = (
+            self._components_for_frames(active_frame_union)
+        )
         if not components:
             self._last_gate_tensor_report = {
                 "activeTensorComponentCount": 0,
                 "activeTensorMaximumObservations": 0,
                 "activeTensorFrameUnionCount": 0,
+                "activeComponentSourceObservationCount": (
+                    component_source_observation_count
+                ),
             }
             return (
                 [
@@ -635,12 +676,6 @@ class ActiveTrackStore:
                 ],
                 [[] for _ in values],
             )
-        frame_sets = active_frame_sets or [
-            tuple(range(first, last + 1)) for first, last, _ in values
-        ]
-        if len(frame_sets) != len(values):
-            raise ActiveTrackStoreError("active frame-set batch size differs")
-
         (
             candidates_by_interval,
             rejected_by_interval,
@@ -806,6 +841,9 @@ class ActiveTrackStore:
             "activeTensorComponentCount": len(component_values),
             "activeTensorMaximumObservations": maximum_observations,
             "activeTensorFrameUnionCount": len(active_frame_union),
+            "activeComponentSourceObservationCount": sum(
+                len(observations) for observations in components.values()
+            ),
         }
         coordinates = torch.tensor(
             padded_coordinates, dtype=torch.float32, device=device

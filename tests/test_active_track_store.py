@@ -171,7 +171,26 @@ def test_gate_tensor_only_contains_current_frame_union():
     assert report["status"] == "passed"
     assert report["activeTensorFrameUnionCount"] == 11
     assert report["activeTensorMaximumObservations"] == 11
+    assert report["activeComponentSourceObservationCount"] == 22
     assert all(len(track.observations) == 11 for track in tracks[0])
+
+
+def test_gate_component_build_skips_retained_history_observations():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, list(range(50)))
+    add_track(store, 1, list(range(50)))
+
+    reports, tracks = store.evaluate_frame_sets_materialized(
+        [((0, 48, 49), 48)], constraint_exempt_frame_ids={0}
+    )
+
+    report = reports[0]
+    assert report["status"] == "passed"
+    assert report["observationCount"] == 100
+    assert report["activeComponentSourceObservationCount"] == 6
+    assert report["activeTensorComponentCount"] == 2
+    assert report["activeTensorMaximumObservations"] == 3
+    assert all(len(track.observations) == 3 for track in tracks[0])
 
 
 def test_exact_frame_release_keeps_older_canonical_gauge_observations():
