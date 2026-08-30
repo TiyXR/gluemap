@@ -441,6 +441,49 @@ class ActiveTrackStore:
         if self._gpu_observation_table is not None:
             self._gpu_observation_table.queue(value)
 
+    def _insert_observation_batch(
+        self, values: list[TrackObservation]
+    ) -> None:
+        """Insert one already validated native-intern result without call churn."""
+        if not values:
+            return
+        incoming_by_frame = Counter(
+            value.geometry_ordinal for value in values
+        )
+        for frame_id, count in incoming_by_frame.items():
+            if (
+                len(self._observations_by_frame[frame_id]) + count
+                > self.budget.maximum_candidate_observations_per_keyframe
+            ):
+                raise ActiveTrackStoreError(
+                    "per-keyframe observation bound exceeded"
+                )
+        observations = self._observations
+        observations_by_frame = self._observations_by_frame
+        native_uids_by_frame = self._native_spatial_uids_by_frame
+        native_x_by_frame = self._native_spatial_x_by_frame
+        native_y_by_frame = self._native_spatial_y_by_frame
+        union_parent = self._union_find.parent
+        component_uid_by_root = self._component_uid_by_root
+        maintain_python_buckets = self._spatial_intern_backend != "native-openmp"
+        table = self._gpu_observation_table
+        for value in values:
+            uid = value.observation_uid
+            if uid in observations or uid in union_parent:
+                raise ActiveTrackStoreError("observation identity was reused")
+            frame_id = value.geometry_ordinal
+            observations[uid] = value
+            observations_by_frame[frame_id].add(uid)
+            if maintain_python_buckets:
+                self._add_spatial_observation(value)
+            native_uids_by_frame[frame_id].append(uid)
+            native_x_by_frame[frame_id].append(value.x)
+            native_y_by_frame[frame_id].append(value.y)
+            union_parent[uid] = uid
+            component_uid_by_root[uid] = uid
+            if table is not None:
+                table.queue(value)
+
     def intern_observations(
         self,
         values: Iterable[TrackObservation],
@@ -672,6 +715,7 @@ class ActiveTrackStore:
         phase_started = time.perf_counter()
         existing_count = len(existing_uids)
         resolved_uids: list[str] = []
+        new_values: list[TrackObservation] = []
         for index, representative in enumerate(representatives.tolist()):
             if representative < existing_count:
                 resolved_uids.append(existing_uids[representative])
@@ -700,8 +744,9 @@ class ActiveTrackStore:
                 if existing != value:
                     raise ActiveTrackStoreError("observation identity was reused")
             else:
-                self._insert_observation(value)
+                new_values.append(value)
             resolved_uids.append(value.observation_uid)
+        self._insert_observation_batch(new_values)
         self._last_column_intern_phase_wall["newObservationInsert"] = (
             time.perf_counter() - phase_started
         )
@@ -1695,16 +1740,20 @@ class ActiveTrackStore:
             if not frame_values:
                 del self._observations_by_frame[observation.geometry_ordinal]
             bucket = self._spatial_bucket(observation)
-            spatial_values = self._spatial_buckets_by_frame[
+            frame_buckets = self._spatial_buckets_by_frame.get(
                 observation.geometry_ordinal
-            ][bucket]
-            spatial_values.remove(uid)
-            if not spatial_values:
-                del self._spatial_buckets_by_frame[
-                    observation.geometry_ordinal
-                ][bucket]
-            if not self._spatial_buckets_by_frame[observation.geometry_ordinal]:
-                del self._spatial_buckets_by_frame[observation.geometry_ordinal]
+            )
+            spatial_values = (
+                None if frame_buckets is None else frame_buckets.get(bucket)
+            )
+            if spatial_values is not None and uid in spatial_values:
+                spatial_values.remove(uid)
+                if not spatial_values:
+                    del frame_buckets[bucket]
+                if not frame_buckets:
+                    del self._spatial_buckets_by_frame[
+                        observation.geometry_ordinal
+                    ]
         for frame_id in released_frame_ids:
             remaining_uids = sorted(
                 self._observations_by_frame.get(frame_id, ())

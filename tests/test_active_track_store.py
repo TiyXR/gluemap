@@ -181,13 +181,13 @@ def test_column_intern_constructs_only_new_observation_rows(monkeypatch):
     existing = observation(0, 0, x=10.0, y=10.0)
     store.add_observations([existing])
     inserted = []
-    original_insert = store._insert_observation
+    original_insert = store._insert_observation_batch
 
-    def counted_insert(value):
-        inserted.append(value.observation_uid)
-        original_insert(value)
+    def counted_insert(values):
+        inserted.extend(value.observation_uid for value in values)
+        original_insert(values)
 
-    monkeypatch.setattr(store, "_insert_observation", counted_insert)
+    monkeypatch.setattr(store, "_insert_observation_batch", counted_insert)
     resolved = store.intern_observation_columns(
         ["nearby-reference", "new-reference"],
         [0, 0],
