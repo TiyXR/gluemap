@@ -10,8 +10,10 @@ import logging
 
 import numpy as np
 import pycolmap
+import torch
 
 from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
+from gluemap.estimators.fixed_lag_prior import FejPriorState
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
@@ -271,22 +273,6 @@ class TestBundleAdjustmentEndToEnd:
         reconstruction = create_synthetic_reconstruction(
             num_frames=6, num_points3D=80, seed=14
         )
-
-    def test_cuda_required_needs_ceres_solver_probe(self):
-        reconstruction = create_synthetic_reconstruction(
-            num_frames=4, num_points3D=20, seed=17
-        )
-        with np.testing.assert_raises_regex(
-            RuntimeError, "CUDA/cuDSS bundle adjustment is unavailable"
-        ):
-            bundle_adjustment(
-                reconstruction,
-                None,
-                negative_depth_observations={},
-                max_num_iterations=0,
-                device_policy="cuda-required",
-                ceres_cuda_available=None,
-            )
         anchor_id = sorted(reconstruction.reg_image_ids())[0]
         anchor_pose = copy.deepcopy(
             reconstruction.image(anchor_id).cam_from_world()
@@ -328,6 +314,77 @@ class TestBundleAdjustmentEndToEnd:
         )
         for camera_id, parameters in camera_parameters.items():
             assert np.array_equal(result.cameras[camera_id].params, parameters)
+
+    def test_cuda_required_needs_ceres_solver_probe(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=4, num_points3D=20, seed=17
+        )
+        with np.testing.assert_raises_regex(
+            RuntimeError, "CUDA/cuDSS bundle adjustment is unavailable"
+        ):
+            bundle_adjustment(
+                reconstruction,
+                None,
+                negative_depth_observations={},
+                max_num_iterations=0,
+                device_policy="cuda-required",
+                ceres_cuda_available=None,
+            )
+
+    def test_fej_prior_is_added_to_the_same_ceres_problem(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=5, num_points3D=40, seed=23
+        )
+        fixed_image_id = sorted(reconstruction.reg_image_ids())[0]
+        prior_image_id = sorted(reconstruction.reg_image_ids())[-1]
+        baseline = copy.deepcopy(reconstruction)
+        with_prior = copy.deepcopy(reconstruction)
+        _, _, baseline_summary = bundle_adjustment(
+            baseline,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=0,
+            fixed_pose_ids={fixed_image_id},
+            fix_intrinsics=True,
+            device_policy="cpu",
+        )
+        linearization = torch.from_numpy(
+            with_prior.image(prior_image_id).cam_from_world().params.copy()
+        ).reshape(1, 7)
+        factor_residual = torch.tensor(
+            [0.1, -0.2, 0.3, 1.0, -2.0, 0.5], dtype=torch.float64
+        )
+        factor = torch.eye(6, dtype=torch.float64)
+        prior = FejPriorState(
+            camera_ids=(99,),
+            linearization_points=linearization,
+            hessian=factor.T @ factor,
+            gradient=factor.T @ factor_residual,
+            factor=factor,
+            factor_residual=factor_residual,
+            report={},
+        )
+
+        _, _, prior_summary = bundle_adjustment(
+            with_prior,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=0,
+            fixed_pose_ids={fixed_image_id},
+            fix_intrinsics=True,
+            device_policy="cpu",
+            fej_prior=prior,
+            fej_prior_image_ids={99: prior_image_id},
+        )
+
+        expected_added_cost = 0.5 * float(factor_residual @ factor_residual)
+        actual_added_cost = (
+            prior_summary.ceres_summary.initial_cost
+            - baseline_summary.ceres_summary.initial_cost
+        )
+        np.testing.assert_allclose(
+            actual_added_cost, expected_added_cost, rtol=1e-10, atol=1e-10
+        )
 
     def test_ba_recovers_from_noise(self):
         """After adding small noise to 3D points and poses, BA should

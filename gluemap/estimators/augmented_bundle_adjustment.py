@@ -3,6 +3,11 @@ import logging
 import numpy as np
 import pyceres
 import pycolmap
+
+from gluemap.estimators.fixed_lag_prior import (
+    FejPosePriorCostFunction,
+    FejPriorState,
+)
 import pygluemap
 
 from gluemap.utils.runtime_capacity import resolve_native_thread_count
@@ -225,6 +230,33 @@ def _add_virtual_track_residuals(
     return cost_handles
 
 
+def _add_fej_pose_prior(
+    problem: pyceres.Problem,
+    reconstruction: pycolmap.Reconstruction,
+    prior: FejPriorState | None,
+    image_id_by_prior_camera_id: dict[int, int] | None,
+) -> list[object]:
+    if prior is None:
+        return []
+    mapping = image_id_by_prior_camera_id or {}
+    if set(mapping) != set(prior.camera_ids):
+        raise ValueError("FEJ prior camera/image identity differs")
+    image_ids = [mapping[camera_id] for camera_id in prior.camera_ids]
+    if len(set(image_ids)) != len(image_ids) or any(
+        image_id not in reconstruction.images for image_id in image_ids
+    ):
+        raise ValueError("FEJ prior image identity is invalid")
+    parameters = [
+        reconstruction.frames[image_id].rig_from_world.params
+        for image_id in image_ids
+    ]
+    if any(not problem.has_parameter_block(value) for value in parameters):
+        raise ValueError("FEJ prior pose is absent from the Ceres problem")
+    cost = FejPosePriorCostFunction(prior)
+    problem.add_residual_block(cost, None, parameters)
+    return [cost]
+
+
 def bundle_adjustment(
     reconstruction: pycolmap.Reconstruction,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -237,6 +269,8 @@ def bundle_adjustment(
     fix_intrinsics: bool = False,
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
+    fej_prior: FejPriorState | None = None,
+    fej_prior_image_ids: dict[int, int] | None = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -272,6 +306,8 @@ def bundle_adjustment(
         ceres_cuda_available: Passed Ceres solver-probe result. PyTorch,
             PyCOLMAP SIFT or pygluemap CUDA capability is not sufficient
             evidence for CUDA BA.
+        fej_prior: Optional persistent pose-only square-root prior.
+        fej_prior_image_ids: Exact prior-camera to reconstruction-image map.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -345,7 +381,9 @@ def bundle_adjustment(
         ba_options, ba_config, reconstruction
     )
 
-    if num_virtual == 0 and not hasattr(bundle_adjuster, "problem"):
+    if num_virtual == 0 and fej_prior is None and not hasattr(
+        bundle_adjuster, "problem"
+    ):
         logger.info(
             "PyCOLMAP does not expose BundleAdjuster.problem; "
             "using the public pure-real bundle adjustment solver"
@@ -372,6 +410,12 @@ def bundle_adjustment(
         negative_depth_observations=negative_depth_observations,
         loss_function=_pyceres_loss_function(loss_type_virtual),
     )
+    fej_cost_handles = _add_fej_pose_prior(
+        problem,
+        reconstruction,
+        fej_prior,
+        fej_prior_image_ids,
+    )
 
     logger.info(
         f"After virtual residual add: "
@@ -379,7 +423,11 @@ def bundle_adjustment(
         f"{problem.num_parameter_blocks()} parameter blocks, "
         f"{problem.num_residuals()} residuals"
     )
-    logger.info("Holding %d virtual costs through solve", len(virtual_cost_handles))
+    logger.info(
+        "Holding %d virtual and %d FEJ prior costs through solve",
+        len(virtual_cost_handles),
+        len(fej_cost_handles),
+    )
 
     # --- Solve -------------------------------------------------------------
     summary = bundle_adjuster.solve()
