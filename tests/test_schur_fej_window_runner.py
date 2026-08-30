@@ -115,3 +115,41 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     assert second.report["coarseFixedWarmStartCount"] == 4
     assert second.report["localBa"]["fixedPoseCount"] == 1
     assert second.report["prior"]["priorNullity"] == 1
+
+
+def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    runner = SchurFejWindowRunner(
+        fixed_gauge_frame_id=0,
+        coarse_solver=_CoarseSolver(centers, intrinsics),
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    first_ids = [0, 1, 2, 3, 4]
+    second_ids = [0, 2, 3, 4, 5]
+    runner.advance({}, first_ids, _tracks(first_ids, centers, intrinsics))
+    runner.advance({}, second_ids, _tracks(second_ids, centers, intrinsics))
+
+    drained = []
+    while runner.fixed_lag.prior is not None:
+        frame_ids = sorted(
+            {0, *runner.fixed_lag.prior.camera_ids}
+        )
+        drained.append(
+            runner.drain_next(_tracks(frame_ids, centers, intrinsics))
+        )
+
+    assert [value.solved.finalized_frame_id for value in drained] == [3, 4, 5]
+    assert [value.report["terminalDrain"] for value in drained] == [True] * 3
+    assert drained[-1].report["terminalFinalized"] is True
+    assert drained[-1].report["prior"] is None
+    assert runner.fixed_lag.current_frame_ids == (0,)

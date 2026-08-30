@@ -18,6 +18,7 @@ from gluemap.estimators.fixed_anchor_approximation import (
 from gluemap.estimators.schur_fej_fixed_lag_runner import (
     SchurFejFixedLagRunner,
     SchurFejFixedLagStep,
+    SchurFejTerminalStep,
 )
 
 
@@ -29,7 +30,7 @@ class SchurFejWindowRunnerError(ValueError):
 class SchurFejWindowStep:
     window_ordinal: int
     coarse: FixedAnchorWindowSolution
-    solved: SchurFejFixedLagStep
+    solved: SchurFejFixedLagStep | SchurFejTerminalStep
     report: dict[str, Any]
 
 
@@ -168,6 +169,88 @@ class SchurFejWindowRunner:
 
     def snapshot(self) -> dict[str, Any]:
         return self.fixed_lag.snapshot()
+
+    def drain_next(
+        self, selected_tracks: list[SelectedTrackState]
+    ) -> SchurFejWindowStep:
+        """Finalize one retained tail pose after the source timeline is sealed."""
+        started = time.perf_counter()
+        prior = self.fixed_lag.prior
+        if prior is None or not prior.camera_ids:
+            raise SchurFejWindowRunnerError(
+                "Schur/FEJ terminal drain has no retained body pose"
+            )
+        frame_ids = sorted(
+            {self.fixed_gauge_frame_id, *prior.camera_ids}
+        )
+        rotations, centers = self.fixed_lag.current_pose_copies()
+        coarse = FixedAnchorWindowSolution(
+            frame_ids=tuple(frame_ids),
+            rotations={value: rotations[value] for value in frame_ids},
+            centers={value: centers[value] for value in frame_ids},
+            intrinsics=[self.fixed_lag.frozen_intrinsics_copy[None]],
+            report={
+                "contractId": "jarailsense.gluemap-terminal-warm-start/v1",
+                "status": "passed",
+            },
+        )
+        finalized_frame_id = min(prior.camera_ids)
+        if len(prior.camera_ids) == 1:
+            solved = self.fixed_lag.finalize_terminal(
+                coarse,
+                selected_tracks,
+                final_frame_id=finalized_frame_id,
+            )
+        else:
+            solved = self.fixed_lag.advance(
+                coarse,
+                selected_tracks,
+                marginalize_frame_id=finalized_frame_id,
+            )
+        constraint_counts = {frame_id: 0 for frame_id in frame_ids}
+        frame_uid_by_id: dict[int, str] = {}
+        for track in selected_tracks:
+            for observation in track.observations:
+                frame_id = observation.geometry_ordinal
+                if frame_id in constraint_counts:
+                    constraint_counts[frame_id] += 1
+                    frame_uid_by_id.setdefault(frame_id, observation.frame_uid)
+        zero_constraint_frames = [
+            frame_id
+            for frame_id, count in constraint_counts.items()
+            if count == 0
+        ]
+        if zero_constraint_frames:
+            raise SchurFejWindowRunnerError(
+                "Schur/FEJ terminal drain contains zero-constraint frames"
+            )
+        frame_uids = [
+            frame_uid_by_id.get(frame_id, f"geometry-{frame_id}")
+            for frame_id in frame_ids
+        ]
+        report = {
+            **solved.report,
+            "contractId": "jarailsense.gluemap-schur-fej-drain-step/v1",
+            "terminalDrain": True,
+            "firstFrameId": frame_ids[0],
+            "lastFrameId": frame_ids[-1],
+            "advanceStepKeyframes": 1,
+            "fixedGaugeFrameId": self.fixed_gauge_frame_id,
+            "coarseFixedWarmStartCount": len(frame_ids),
+            "actualBaCameraFrameUids": frame_uids,
+            "actualBaCameraFrameUidsSha256": _canonical_sha256(frame_uids),
+            "nonKeyframeBaCameraCount": 0,
+            "zeroConstraintFrameIds": zero_constraint_frames,
+            "minimumConstraintCount": min(constraint_counts.values()),
+            "coarseWallSeconds": 0.0,
+            "totalWallSeconds": time.perf_counter() - started,
+        }
+        return SchurFejWindowStep(
+            window_ordinal=solved.window_ordinal,
+            coarse=coarse,
+            solved=solved,
+            report=report,
+        )
 
     def restore(self, checkpoint: dict[str, Any]) -> None:
         self.fixed_lag.restore(checkpoint)
