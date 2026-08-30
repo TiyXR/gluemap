@@ -1,0 +1,266 @@
+"""Persistent Schur/FEJ fixed-lag solve state over caller-initialized windows."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from gluemap.estimators.active_track_store import SelectedTrackState
+from gluemap.estimators.fixed_anchor_approximation import FixedAnchorWindowSolution
+from gluemap.estimators.fixed_anchor_diagnostic_runner import (
+    _resolve_shared_intrinsics,
+)
+from gluemap.estimators.fixed_anchor_local_ba import (
+    FixedAnchorLocalBaSolution,
+    refine_fixed_anchor_window,
+)
+from gluemap.estimators.fixed_lag_prior import FejPriorState
+from gluemap.estimators.fixed_lag_triangulation import (
+    TriangulatedTrackState,
+    triangulate_selected_tracks,
+)
+
+
+class SchurFejFixedLagRunnerError(ValueError):
+    """Raised when the persistent Schur/FEJ state cannot advance exactly."""
+
+
+@dataclass(frozen=True)
+class SchurFejFixedLagStep:
+    window_ordinal: int
+    frame_ids: tuple[int, ...]
+    finalized_frame_id: int
+    finalized_rotation: np.ndarray
+    finalized_center: np.ndarray
+    triangulated_tracks: tuple[TriangulatedTrackState, ...]
+    refined: FixedAnchorLocalBaSolution
+    prior: FejPriorState
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _PoseState:
+    rotations: dict[int, np.ndarray]
+    centers: dict[int, np.ndarray]
+
+
+class SchurFejFixedLagRunner:
+    """Own one canonical gauge and a persistent pose-only FEJ prior."""
+
+    def __init__(
+        self,
+        *,
+        fixed_gauge_frame_ids: set[int],
+        camera_model: str = "SIMPLE_PINHOLE",
+        triangulation_device_policy: str = "cuda-required",
+        triangulation_microbatch_tracks: int = 4096,
+        ba_device_policy: str = "cuda-preferred",
+        ba_linear_solver_policy: str = "auto",
+        ba_max_iterations: int = 100,
+        ba_refinement_passes: int = 1,
+        ceres_cuda_available: bool | None = None,
+        prior_device_policy: str = "cuda-required",
+        prior_relative_rank_threshold: float = 1e-10,
+        prior_maximum_condition_estimate: float | None = None,
+        prior_expected_nullity: int | None = 1,
+    ) -> None:
+        if not fixed_gauge_frame_ids:
+            raise SchurFejFixedLagRunnerError("fixed gauge pose set is empty")
+        self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
+        self.camera_model = camera_model
+        self.triangulation_device_policy = triangulation_device_policy
+        self.triangulation_microbatch_tracks = triangulation_microbatch_tracks
+        self.ba_device_policy = ba_device_policy
+        self.ba_linear_solver_policy = ba_linear_solver_policy
+        self.ba_max_iterations = ba_max_iterations
+        self.ba_refinement_passes = ba_refinement_passes
+        self.ceres_cuda_available = ceres_cuda_available
+        self.prior_device_policy = prior_device_policy
+        self.prior_relative_rank_threshold = prior_relative_rank_threshold
+        self.prior_maximum_condition_estimate = prior_maximum_condition_estimate
+        self.prior_expected_nullity = prior_expected_nullity
+        self._prior: FejPriorState | None = None
+        self._poses: _PoseState | None = None
+        self._frozen_intrinsics: np.ndarray | None = None
+        self._next_window_ordinal = 0
+
+    @property
+    def prior(self) -> FejPriorState | None:
+        return self._prior
+
+    @property
+    def next_window_ordinal(self) -> int:
+        return self._next_window_ordinal
+
+    def advance(
+        self,
+        coarse: FixedAnchorWindowSolution,
+        selected_tracks: list[SelectedTrackState],
+        *,
+        marginalize_frame_id: int,
+    ) -> SchurFejFixedLagStep:
+        started = time.perf_counter()
+        frame_ids = tuple(coarse.frame_ids)
+        frame_id_set = set(frame_ids)
+        if (
+            len(frame_ids) < 3
+            or tuple(sorted(frame_id_set)) != frame_ids
+            or self.fixed_gauge_frame_ids - frame_id_set
+        ):
+            raise SchurFejFixedLagRunnerError("fixed-lag frame identity is invalid")
+        if (
+            marginalize_frame_id not in frame_id_set
+            or marginalize_frame_id in self.fixed_gauge_frame_ids
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag marginal pose identity is invalid"
+            )
+        if self._prior is not None and set(self._prior.camera_ids) - frame_id_set:
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag window dropped a retained prior pose"
+            )
+        if not selected_tracks:
+            raise SchurFejFixedLagRunnerError("fixed-lag selected tracks are empty")
+        if any(
+            observation.geometry_ordinal not in frame_id_set
+            for track in selected_tracks
+            for observation in track.observations
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag track observation is outside the window"
+            )
+
+        rotations = {
+            frame_id: np.asarray(coarse.rotations[frame_id], dtype=np.float64).copy()
+            for frame_id in frame_ids
+        }
+        centers = {
+            frame_id: np.asarray(coarse.centers[frame_id], dtype=np.float64).copy()
+            for frame_id in frame_ids
+        }
+        overlap_ids: set[int] = set()
+        if self._poses is not None:
+            overlap_ids = set(self._poses.rotations) & frame_id_set
+            for frame_id in overlap_ids:
+                rotations[frame_id] = self._poses.rotations[frame_id].copy()
+                centers[frame_id] = self._poses.centers[frame_id].copy()
+        warm_coarse = FixedAnchorWindowSolution(
+            frame_ids=frame_ids,
+            rotations=rotations,
+            centers=centers,
+            intrinsics=coarse.intrinsics,
+            report=coarse.report,
+        )
+        if self._frozen_intrinsics is None:
+            self._frozen_intrinsics = _resolve_shared_intrinsics(coarse.intrinsics)
+        matrix_k = self._frozen_intrinsics
+
+        triangulation_started = time.perf_counter()
+        triangulated, triangulation_report = triangulate_selected_tracks(
+            selected_tracks,
+            rotations,
+            centers,
+            matrix_k,
+            device_policy=self.triangulation_device_policy,
+            microbatch_tracks=self.triangulation_microbatch_tracks,
+        )
+        triangulation_wall = time.perf_counter() - triangulation_started
+        solve_started = time.perf_counter()
+        refined = refine_fixed_anchor_window(
+            warm_coarse,
+            triangulated,
+            matrix_k,
+            fixed_pose_ids=self.fixed_gauge_frame_ids,
+            camera_model=self.camera_model,
+            max_num_iterations=self.ba_max_iterations,
+            refinement_passes=self.ba_refinement_passes,
+            linear_solver_policy=self.ba_linear_solver_policy,
+            device_policy=self.ba_device_policy,
+            ceres_cuda_available=self.ceres_cuda_available,
+            previous_prior=self._prior,
+            marginalize_pose_id=marginalize_frame_id,
+            prior_device_policy=self.prior_device_policy,
+            prior_relative_rank_threshold=self.prior_relative_rank_threshold,
+            prior_maximum_condition_estimate=(
+                self.prior_maximum_condition_estimate
+            ),
+            prior_expected_nullity=self.prior_expected_nullity,
+        )
+        solve_wall = time.perf_counter() - solve_started
+        if refined.report["status"] != "passed" or refined.next_prior is None:
+            raise SchurFejFixedLagRunnerError("fixed-lag BA/prior did not pass")
+        if refined.next_prior.report["status"] != "passed":
+            raise SchurFejFixedLagRunnerError("fixed-lag prior gate did not pass")
+
+        overlap_rotation_delta = 0.0
+        overlap_center_delta = 0.0
+        if self._poses is not None:
+            for frame_id in overlap_ids:
+                if frame_id in self.fixed_gauge_frame_ids:
+                    continue
+                overlap_rotation_delta = max(
+                    overlap_rotation_delta,
+                    float(
+                        np.max(
+                            np.abs(
+                                refined.rotations[frame_id]
+                                - self._poses.rotations[frame_id]
+                            )
+                        )
+                    ),
+                )
+                overlap_center_delta = max(
+                    overlap_center_delta,
+                    float(
+                        np.max(
+                            np.abs(
+                                refined.centers[frame_id]
+                                - self._poses.centers[frame_id]
+                            )
+                        )
+                    ),
+                )
+        report = {
+            "contractId": "jarailsense.gluemap-schur-fej-step/v1",
+            "status": "passed",
+            "publishable": False,
+            "marginalizationMode": "schur-fej",
+            "windowOrdinal": self._next_window_ordinal,
+            "frameCount": len(frame_ids),
+            "fixedGaugeFrameIds": sorted(self.fixed_gauge_frame_ids),
+            "previousPriorCameraCount": (
+                0 if self._prior is None else len(self._prior.camera_ids)
+            ),
+            "nextPriorCameraCount": len(refined.next_prior.camera_ids),
+            "marginalizedFrameId": marginalize_frame_id,
+            "overlapFrameCount": len(overlap_ids),
+            "maximumOverlapRotationMatrixDelta": overlap_rotation_delta,
+            "maximumOverlapCenterDelta": overlap_center_delta,
+            "triangulationWallSeconds": triangulation_wall,
+            "solveAndPriorWallSeconds": solve_wall,
+            "totalWallSeconds": time.perf_counter() - started,
+            "triangulation": triangulation_report,
+            "localBa": refined.report,
+            "prior": refined.next_prior.report,
+        }
+        self._prior = refined.next_prior
+        self._poses = _PoseState(
+            rotations=refined.rotations,
+            centers=refined.centers,
+        )
+        step = SchurFejFixedLagStep(
+            window_ordinal=self._next_window_ordinal,
+            frame_ids=frame_ids,
+            finalized_frame_id=marginalize_frame_id,
+            finalized_rotation=refined.rotations[marginalize_frame_id].copy(),
+            finalized_center=refined.centers[marginalize_frame_id].copy(),
+            triangulated_tracks=tuple(triangulated),
+            refined=refined,
+            prior=refined.next_prior,
+            report=report,
+        )
+        self._next_window_ordinal += 1
+        return step
