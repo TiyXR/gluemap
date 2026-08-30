@@ -68,7 +68,7 @@ def test_gpu_style_batch_dlt_recovers_known_points() -> None:
         assert actual.positive_depth_fraction == 1.0
 
 
-def test_gram_eigh_matches_homogeneous_svd() -> None:
+def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
     rotations = {frame: np.eye(3) for frame in range(6)}
     centers = {
         frame: np.array((float(frame) * 0.3, 0.02 * frame, 0.0))
@@ -117,13 +117,29 @@ def test_gram_eigh_matches_homogeneous_svd() -> None:
         microbatch_tracks=7,
         solver_policy="homogeneous-gram-eigh",
     )
+    qr, qr_report = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+        microbatch_tracks=7,
+        solver_policy="homogeneous-qr-svd",
+    )
 
     assert svd_report["solverPolicy"] == "homogeneous-svd"
     assert gram_report["solverPolicy"] == "homogeneous-gram-eigh"
+    assert qr_report["solverPolicy"] == "homogeneous-qr-svd"
     assert [value.track_uid for value in gram] == [value.track_uid for value in svd]
     assert np.allclose(
         np.asarray([value.xyz for value in gram]),
         np.asarray([value.xyz for value in svd]),
         rtol=1e-8,
         atol=1e-8,
+    )
+    assert np.allclose(
+        np.asarray([value.xyz for value in qr]),
+        np.asarray([value.xyz for value in svd]),
+        rtol=1e-10,
+        atol=1e-10,
     )

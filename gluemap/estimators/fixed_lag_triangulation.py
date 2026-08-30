@@ -51,6 +51,7 @@ def triangulate_selected_tracks(
     if solver_policy not in {
         "homogeneous-svd",
         "homogeneous-gram-eigh",
+        "homogeneous-qr-svd",
     }:
         raise FixedLagTriangulationError("triangulation solver policy is invalid")
     if device_policy == "cuda-required" and not torch.cuda.is_available():
@@ -147,10 +148,14 @@ def triangulate_selected_tracks(
         if solver_policy == "homogeneous-svd":
             _, _, right = torch.linalg.svd(design, full_matrices=False)
             homogeneous = right[:, -1, :]
-        else:
+        elif solver_policy == "homogeneous-gram-eigh":
             gram = design.transpose(1, 2) @ design
             _, eigenvectors = torch.linalg.eigh(gram)
             homogeneous = eigenvectors[:, :, 0]
+        else:
+            reduced = torch.linalg.qr(design, mode="reduced").R
+            _, _, right = torch.linalg.svd(reduced, full_matrices=False)
+            homogeneous = right[:, -1, :]
         valid_w = homogeneous[:, 3].abs() > 1e-12
         denominator = torch.where(
             valid_w[:, None],
