@@ -291,6 +291,9 @@ def test_native_rebuild_matches_reconstruction_rebuild() -> None:
     assert native.refined.report["persistentProblem"][
         "createdPointCount"
     ] == 64
+    assert native.refined.report["persistentProblem"][
+        "visualResidualBindingMode"
+    ] == "native-image-major-implicit-parameters"
     np.testing.assert_allclose(
         native.finalized_rotation,
         rebuilt.finalized_rotation,

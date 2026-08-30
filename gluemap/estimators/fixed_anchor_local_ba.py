@@ -262,6 +262,7 @@ def refine_fixed_anchor_window(
             persistent_ba_session.problem = PersistentFixedLagBaProblem(
                 camera_model_id=camera.model,
                 camera_params=camera.params,
+                policy=persistent_ba_session.policy,
             )
         persistent_problem = persistent_ba_session.problem
         persistent_sync_report = persistent_problem.synchronize(

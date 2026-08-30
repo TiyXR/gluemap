@@ -114,17 +114,27 @@ class PersistentFixedLagBaProblem:
     without per-row Python calls.
     """
 
-    def __init__(self, *, camera_model_id: int, camera_params: Any) -> None:
+    def __init__(
+        self,
+        *,
+        camera_model_id: int,
+        camera_params: Any,
+        policy: str = "persistent-delta",
+    ) -> None:
         params = np.asarray(camera_params, dtype=np.float64).copy()
         if params.ndim != 1 or not np.isfinite(params).all():
             raise PersistentFixedLagBaError(
                 "persistent BA camera parameters are invalid"
             )
         self.problem = pyceres.Problem()
+        if policy not in {"persistent-delta", "native-rebuild-every-window"}:
+            raise PersistentFixedLagBaError("persistent BA policy is invalid")
+        self.policy = policy
         self.camera_model_id = int(camera_model_id)
         self.camera_params = params
-        self.problem.add_parameter_block(self.camera_params, len(params))
-        self.problem.set_parameter_block_constant(self.camera_params)
+        if policy == "persistent-delta":
+            self.problem.add_parameter_block(self.camera_params, len(params))
+            self.problem.set_parameter_block_constant(self.camera_params)
         self.loss_function = _pyceres_loss_function("huber")
         self.poses: dict[int, _PoseBlock] = {}
         self.points: dict[str, _PointBlock] = {}
@@ -252,16 +262,18 @@ class PersistentFixedLagBaProblem:
             pose = self.poses.get(frame_id)
             if pose is None:
                 manifold = pygluemap.CreatePoseManifold()
-                self.problem.add_parameter_block(values, 7, manifold)
+                if self.policy == "persistent-delta":
+                    self.problem.add_parameter_block(values, 7, manifold)
                 pose = _PoseBlock(values=values, manifold=manifold)
                 self.poses[frame_id] = pose
                 created_poses += 1
             else:
                 pose.values[:] = values
-            if frame_id in fixed_pose_ids:
-                self.problem.set_parameter_block_constant(pose.values)
-            else:
-                self.problem.set_parameter_block_variable(pose.values)
+            if self.policy == "persistent-delta":
+                if frame_id in fixed_pose_ids:
+                    self.problem.set_parameter_block_constant(pose.values)
+                else:
+                    self.problem.set_parameter_block_variable(pose.values)
 
         created_points = 0
         reused_points = 0
@@ -279,7 +291,8 @@ class PersistentFixedLagBaProblem:
                     observations={},
                 )
                 self._next_point_id += 1
-                self.problem.add_parameter_block(point.values, 3)
+                if self.policy == "persistent-delta":
+                    self.problem.add_parameter_block(point.values, 3)
                 self.points[track_uid] = point
                 created_points += 1
             else:
@@ -309,6 +322,22 @@ class PersistentFixedLagBaProblem:
             else:
                 reused_observations += 1
 
+        if self.policy == "native-rebuild-every-window":
+            frame_order = {
+                int(frame_id): ordinal
+                for ordinal, frame_id in enumerate(frame_ids)
+            }
+            track_order = {
+                str(track_uid): ordinal
+                for ordinal, track_uid in enumerate(track_by_uid)
+            }
+            entering_observations.sort(
+                key=lambda value: (
+                    frame_order[int(value[2].geometry_ordinal)],
+                    track_order[value[0]],
+                )
+            )
+
         point_addresses = np.fromiter(
             (
                 self.points[track_uid].values.ctypes.data
@@ -333,15 +362,28 @@ class PersistentFixedLagBaProblem:
             dtype=np.float64,
         )
         if entering_observations:
-            native_batch = pygluemap.add_reprojection_residual_batch(
-                self.problem,
-                self.camera_model_id,
-                point_addresses,
-                pose_addresses,
-                int(self.camera_params.ctypes.data),
-                observation_xy,
-                self.loss_function,
-            )
+            if self.policy == "native-rebuild-every-window":
+                native_batch = (
+                    pygluemap.add_reprojection_residual_batch_implicit_parameters(
+                        self.problem,
+                        self.camera_model_id,
+                        point_addresses,
+                        pose_addresses,
+                        int(self.camera_params.ctypes.data),
+                        observation_xy,
+                        self.loss_function,
+                    )
+                )
+            else:
+                native_batch = pygluemap.add_reprojection_residual_batch(
+                    self.problem,
+                    self.camera_model_id,
+                    point_addresses,
+                    pose_addresses,
+                    int(self.camera_params.ctypes.data),
+                    observation_xy,
+                    self.loss_function,
+                )
             if native_batch.size != len(entering_observations):
                 raise PersistentFixedLagBaError(
                     "persistent BA native visual batch size differs"
@@ -359,14 +401,35 @@ class PersistentFixedLagBaProblem:
                         native_batch_index=batch_index,
                     )
                 )
+        if self.policy == "native-rebuild-every-window":
+            if not self.problem.has_parameter_block(self.camera_params):
+                raise PersistentFixedLagBaError(
+                    "native rebuild camera parameter is absent"
+                )
+            self.problem.set_parameter_block_constant(self.camera_params)
+            for frame_id in frame_ids:
+                pose = self.poses[frame_id]
+                if not self.problem.has_parameter_block(pose.values):
+                    raise PersistentFixedLagBaError(
+                        "native rebuild pose parameter is absent"
+                    )
+                self.problem.set_manifold(pose.values, pose.manifold)
+                if frame_id in fixed_pose_ids:
+                    self.problem.set_parameter_block_constant(pose.values)
+                else:
+                    self.problem.set_parameter_block_variable(pose.values)
         native_batch_wall_seconds = time.perf_counter() - native_batch_started
         self._ordered_frame_ids = tuple(int(value) for value in frame_ids)
         self._ordered_track_uids = tuple(track_by_uid)
 
         return {
             "status": "passed",
-            "mode": "persistent-delta",
-            "visualResidualBindingMode": "native-enter-leave-delta",
+            "mode": self.policy,
+            "visualResidualBindingMode": (
+                "native-image-major-implicit-parameters"
+                if self.policy == "native-rebuild-every-window"
+                else "native-enter-leave-delta"
+            ),
             "createdPoseCount": created_poses,
             "removedPoseCount": removed_poses,
             "createdPointCount": created_points,

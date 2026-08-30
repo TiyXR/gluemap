@@ -300,6 +300,57 @@ std::unique_ptr<ReprojectionResidualBatch> AddReprojectionResidualBatch(
                                                       std::move(residuals));
 }
 
+std::unique_ptr<ReprojectionResidualBatch>
+AddReprojectionResidualBatchImplicitParameters(
+    ceres::Problem *problem, int camera_model_id,
+    py::array_t<uint64_t, py::array::c_style> point_addresses,
+    py::array_t<uint64_t, py::array::c_style> pose_addresses,
+    uint64_t camera_address,
+    py::array_t<double, py::array::c_style> observation_xy,
+    ceres::LossFunction *loss_function) {
+  if (problem == nullptr || camera_address == 0) {
+    throw std::invalid_argument("implicit reprojection batch problem is invalid");
+  }
+  const py::buffer_info points = point_addresses.request();
+  const py::buffer_info poses = pose_addresses.request();
+  const py::buffer_info xy = observation_xy.request();
+  if (points.ndim != 1 || poses.ndim != 1 || xy.ndim != 2 ||
+      xy.shape[1] != 2 || points.shape[0] != poses.shape[0] ||
+      points.shape[0] != xy.shape[0] || points.shape[0] < 1) {
+    throw std::invalid_argument(
+        "implicit reprojection batch dimensions differ");
+  }
+  auto *point_values = static_cast<const uint64_t *>(points.ptr);
+  auto *pose_values = static_cast<const uint64_t *>(poses.ptr);
+  auto *measurements = static_cast<const double *>(xy.ptr);
+  auto *camera = reinterpret_cast<double *>(
+      static_cast<uintptr_t>(camera_address));
+
+  std::vector<ceres::ResidualBlockId> residuals;
+  residuals.reserve(static_cast<size_t>(points.shape[0]));
+  {
+    py::gil_scoped_release release;
+    for (py::ssize_t index = 0; index < points.shape[0]; ++index) {
+      auto *point = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(point_values[index]));
+      auto *pose = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(pose_values[index]));
+      const Eigen::Vector2d point2d(measurements[index * 2],
+                                    measurements[index * 2 + 1]);
+      ceres::CostFunction *cost =
+          colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor>(
+              static_cast<colmap::CameraModelId>(camera_model_id), point2d);
+      // Match COLMAP DefaultBundleAdjuster::AddImageWithTrivialFrame: the
+      // first residual implicitly creates parameter blocks in point, pose,
+      // camera order. Manifolds and constants are assigned after all images.
+      residuals.push_back(problem->AddResidualBlock(
+          cost, loss_function, point, pose, camera));
+    }
+  }
+  return std::make_unique<ReprojectionResidualBatch>(problem,
+                                                      std::move(residuals));
+}
+
 py::dict EvaluateConnectedCRS(
     ceres::Problem *problem,
     const std::vector<uintptr_t> &ordered_parameter_addresses,
@@ -447,6 +498,15 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("point_addresses"), py::arg("pose_addresses"),
         py::arg("camera_address"), py::arg("use_cuda"),
         "Solve with explicit point-first BA elimination groups.");
+
+  m.def("add_reprojection_residual_batch_implicit_parameters",
+        &AddReprojectionResidualBatchImplicitParameters,
+        py::arg("problem"), py::arg("camera_model_id"),
+        py::arg("point_addresses"), py::arg("pose_addresses"),
+        py::arg("camera_address"), py::arg("observation_xy"),
+        py::arg("loss_function"),
+        "Add image-major reprojection residuals while letting Ceres create "
+        "parameter blocks in COLMAP order.");
 
   m.def("is_cuda_available", &IsCUDAAvailable,
         "Returns True if the module was compiled with CUDA support.");
