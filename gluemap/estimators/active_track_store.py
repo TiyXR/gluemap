@@ -44,8 +44,10 @@ class TrackBudget:
     selection_time_bin_seconds: float
     maximum_tracks_per_grid_cell: int
     intra_image_merge_radius_pixels: float
+    minimum_visibility: float
+    minimum_confidence: float
     minimum_parallax_diagonals: float
-    maximum_match_error_pixels: float
+    maximum_matching_uncertainty: float
 
     @property
     def maximum_active_tracks(self) -> int:
@@ -75,7 +77,7 @@ class TrackObservation:
 class TrackCorrespondence:
     first_observation_uid: str
     second_observation_uid: str
-    match_error_pixels: float
+    matching_uncertainty: float
 
 
 class ActiveTrackStore:
@@ -138,8 +140,12 @@ class ActiveTrackStore:
             or self.budget.intra_image_merge_radius_pixels <= 0
             or not isfinite(self.budget.minimum_parallax_diagonals)
             or self.budget.minimum_parallax_diagonals < 0
-            or not isfinite(self.budget.maximum_match_error_pixels)
-            or self.budget.maximum_match_error_pixels <= 0
+            or not isfinite(self.budget.minimum_visibility)
+            or not 0 <= self.budget.minimum_visibility <= 1
+            or not isfinite(self.budget.minimum_confidence)
+            or not 0 <= self.budget.minimum_confidence <= 1
+            or not isfinite(self.budget.maximum_matching_uncertainty)
+            or not 0 <= self.budget.maximum_matching_uncertainty <= 1
         ):
             raise ActiveTrackStoreError("track metric thresholds are invalid")
         if (
@@ -256,15 +262,15 @@ class ActiveTrackStore:
                 first == second
                 or first not in self._observations
                 or second not in self._observations
-                or not isfinite(value.match_error_pixels)
-                or value.match_error_pixels < 0
+                or not isfinite(value.matching_uncertainty)
+                or not 0 <= value.matching_uncertainty <= 1
             ):
                 raise ActiveTrackStoreError("track correspondence is invalid")
             key = tuple(sorted((first, second)))
             existing = self._edges.get(key)
             if existing is not None:
                 if existing != value and existing != TrackCorrespondence(
-                    second, first, value.match_error_pixels
+                    second, first, value.matching_uncertainty
                 ):
                     raise ActiveTrackStoreError("correspondence identity was reused")
                 continue
@@ -366,11 +372,11 @@ class ActiveTrackStore:
             if parallax < self.budget.minimum_parallax_diagonals:
                 reasons.append("insufficient-parallax")
             edges = component_edges.get(track_uid, [])
-            maximum_error = max(
-                (value.match_error_pixels for value in edges), default=0.0
+            maximum_uncertainty = max(
+                (value.matching_uncertainty for value in edges), default=0.0
             )
-            if maximum_error > self.budget.maximum_match_error_pixels:
-                reasons.append("match-error")
+            if maximum_uncertainty > self.budget.maximum_matching_uncertainty:
+                reasons.append("matching-uncertainty")
             if reasons:
                 rejected.update(reasons)
                 continue
@@ -392,7 +398,7 @@ class ActiveTrackStore:
                     "viewCount": len(frame_ordinals),
                     "bridge": bridge,
                     "parallaxDiagonals": parallax,
-                    "maximumMatchErrorPixels": maximum_error,
+                    "maximumMatchingUncertainty": maximum_uncertainty,
                     "meanScore": sum(value.score for value in observations)
                     / len(observations),
                     "bucket": bucket,
@@ -407,7 +413,7 @@ class ActiveTrackStore:
             -value["viewCount"],
             -value["parallaxDiagonals"],
             -value["meanScore"],
-            value["maximumMatchErrorPixels"],
+            value["maximumMatchingUncertainty"],
             value["trackUid"],
         )
         remaining.sort(key=quality)
