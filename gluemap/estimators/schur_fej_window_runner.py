@@ -82,7 +82,7 @@ class SchurFejWindowRunner:
             predictions,
             frame_ids,
             selected_tracks,
-            advance_step_keyframes=1,
+            solve_every_advances=1,
         )
         solved = batch.solved
         finalized_frame_id = solved.finalized_frame_ids[0]
@@ -113,7 +113,7 @@ class SchurFejWindowRunner:
         frame_ids: list[int],
         selected_tracks: list[SelectedTrackState],
         *,
-        advance_step_keyframes: int,
+        solve_every_advances: int,
     ) -> SchurFejWindowBatch:
         """Advance a bounded keyframe batch with one coarse and BA solve."""
         started = time.perf_counter()
@@ -121,8 +121,8 @@ class SchurFejWindowRunner:
             len(frame_ids) < 3
             or frame_ids != sorted(set(frame_ids))
             or self.fixed_gauge_frame_id not in frame_ids
-            or isinstance(advance_step_keyframes, bool)
-            or not 1 <= advance_step_keyframes <= 8
+            or isinstance(solve_every_advances, bool)
+            or not 1 <= solve_every_advances <= 8
         ):
             raise SchurFejWindowRunnerError(
                 "Schur/FEJ frame ordering or gauge is invalid"
@@ -157,11 +157,11 @@ class SchurFejWindowRunner:
             for value in frame_ids
             if value != self.fixed_gauge_frame_id
         )
-        if advance_step_keyframes >= len(body_frame_ids):
+        if solve_every_advances >= len(body_frame_ids):
             raise SchurFejWindowRunnerError(
                 "Schur/FEJ advance would remove every body pose"
             )
-        marginalize_frame_ids = body_frame_ids[:advance_step_keyframes]
+        marginalize_frame_ids = body_frame_ids[:solve_every_advances]
 
         coarse_started = time.perf_counter()
         coarse = self.coarse_solver.solve(
@@ -203,7 +203,9 @@ class SchurFejWindowRunner:
             "contractId": "jarailsense.gluemap-schur-fej-window-step/v1",
             "firstFrameId": frame_ids[0],
             "lastFrameId": frame_ids[-1],
-            "advanceStepKeyframes": advance_step_keyframes,
+            "advanceStepKeyframes": 1,
+            "baSolveEveryAdvances": solve_every_advances,
+            "logicalAdvanceCount": solve_every_advances,
             "marginalizedFrameIds": list(marginalize_frame_ids),
             "fixedGaugeFrameId": self.fixed_gauge_frame_id,
             "coarseFixedWarmStartCount": len(overlap),

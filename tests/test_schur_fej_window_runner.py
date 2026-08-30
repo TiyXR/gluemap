@@ -152,13 +152,13 @@ def test_batched_window_drops_the_previous_finalized_batch():
         {},
         first_ids,
         _tracks(first_ids, centers, intrinsics),
-        advance_step_keyframes=3,
+        solve_every_advances=3,
     )
     second = runner.advance_batch(
         {},
         second_ids,
         _tracks(second_ids, centers, intrinsics),
-        advance_step_keyframes=3,
+        solve_every_advances=3,
     )
 
     assert first.solved.finalized_frame_ids == (1, 2, 3)
@@ -169,7 +169,9 @@ def test_batched_window_drops_the_previous_finalized_batch():
         (tuple(first_ids), set()),
         (tuple(second_ids), {0, 4, 5, 6, 7, 8}),
     ]
-    assert second.report["advanceStepKeyframes"] == 3
+    assert second.report["advanceStepKeyframes"] == 1
+    assert second.report["baSolveEveryAdvances"] == 3
+    assert second.report["logicalAdvanceCount"] == 3
     assert second.report["marginalizedFrameIds"] == [4, 5, 6]
     assert second.report["coarseFixedWarmStartCount"] == 6
     assert second.report["actualBaCameraFrameUids"] == [

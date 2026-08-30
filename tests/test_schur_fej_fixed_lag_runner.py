@@ -196,7 +196,9 @@ def test_three_pose_batches_use_one_ba_and_resume_exactly():
     assert set(first.finalized_rotations) == {1, 2, 3}
     assert set(first.finalized_centers) == {1, 2, 3}
     assert first.prior.camera_ids == (4, 5, 6, 7, 8)
-    assert first.report["advanceStepKeyframes"] == 3
+    assert first.report["advanceStepKeyframes"] == 1
+    assert first.report["baSolveEveryAdvances"] == 3
+    assert first.report["logicalAdvanceCount"] == 3
     assert first.report["marginalizedFrameIds"] == [1, 2, 3]
     assert first.report["prior"]["terminalSolveMode"] == (
         "prior-only-batch-schur"

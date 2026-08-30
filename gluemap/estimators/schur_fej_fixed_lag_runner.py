@@ -398,7 +398,9 @@ class SchurFejFixedLagRunner:
             "publishable": False,
             "marginalizationMode": "schur-fej",
             "windowOrdinal": self._next_window_ordinal,
-            "advanceStepKeyframes": len(marginalize_ids),
+            "advanceStepKeyframes": 1,
+            "baSolveEveryAdvances": len(marginalize_ids),
+            "logicalAdvanceCount": len(marginalize_ids),
             "frameCount": len(frame_ids),
             "fixedGaugeFrameIds": sorted(self.fixed_gauge_frame_ids),
             "previousPriorCameraCount": (
