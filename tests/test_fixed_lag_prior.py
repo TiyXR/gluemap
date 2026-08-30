@@ -7,6 +7,7 @@ from gluemap.estimators.fixed_lag_prior import (
     FejPriorState,
     FixedLagPriorError,
     marginalize_pose_prior,
+    marginalize_pose_prior_batch,
     marginalize_linearized_tracks,
     marginalize_ceres_linearization,
 )
@@ -118,6 +119,94 @@ def test_pose_only_prior_schur_eliminates_one_tail_pose_on_cuda():
         rtol=1e-9,
         atol=1e-9,
     )
+
+
+def _pose_only_batch_fixture(camera_count=5):
+    generator = torch.Generator().manual_seed(20260831)
+    dimension = camera_count * 6
+    basis = torch.randn(
+        dimension - 1,
+        dimension,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    _, _, right = torch.linalg.svd(basis, full_matrices=True)
+    factor = right[: dimension - 1]
+    hessian = factor.T @ factor
+    delta = torch.randn(dimension, generator=generator, dtype=torch.float64)
+    gradient = hessian @ delta
+    linearization = torch.zeros((camera_count, 7), dtype=torch.float64)
+    linearization[:, 3] = 1.0
+    return FejPriorState(
+        camera_ids=tuple(range(10, 10 + camera_count)),
+        linearization_points=linearization,
+        hessian=hessian,
+        gradient=gradient,
+        factor=factor,
+        factor_residual=factor @ delta,
+        report={},
+    )
+
+
+def test_pose_only_batch_schur_matches_sequential_elimination_on_cpu():
+    prior = _pose_only_batch_fixture()
+    sequential = marginalize_pose_prior(
+        prior,
+        eliminate_camera_id=10,
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        expected_nullity=1,
+    )
+    sequential = marginalize_pose_prior(
+        sequential,
+        eliminate_camera_id=11,
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        expected_nullity=1,
+    )
+
+    batched = marginalize_pose_prior_batch(
+        prior,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        expected_nullity=1,
+    )
+
+    assert batched.camera_ids == (12, 13, 14)
+    assert batched.report["terminalSolveMode"] == "prior-only-batch-schur"
+    assert batched.report["eliminatedCameraIds"] == [10, 11]
+    assert batched.report["eliminatedCameraCount"] == 2
+    torch.testing.assert_close(
+        batched.hessian, sequential.hessian, rtol=1e-9, atol=1e-9
+    )
+    torch.testing.assert_close(
+        batched.gradient, sequential.gradient, rtol=1e-9, atol=1e-9
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_pose_only_batch_schur_matches_cpu_on_cuda():
+    prior = _pose_only_batch_fixture()
+    cpu = marginalize_pose_prior_batch(
+        prior,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        expected_nullity=1,
+    )
+    cuda = marginalize_pose_prior_batch(
+        prior,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cuda-required",
+        relative_rank_threshold=1e-12,
+        expected_nullity=1,
+    ).cpu()
+
+    assert cuda.report["gpuUsed"] is True
+    assert cuda.report["backend"] == "cuda"
+    torch.testing.assert_close(cuda.hessian, cpu.hessian, rtol=1e-9, atol=1e-9)
+    torch.testing.assert_close(cuda.gradient, cpu.gradient, rtol=1e-9, atol=1e-9)
 
 
 def _dense_reference(values):

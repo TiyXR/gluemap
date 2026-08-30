@@ -328,12 +328,43 @@ def marginalize_pose_prior(
     the small dense normal form on the resolved torch device and performs one
     six-dimensional Schur complement without triangulation or Ceres BA.
     """
+    return marginalize_pose_prior_batch(
+        prior,
+        eliminate_camera_ids=(eliminate_camera_id,),
+        device_policy=device_policy,
+        relative_rank_threshold=relative_rank_threshold,
+        maximum_condition_estimate=maximum_condition_estimate,
+        expected_nullity=expected_nullity,
+    )
+
+
+def marginalize_pose_prior_batch(
+    prior: FejPriorState,
+    *,
+    eliminate_camera_ids: tuple[int, ...] | list[int],
+    device_policy: str = "cuda-preferred",
+    relative_rank_threshold: float = 1e-10,
+    maximum_condition_estimate: float | None = None,
+    expected_nullity: int | None = None,
+) -> FejPriorState:
+    """Schur-eliminate multiple retained poses with one dense solve.
+
+    A forward-only scheduler may ingest every keyframe while delaying the
+    expensive nonlinear BA for a small bounded number of advances.  Once BA
+    runs, all pending oldest poses share one FEJ linearization and can be
+    removed as one block instead of repeating eigendecomposition and Schur
+    factorization for every pose.
+    """
     started = time.perf_counter()
     camera_ids = tuple(int(value) for value in prior.camera_ids)
+    eliminated_ids = tuple(int(value) for value in eliminate_camera_ids)
     if (
         len(camera_ids) < 2
         or len(set(camera_ids)) != len(camera_ids)
-        or eliminate_camera_id not in camera_ids
+        or not eliminated_ids
+        or len(set(eliminated_ids)) != len(eliminated_ids)
+        or any(value not in camera_ids for value in eliminated_ids)
+        or len(eliminated_ids) >= len(camera_ids)
         or not 0 < relative_rank_threshold < 1
     ):
         raise FixedLagPriorError("pose-only prior marginalization identity is invalid")
@@ -358,16 +389,20 @@ def marginalize_pose_prior(
         raise FixedLagPriorError("pose-only prior marginalization shape is invalid")
 
     hessian = (hessian + hessian.T) * 0.5
-    eliminate_index = camera_ids.index(eliminate_camera_id)
-    eliminate_columns = torch.arange(
-        eliminate_index * 6,
-        (eliminate_index + 1) * 6,
-        device=device,
+    eliminate_indexes = tuple(camera_ids.index(value) for value in eliminated_ids)
+    retained_indexes = tuple(
+        index for index in range(camera_count) if index not in eliminate_indexes
+    )
+    eliminate_columns = torch.cat(
+        tuple(
+            torch.arange(index * 6, (index + 1) * 6, device=device)
+            for index in eliminate_indexes
+        )
     )
     retained_columns = torch.cat(
-        (
-            torch.arange(0, eliminate_index * 6, device=device),
-            torch.arange((eliminate_index + 1) * 6, dimension, device=device),
+        tuple(
+            torch.arange(index * 6, (index + 1) * 6, device=device)
+            for index in retained_indexes
         )
     )
     h_mm = hessian[eliminate_columns[:, None], eliminate_columns]
@@ -417,25 +452,27 @@ def marginalize_pose_prior(
         torch.cuda.synchronize(device)
     wall = time.perf_counter() - started
     retained_camera_ids = tuple(
-        value for value in camera_ids if value != eliminate_camera_id
+        camera_ids[index] for index in retained_indexes
     )
-    retained_points = torch.cat(
-        (
-            linearization[:eliminate_index],
-            linearization[eliminate_index + 1 :],
-        ),
-        dim=0,
+    retained_points = linearization[
+        torch.as_tensor(retained_indexes, dtype=torch.int64, device=device)
+    ].contiguous()
+    single_pose = len(eliminated_ids) == 1
+    terminal_solve_mode = (
+        "prior-only-schur" if single_pose else "prior-only-batch-schur"
     )
     report = {
         "contractId": "jarailsense.gluemap-schur-fej-prior/v1",
         "status": status,
         "sourceLinearizationContractId": "pose-only-fej-prior",
-        "terminalSolveMode": "prior-only-schur",
+        "terminalSolveMode": terminal_solve_mode,
         "backend": device.type,
         "gpuUsed": device.type == "cuda",
         "cameraCountBefore": camera_count,
-        "cameraCountAfter": camera_count - 1,
-        "eliminatedCameraId": eliminate_camera_id,
+        "cameraCountAfter": len(retained_camera_ids),
+        "eliminatedCameraId": eliminated_ids[0] if single_pose else None,
+        "eliminatedCameraIds": list(eliminated_ids),
+        "eliminatedCameraCount": len(eliminated_ids),
         "pointCount": 0,
         "pointWithoutVariableCameraCount": 0,
         "residualCount": int(prior.factor.shape[0]),
