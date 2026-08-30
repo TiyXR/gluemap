@@ -95,6 +95,7 @@ def refine_fixed_anchor_window(
     max_num_iterations: int = 50,
     refinement_passes: int = 1,
     linear_solver_policy: str = "auto",
+    linear_solver_ordering_policy: str = "auto",
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
     previous_prior: FejPriorState | None = None,
@@ -351,6 +352,9 @@ def refine_fixed_anchor_window(
                 summary, persistent_solve_report = persistent_problem.solve(
                     max_num_iterations=max_num_iterations,
                     linear_solver_policy=linear_solver_policy,
+                    linear_solver_ordering_policy=(
+                        linear_solver_ordering_policy
+                    ),
                     device_policy=device_policy,
                     ceres_cuda_available=ceres_cuda_available,
                 )
@@ -471,6 +475,7 @@ def refine_fixed_anchor_window(
         "ceresThreadsGiven": int(ceres.num_threads_given),
         "ceresThreadsUsed": int(ceres.num_threads_used),
         "linearSolverPolicy": linear_solver_policy,
+        "linearSolverOrderingPolicy": linear_solver_ordering_policy,
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,
         "baProblemPolicy": (

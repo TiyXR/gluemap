@@ -419,6 +419,7 @@ class PersistentFixedLagBaProblem:
         *,
         max_num_iterations: int,
         linear_solver_policy: str,
+        linear_solver_ordering_policy: str,
         device_policy: str,
         ceres_cuda_available: bool | None,
     ) -> tuple[pyceres.SolverSummary, dict[str, Any]]:
@@ -432,37 +433,47 @@ class PersistentFixedLagBaProblem:
             ceres_cuda_available=ceres_cuda_available,
         )
         summary = pyceres.SolverSummary()
-        point_addresses = np.fromiter(
-            (
-                self.points[value].values.ctypes.data
-                for value in self._ordered_track_uids
-            ),
-            dtype=np.uint64,
-            count=len(self._ordered_track_uids),
-        )
-        pose_addresses = np.fromiter(
-            (
-                self.poses[value].values.ctypes.data
-                for value in self._ordered_frame_ids
-            ),
-            dtype=np.uint64,
-            count=len(self._ordered_frame_ids),
-        )
-        pygluemap.solve_with_ba_ordering(
-            options,
-            self.problem,
-            summary,
-            point_addresses,
-            pose_addresses,
-            int(self.camera_params.ctypes.data),
-            use_gpu,
-        )
+        if linear_solver_ordering_policy == "auto":
+            if use_gpu:
+                pygluemap.solve_cuda(options, self.problem, summary)
+            else:
+                pyceres.solve(options, self.problem, summary)
+        elif linear_solver_ordering_policy == "point-first":
+            point_addresses = np.fromiter(
+                (
+                    self.points[value].values.ctypes.data
+                    for value in self._ordered_track_uids
+                ),
+                dtype=np.uint64,
+                count=len(self._ordered_track_uids),
+            )
+            pose_addresses = np.fromiter(
+                (
+                    self.poses[value].values.ctypes.data
+                    for value in self._ordered_frame_ids
+                ),
+                dtype=np.uint64,
+                count=len(self._ordered_frame_ids),
+            )
+            pygluemap.solve_with_ba_ordering(
+                options,
+                self.problem,
+                summary,
+                point_addresses,
+                pose_addresses,
+                int(self.camera_params.ctypes.data),
+                use_gpu,
+            )
+        else:
+            raise PersistentFixedLagBaError(
+                "persistent BA ordering policy is invalid"
+            )
         _validate_resolved_ba_backend(summary, use_gpu)
         return summary, {
             "status": "passed",
             "requestedThreadCount": requested_threads,
             "gpuRequested": use_gpu,
-            "linearSolverOrdering": "points-group-0-poses-group-1",
+            "linearSolverOrdering": linear_solver_ordering_policy,
             "orderedPointCount": len(self._ordered_track_uids),
             "orderedPoseCount": len(self._ordered_frame_ids),
             "wallSeconds": time.perf_counter() - started,

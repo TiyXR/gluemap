@@ -88,6 +88,7 @@ class SchurFejFixedLagRunner:
         triangulation_microbatch_tracks: int = 4096,
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
+        ba_linear_solver_ordering_policy: str = "auto",
         ba_max_iterations: int = 100,
         ba_refinement_passes: int = 1,
         ceres_cuda_available: bool | None = None,
@@ -112,12 +113,19 @@ class SchurFejFixedLagRunner:
             "persistent-delta",
         }:
             raise SchurFejFixedLagRunnerError("BA problem policy is invalid")
+        if ba_linear_solver_ordering_policy not in {"auto", "point-first"}:
+            raise SchurFejFixedLagRunnerError(
+                "BA linear solver ordering policy is invalid"
+            )
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
         self.triangulation_microbatch_tracks = triangulation_microbatch_tracks
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
+        self.ba_linear_solver_ordering_policy = (
+            ba_linear_solver_ordering_policy
+        )
         self.ba_max_iterations = ba_max_iterations
         self.ba_refinement_passes = ba_refinement_passes
         self.ceres_cuda_available = ceres_cuda_available
@@ -257,6 +265,9 @@ class SchurFejFixedLagRunner:
             max_num_iterations=self.ba_max_iterations,
             refinement_passes=self.ba_refinement_passes,
             linear_solver_policy=self.ba_linear_solver_policy,
+            linear_solver_ordering_policy=(
+                self.ba_linear_solver_ordering_policy
+            ),
             device_policy=self.ba_device_policy,
             ceres_cuda_available=self.ceres_cuda_available,
             previous_prior=self._prior,
