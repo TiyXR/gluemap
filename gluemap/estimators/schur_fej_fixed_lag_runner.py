@@ -105,6 +105,22 @@ class SchurFejFixedLagRunner:
     def next_window_ordinal(self) -> int:
         return self._next_window_ordinal
 
+    @property
+    def current_frame_ids(self) -> tuple[int, ...]:
+        if self._poses is None:
+            return ()
+        return tuple(sorted(self._poses.rotations))
+
+    def current_pose_copies(
+        self,
+    ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
+        if self._poses is None:
+            return {}, {}
+        return (
+            {key: value.copy() for key, value in self._poses.rotations.items()},
+            {key: value.copy() for key, value in self._poses.centers.items()},
+        )
+
     def advance(
         self,
         coarse: FixedAnchorWindowSolution,
