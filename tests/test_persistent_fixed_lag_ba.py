@@ -135,3 +135,49 @@ def test_persistent_problem_applies_native_visual_enter_leave_delta() -> None:
     assert unchanged["removedObservationCount"] == 0
     assert unchanged["reusedObservationCount"] == 160
     assert unchanged["problemResidualCount"] == 320
+
+
+def test_native_rebuild_skips_discarded_observation_bookkeeping() -> None:
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(5)
+    }
+    rotations = {frame: np.eye(3) for frame in centers}
+    camera = camera_from_intrinsics_matrix(
+        intrinsics,
+        camera_model="PINHOLE",
+        width=640,
+        height=480,
+        camera_id=1,
+    )
+    problem = PersistentFixedLagBaProblem(
+        camera_model_id=camera.model,
+        camera_params=camera.params,
+        policy="native-rebuild-every-window",
+    )
+
+    report = problem.synchronize(
+        frame_ids=tuple(centers),
+        rotations=rotations,
+        centers=centers,
+        fixed_pose_ids={0},
+        tracks=_tracks(tuple(centers), centers, intrinsics),
+        camera_model_id=camera.model,
+        camera_params=camera.params,
+    )
+    summary, _ = problem.solve(
+        max_num_iterations=20,
+        linear_solver_policy="auto",
+        linear_solver_ordering_policy="point-first",
+        device_policy="cpu",
+        ceres_cuda_available=False,
+    )
+
+    assert report["createdObservationCount"] == 160
+    assert report["residentObservationCount"] == 160
+    assert report["phaseWallSeconds"]["observationBookkeeping"] >= 0.0
+    assert all(not point.observations for point in problem.points.values())
+    assert len(problem._native_batches) == 1
+    assert summary.final_cost <= summary.initial_cost

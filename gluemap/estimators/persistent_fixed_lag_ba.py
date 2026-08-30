@@ -139,6 +139,7 @@ class PersistentFixedLagBaProblem:
         self._next_point_id = 1
         self._prior_residual_block: object | None = None
         self._prior_cost: object | None = None
+        self._native_batches: list[object] = []
         self._ordered_frame_ids: tuple[int, ...] = ()
         self._ordered_track_uids: tuple[str, ...] = ()
 
@@ -211,21 +212,32 @@ class PersistentFixedLagBaProblem:
             raise PersistentFixedLagBaError(
                 "persistent BA track identity is invalid"
             )
+        native_rebuild = self.policy == "native-rebuild-every-window"
+        if native_rebuild and (
+            self.poses
+            or self.points
+            or self.problem.num_parameter_blocks()
+            or self.problem.num_residual_blocks()
+        ):
+            raise PersistentFixedLagBaError(
+                "native rebuild BA problem must start empty"
+            )
         phase_wall_seconds["identityValidation"] = time.perf_counter() - started
         phase_started = time.perf_counter()
         target_observations: dict[tuple[str, str], Any] = {}
-        for track_uid, track in track_by_uid.items():
-            for observation in track.observations:
-                observation_uid = str(observation.observation_uid)
-                key = (track_uid, observation_uid)
-                if (
-                    key in target_observations
-                    or int(observation.geometry_ordinal) not in target_frames
-                ):
-                    raise PersistentFixedLagBaError(
-                        "persistent BA observation identity is invalid"
-                    )
-                target_observations[key] = observation
+        if not native_rebuild:
+            for track_uid, track in track_by_uid.items():
+                for observation in track.observations:
+                    observation_uid = str(observation.observation_uid)
+                    key = (track_uid, observation_uid)
+                    if (
+                        key in target_observations
+                        or int(observation.geometry_ordinal) not in target_frames
+                    ):
+                        raise PersistentFixedLagBaError(
+                            "persistent BA observation identity is invalid"
+                        )
+                    target_observations[key] = observation
         phase_wall_seconds["targetObservationBuild"] = (
             time.perf_counter() - phase_started
         )
@@ -233,13 +245,14 @@ class PersistentFixedLagBaProblem:
         phase_started = time.perf_counter()
         removed_observations = 0
         native_removals: list[_ObservationBlock] = []
-        for track_uid, point in list(self.points.items()):
-            for observation_uid in list(point.observations):
-                if (track_uid, observation_uid) not in target_observations:
-                    native_removals.append(
-                        self._remove_observation(track_uid, observation_uid)
-                    )
-                    removed_observations += 1
+        if not native_rebuild:
+            for track_uid, point in list(self.points.items()):
+                for observation_uid in list(point.observations):
+                    if (track_uid, observation_uid) not in target_observations:
+                        native_removals.append(
+                            self._remove_observation(track_uid, observation_uid)
+                        )
+                        removed_observations += 1
         phase_wall_seconds["removalScan"] = time.perf_counter() - phase_started
         native_batch_started = time.perf_counter()
         phase_started = time.perf_counter()
@@ -313,77 +326,74 @@ class PersistentFixedLagBaProblem:
         created_observations = 0
         reused_observations = 0
         entering_observations: list[tuple[str, str, Any]] = []
-        for (track_uid, observation_uid), observation in target_observations.items():
-            existing = self.points[track_uid].observations.get(observation_uid)
-            xy = (float(observation.x), float(observation.y))
-            frame_id = int(observation.geometry_ordinal)
-            if existing is not None and (
-                existing.frame_id != frame_id or existing.xy != xy
-            ):
-                removed = self._remove_observation(track_uid, observation_uid)
-                self._remove_native_observations([removed])
-                existing = None
-                removed_observations += 1
-            if existing is None:
-                self._validate_observation(observation)
-                entering_observations.append(
-                    (track_uid, observation_uid, observation)
-                )
-                created_observations += 1
-            else:
-                reused_observations += 1
-
-        if self.policy == "native-rebuild-every-window":
+        if native_rebuild:
             frame_order = {
                 int(frame_id): ordinal
                 for ordinal, frame_id in enumerate(frame_ids)
             }
-            track_order = {
-                str(track_uid): ordinal
-                for ordinal, track_uid in enumerate(track_by_uid)
-            }
-            entering_observations.sort(
-                key=lambda value: (
-                    frame_order[int(value[2].geometry_ordinal)],
-                    track_order[value[0]],
-                )
-            )
+            frame_buckets: list[list[tuple[str, str, Any]]] = [
+                [] for _ in frame_ids
+            ]
+            for track_uid, track in track_by_uid.items():
+                seen_uids: set[str] = set()
+                for observation in track.observations:
+                    observation_uid = str(observation.observation_uid)
+                    frame_id = int(observation.geometry_ordinal)
+                    if observation_uid in seen_uids or frame_id not in frame_order:
+                        raise PersistentFixedLagBaError(
+                            "persistent BA observation identity is invalid"
+                        )
+                    seen_uids.add(observation_uid)
+                    self._validate_observation(observation)
+                    frame_buckets[frame_order[frame_id]].append(
+                        (track_uid, observation_uid, observation)
+                    )
+            entering_observations = [
+                value for bucket in frame_buckets for value in bucket
+            ]
+            created_observations = len(entering_observations)
+        else:
+            for (
+                track_uid,
+                observation_uid,
+            ), observation in target_observations.items():
+                existing = self.points[track_uid].observations.get(observation_uid)
+                xy = (float(observation.x), float(observation.y))
+                frame_id = int(observation.geometry_ordinal)
+                if existing is not None and (
+                    existing.frame_id != frame_id or existing.xy != xy
+                ):
+                    removed = self._remove_observation(track_uid, observation_uid)
+                    self._remove_native_observations([removed])
+                    existing = None
+                    removed_observations += 1
+                if existing is None:
+                    self._validate_observation(observation)
+                    entering_observations.append(
+                        (track_uid, observation_uid, observation)
+                    )
+                    created_observations += 1
+                else:
+                    reused_observations += 1
         phase_wall_seconds["enteringObservationBuild"] = (
             time.perf_counter() - phase_started
         )
 
         phase_started = time.perf_counter()
-        point_addresses = np.fromiter(
-            (
-                self.points[track_uid].values.ctypes.data
-                for track_uid, _, _ in entering_observations
-            ),
-            dtype=np.uint64,
-            count=len(entering_observations),
-        )
-        pose_addresses = np.fromiter(
-            (
-                self.poses[int(observation.geometry_ordinal)].values.ctypes.data
-                for _, _, observation in entering_observations
-            ),
-            dtype=np.uint64,
-            count=len(entering_observations),
-        )
-        observation_xy = np.asarray(
-            [
-                (float(observation.x), float(observation.y))
-                for _, _, observation in entering_observations
-            ],
-            dtype=np.float64,
-        )
-        fixed_pose_flags = np.fromiter(
-            (
-                int(observation.geometry_ordinal) in fixed_pose_ids
-                for _, _, observation in entering_observations
-            ),
-            dtype=np.uint8,
-            count=len(entering_observations),
-        )
+        observation_count = len(entering_observations)
+        point_addresses = np.empty((observation_count,), dtype=np.uint64)
+        pose_addresses = np.empty((observation_count,), dtype=np.uint64)
+        observation_xy = np.empty((observation_count, 2), dtype=np.float64)
+        fixed_pose_flags = np.empty((observation_count,), dtype=np.uint8)
+        for index, (track_uid, _, observation) in enumerate(
+            entering_observations
+        ):
+            frame_id = int(observation.geometry_ordinal)
+            point_addresses[index] = self.points[track_uid].values.ctypes.data
+            pose_addresses[index] = self.poses[frame_id].values.ctypes.data
+            observation_xy[index, 0] = float(observation.x)
+            observation_xy[index, 1] = float(observation.y)
+            fixed_pose_flags[index] = frame_id in fixed_pose_ids
         phase_wall_seconds["nativeArrayBuild"] = time.perf_counter() - phase_started
         if entering_observations:
             phase_started = time.perf_counter()
@@ -418,19 +428,22 @@ class PersistentFixedLagBaProblem:
                 time.perf_counter() - phase_started
             )
             phase_started = time.perf_counter()
-            for batch_index, (
-                track_uid,
-                observation_uid,
-                observation,
-            ) in enumerate(entering_observations):
-                self.points[track_uid].observations[observation_uid] = (
-                    _ObservationBlock(
-                        frame_id=int(observation.geometry_ordinal),
-                        xy=(float(observation.x), float(observation.y)),
-                        native_batch=native_batch,
-                        native_batch_index=batch_index,
+            if native_rebuild:
+                self._native_batches.append(native_batch)
+            else:
+                for batch_index, (
+                    track_uid,
+                    observation_uid,
+                    observation,
+                ) in enumerate(entering_observations):
+                    self.points[track_uid].observations[observation_uid] = (
+                        _ObservationBlock(
+                            frame_id=int(observation.geometry_ordinal),
+                            xy=(float(observation.x), float(observation.y)),
+                            native_batch=native_batch,
+                            native_batch_index=batch_index,
+                        )
                     )
-                )
             phase_wall_seconds["observationBookkeeping"] = (
                 time.perf_counter() - phase_started
             )
@@ -483,7 +496,7 @@ class PersistentFixedLagBaProblem:
             "residentPointCount": len(self.points),
             "residentObservationCount": sum(
                 len(value.observations) for value in self.points.values()
-            ),
+            ) if not native_rebuild else self.problem.num_residual_blocks(),
             "problemParameterBlockCount": self.problem.num_parameter_blocks(),
             "problemResidualBlockCount": self.problem.num_residual_blocks(),
             "problemResidualCount": self.problem.num_residuals(),
