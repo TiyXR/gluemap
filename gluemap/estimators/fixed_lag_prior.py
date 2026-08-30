@@ -563,9 +563,8 @@ def marginalize_ceres_linearization(
     block_points = unique_keys // camera_count
     block_cameras = unique_keys % camera_count
     block_counts = np.bincount(block_points, minlength=point_count)
-    if np.any(block_counts < 1):
-        raise FixedLagPriorError("Ceres point has no variable camera support")
-    maximum_views = int(block_counts.max())
+    points_without_variable_camera = int(np.count_nonzero(block_counts == 0))
+    maximum_views = max(1, int(block_counts.max()))
     first_block = np.repeat(
         np.cumsum(block_counts) - block_counts, block_counts
     )
@@ -729,6 +728,7 @@ def marginalize_ceres_linearization(
         "cameraCountAfter": camera_count - 1,
         "eliminatedCameraId": eliminate_camera_id,
         "pointCount": point_count,
+        "pointWithoutVariableCameraCount": points_without_variable_camera,
         "residualCount": len(residual),
         "maximumPointCameraCount": maximum_views,
         "degeneratePointCount": int(

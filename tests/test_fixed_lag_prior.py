@@ -291,3 +291,45 @@ def test_ceres_crs_path_matches_direct_dense_elimination():
 
     torch.testing.assert_close(result.hessian, expected_hessian, rtol=1e-9, atol=1e-9)
     torch.testing.assert_close(result.gradient, expected_gradient, rtol=1e-9, atol=1e-9)
+
+
+def test_ceres_point_without_variable_camera_does_not_create_pose_constraint():
+    residuals = np.zeros(14, dtype=np.float64)
+    residuals[:2] = np.asarray([1.0, -0.5])
+    jacobian = np.zeros((14, 15), dtype=np.float64)
+    jacobian[:2, 12:] = np.asarray(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float64
+    )
+    jacobian[2:, :12] = np.eye(12, dtype=np.float64)
+    sparse = torch.from_numpy(jacobian).to_sparse_csr()
+    linearization = CeresProblemLinearization(
+        camera_ids=(10, 11),
+        image_ids=(1, 2),
+        point3d_ids=(1,),
+        pose_ambient_values=np.asarray(
+            [
+                [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        ),
+        point_values=np.zeros((1, 3), dtype=np.float64),
+        residuals=residuals,
+        row_offsets=sparse.crow_indices().numpy(),
+        column_indices=sparse.col_indices().numpy(),
+        jacobian_values=sparse.values().numpy(),
+        report={
+            "contractId": "jarailsense.gluemap-ceres-linearization/v1",
+            "columnCount": 15,
+        },
+    )
+
+    result = marginalize_ceres_linearization(
+        linearization,
+        eliminate_camera_id=10,
+        device_policy="cpu",
+    )
+
+    assert result.camera_ids == (11,)
+    assert result.report["pointWithoutVariableCameraCount"] == 1
+    torch.testing.assert_close(result.hessian, torch.eye(6, dtype=torch.float64))
