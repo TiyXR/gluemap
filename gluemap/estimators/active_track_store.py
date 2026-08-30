@@ -392,89 +392,148 @@ class ActiveTrackStore:
         active_last_ordinal: int,
         freeze_through_ordinal: int,
     ) -> dict[str, Any]:
-        interval = (
-            active_first_ordinal,
-            active_last_ordinal,
-            freeze_through_ordinal,
-        )
-        components = self._components()
-        parallax = self._batch_parallax(components, [interval])[0]
-        return self._evaluate_components(
-            components,
-            active_first_ordinal=active_first_ordinal,
-            active_last_ordinal=active_last_ordinal,
-            freeze_through_ordinal=freeze_through_ordinal,
-            parallax_by_track=parallax,
-        )
+        return self.evaluate_batch(
+            [
+                (
+                    active_first_ordinal,
+                    active_last_ordinal,
+                    freeze_through_ordinal,
+                )
+            ]
+        )[0]
 
     def evaluate_batch(
         self,
         intervals: Iterable[tuple[int, int, int]],
     ) -> list[dict[str, Any]]:
-        """Evaluate one release group while building components only once."""
+        """Evaluate one release group with one tensor upload and one reduction."""
         values = list(intervals)
+        for active_first, active_last, freeze_through in values:
+            self._validate_interval(active_first, active_last, freeze_through)
         components = self._components()
-        parallax = self._batch_parallax(components, values)
-        return [
-            self._evaluate_components(
-                components,
-                active_first_ordinal=active_first,
-                active_last_ordinal=active_last,
-                freeze_through_ordinal=freeze_through,
-                parallax_by_track=parallax[index],
-            )
-            for index, (active_first, active_last, freeze_through) in enumerate(values)
-        ]
+        if not values:
+            return []
+        if not components:
+            return [
+                self._build_report(
+                    interval=value,
+                    candidates=[],
+                    selected=[],
+                    bucket_counts=Counter(),
+                    rejected=Counter({"active-budget-or-cell-cap": 0}),
+                    constraints_per_frame=Counter(),
+                )
+                for value in values
+            ]
 
-    def _batch_parallax(
+        (
+            candidates_by_interval,
+            rejected_by_interval,
+            ordinals,
+            unique_active_observations,
+        ) = self._batch_component_metrics(components, values)
+        selected_by_interval: list[list[dict[str, Any]]] = []
+        bucket_counts_by_interval: list[Counter[tuple[int, int, int]]] = []
+        selected_component_indexes: list[list[int]] = []
+        for candidates, rejected in zip(
+            candidates_by_interval, rejected_by_interval, strict=True
+        ):
+            selected, bucket_counts = self._select_candidates(candidates, rejected)
+            selected_by_interval.append(selected)
+            bucket_counts_by_interval.append(bucket_counts)
+            selected_component_indexes.append(
+                [value["componentIndex"] for value in selected]
+            )
+        constraints_by_interval = self._batch_constraints_per_frame(
+            ordinals=ordinals,
+            unique_active_observations=unique_active_observations,
+            selected_component_indexes=selected_component_indexes,
+            intervals=values,
+        )
+        reports = []
+        for index, interval in enumerate(values):
+            selected = selected_by_interval[index]
+            for candidate in selected:
+                candidate.pop("componentIndex", None)
+            reports.append(
+                self._build_report(
+                    interval=interval,
+                    candidates=candidates_by_interval[index],
+                    selected=selected,
+                    bucket_counts=bucket_counts_by_interval[index],
+                    rejected=rejected_by_interval[index],
+                    constraints_per_frame=constraints_by_interval[index],
+                )
+            )
+        return reports
+
+    @staticmethod
+    def _validate_interval(
+        active_first_ordinal: int,
+        active_last_ordinal: int,
+        freeze_through_ordinal: int,
+    ) -> None:
+        if (
+            active_first_ordinal < 0
+            or active_last_ordinal < active_first_ordinal
+            or freeze_through_ordinal < active_first_ordinal
+            or freeze_through_ordinal >= active_last_ordinal
+        ):
+            raise ActiveTrackStoreError("active/freeze interval is invalid")
+
+    def _batch_component_metrics(
         self,
         components: dict[str, list[TrackObservation]],
         intervals: list[tuple[int, int, int]],
-    ) -> list[dict[str, float]]:
+    ) -> tuple[
+        list[list[dict[str, Any]]],
+        list[Counter[str]],
+        Any,
+        Any,
+    ]:
+        """Compute every read-only component/window metric as one tensor batch."""
         import torch
 
-        results: list[dict[str, float]] = [dict() for _ in intervals]
-        if not intervals or not components:
-            return results
         component_values = list(components.items())
+        component_uids = [value[0] for value in component_values]
         maximum_observations = max(
             len(observations) for _, observations in component_values
         )
-        coordinates = torch.zeros(
-            (len(component_values), maximum_observations, 2),
-            dtype=torch.float32,
-        )
-        ordinals = torch.full(
-            (len(component_values), maximum_observations),
-            -1,
-            dtype=torch.int64,
-        )
-        dimensions = torch.ones(
-            (len(component_values), maximum_observations, 2),
-            dtype=torch.float32,
-        )
-        for index, (_, observations) in enumerate(component_values):
-            count = len(observations)
-            coordinates[index, :count] = torch.tensor(
-                [(value.x, value.y) for value in observations],
-                dtype=torch.float32,
+        padded_coordinates = []
+        padded_ordinals = []
+        padded_dimensions = []
+        padded_scores = []
+        padded_seconds = []
+        for _, observations in component_values:
+            padding = maximum_observations - len(observations)
+            padded_coordinates.append(
+                [(value.x, value.y) for value in observations]
+                + [(0.0, 0.0)] * padding
             )
-            ordinals[index, :count] = torch.tensor(
-                [value.geometry_ordinal for value in observations],
-                dtype=torch.int64,
+            padded_ordinals.append(
+                [value.geometry_ordinal for value in observations] + [-1] * padding
             )
-            dimensions[index, :count] = torch.tensor(
-                [
-                    (value.image_width, value.image_height)
-                    for value in observations
-                ],
-                dtype=torch.float32,
+            padded_dimensions.append(
+                [(value.image_width, value.image_height) for value in observations]
+                + [(1, 1)] * padding
+            )
+            padded_scores.append(
+                [value.score for value in observations] + [0.0] * padding
+            )
+            padded_seconds.append(
+                [value.seconds for value in observations] + [0.0] * padding
             )
 
         device = self._parallax_backend
-        coordinates = coordinates.to(device)
-        ordinals = ordinals.to(device)
-        dimensions = dimensions.to(device)
+        coordinates = torch.tensor(
+            padded_coordinates, dtype=torch.float32, device=device
+        )
+        ordinals = torch.tensor(padded_ordinals, dtype=torch.int64, device=device)
+        dimensions = torch.tensor(
+            padded_dimensions, dtype=torch.float32, device=device
+        )
+        scores = torch.tensor(padded_scores, dtype=torch.float64, device=device)
+        seconds = torch.tensor(padded_seconds, dtype=torch.float64, device=device)
         active_first = torch.tensor(
             [value[0] for value in intervals],
             dtype=torch.int64,
@@ -489,8 +548,19 @@ class ActiveTrackStore:
             (ordinals[:, None, :] >= active_first[None, :, None])
             & (ordinals[:, None, :] <= active_last[None, :, None])
         )
-        counts = mask.sum(dim=2)
+        previous_is_same_view = torch.zeros_like(mask)
+        if maximum_observations > 1:
+            previous_is_same_view[:, :, 1:] = (
+                mask[:, :, :-1]
+                & (ordinals[:, None, 1:] == ordinals[:, None, :-1])
+            )
+        unique_active_observations = mask & ~previous_is_same_view
+        view_counts = unique_active_observations.sum(dim=2)
+        observation_counts = mask.sum(dim=2)
         first_indexes = mask.to(torch.int64).argmax(dim=2)
+        last_indexes = maximum_observations - 1 - torch.flip(
+            mask, dims=(2,)
+        ).to(torch.int64).argmax(dim=2)
         expanded_coordinates = coordinates[:, None, :, :].expand(
             -1, len(intervals), -1, -1
         )
@@ -509,10 +579,14 @@ class ActiveTrackStore:
         ).squeeze(2)
         diagonals = torch.sqrt((first_dimensions * first_dimensions).sum(dim=2))
         diagonals = diagonals.reshape(-1)
-        counts = counts.reshape(-1)
+        flat_observation_counts = observation_counts.reshape(-1)
 
         batch_size = self.budget.parallax_microbatch_components
-        maximum_values: list[float] = []
+        parallax = torch.zeros(
+            len(component_values) * len(intervals),
+            dtype=torch.float32,
+            device=device,
+        )
         with torch.no_grad():
             for start in range(0, len(selected_points), batch_size):
                 points = selected_points[start : start + batch_size]
@@ -526,76 +600,102 @@ class ActiveTrackStore:
                     squared_distance.amax(dim=(1, 2)).clamp_min_(0.0)
                 ) / diagonals[start : start + batch_size]
                 maximum = torch.where(
-                    counts[start : start + batch_size] >= 2,
+                    flat_observation_counts[start : start + batch_size] >= 2,
                     maximum,
                     torch.zeros_like(maximum),
                 )
-                maximum_values.extend(maximum.cpu().tolist())
-        interval_count = len(intervals)
-        for flat_index, value in enumerate(maximum_values):
-            component_index, interval_index = divmod(flat_index, interval_count)
-            track_uid = component_values[component_index][0]
-            results[interval_index][track_uid] = value
-        return results
+                parallax[start : start + len(maximum)] = maximum
+        parallax = parallax.reshape(len(component_values), len(intervals))
 
-    def _evaluate_components(
+        first_ordinals = ordinals[:, None, :].expand(
+            -1, len(intervals), -1
+        ).gather(2, first_indexes[:, :, None]).squeeze(2)
+        last_ordinals = ordinals[:, None, :].expand(
+            -1, len(intervals), -1
+        ).gather(2, last_indexes[:, :, None]).squeeze(2)
+        freeze_through = torch.tensor(
+            [value[2] for value in intervals], dtype=torch.int64, device=device
+        )
+        bridges = (first_ordinals <= freeze_through[None, :]) & (
+            freeze_through[None, :] < last_ordinals
+        )
+        mean_scores = (
+            (scores[:, None, :] * mask).sum(dim=2)
+            / observation_counts.clamp_min(1)
+        )
+        representative_indexes = last_indexes[:, :, None]
+        representative_seconds = seconds[:, None, :].expand(
+            -1, len(intervals), -1
+        ).gather(2, representative_indexes).squeeze(2)
+        representative_points = expanded_coordinates.gather(
+            2, representative_indexes[:, :, :, None].expand(-1, -1, -1, 2)
+        ).squeeze(2)
+        representative_dimensions = expanded_dimensions.gather(
+            2, representative_indexes[:, :, :, None].expand(-1, -1, -1, 2)
+        ).squeeze(2)
+        time_bins = torch.floor(
+            representative_seconds / self.budget.selection_time_bin_seconds
+        ).to(torch.int64)
+        grid_columns = torch.floor(
+            representative_points[:, :, 0]
+            / representative_dimensions[:, :, 0]
+            * self.budget.coverage_grid_columns
+        ).to(torch.int64).clamp_(0, self.budget.coverage_grid_columns - 1)
+        grid_rows = torch.floor(
+            representative_points[:, :, 1]
+            / representative_dimensions[:, :, 1]
+            * self.budget.coverage_grid_rows
+        ).to(torch.int64).clamp_(0, self.budget.coverage_grid_rows - 1)
+
+        integer_metrics = torch.stack(
+            (view_counts, bridges, time_bins, grid_rows, grid_columns), dim=2
+        ).cpu()
+        float_metrics = torch.stack((parallax.to(torch.float64), mean_scores), dim=2).cpu()
+        candidates_by_interval: list[list[dict[str, Any]]] = [
+            [] for _ in intervals
+        ]
+        rejected_by_interval: list[Counter[str]] = [
+            Counter() for _ in intervals
+        ]
+        for component_index, track_uid in enumerate(component_uids):
+            for interval_index in range(len(intervals)):
+                view_count, bridge, time_bin, row, column = integer_metrics[
+                    component_index, interval_index
+                ].tolist()
+                parallax_value, mean_score = float_metrics[
+                    component_index, interval_index
+                ].tolist()
+                reasons = []
+                if view_count < self.budget.minimum_track_views:
+                    reasons.append("insufficient-views")
+                if parallax_value < self.budget.minimum_parallax_diagonals:
+                    reasons.append("insufficient-parallax")
+                if reasons:
+                    rejected_by_interval[interval_index].update(reasons)
+                    continue
+                candidates_by_interval[interval_index].append(
+                    {
+                        "trackUid": track_uid,
+                        "componentIndex": component_index,
+                        "viewCount": view_count,
+                        "bridge": bool(bridge),
+                        "parallaxDiagonals": parallax_value,
+                        "meanScore": mean_score,
+                        "bucket": (time_bin, row, column),
+                    }
+                )
+        return (
+            candidates_by_interval,
+            rejected_by_interval,
+            ordinals,
+            unique_active_observations,
+        )
+
+    def _select_candidates(
         self,
-        components: dict[str, list[TrackObservation]],
-        *,
-        active_first_ordinal: int,
-        active_last_ordinal: int,
-        freeze_through_ordinal: int,
-        parallax_by_track: dict[str, float],
-    ) -> dict[str, Any]:
-        if (
-            active_first_ordinal < 0
-            or active_last_ordinal < active_first_ordinal
-            or freeze_through_ordinal < active_first_ordinal
-            or freeze_through_ordinal >= active_last_ordinal
-        ):
-            raise ActiveTrackStoreError("active/freeze interval is invalid")
-        candidates: list[dict[str, Any]] = []
-        rejected = Counter()
-        for track_uid, all_observations in components.items():
-            observations = [
-                value
-                for value in all_observations
-                if active_first_ordinal <= value.geometry_ordinal <= active_last_ordinal
-            ]
-            frame_ordinals = sorted({value.geometry_ordinal for value in observations})
-            reasons: list[str] = []
-            if len(frame_ordinals) < self.budget.minimum_track_views:
-                reasons.append("insufficient-views")
-            parallax = parallax_by_track.get(track_uid, 0.0)
-            if parallax < self.budget.minimum_parallax_diagonals:
-                reasons.append("insufficient-parallax")
-            if reasons:
-                rejected.update(reasons)
-                continue
-            bridge = (
-                frame_ordinals[0] <= freeze_through_ordinal < frame_ordinals[-1]
-            )
-            representative = observations[-1]
-            bucket = (
-                floor(representative.seconds / self.budget.selection_time_bin_seconds),
-                *self._grid_cell(representative),
-            )
-            candidates.append(
-                {
-                    "trackUid": track_uid,
-                    "observationUids": [
-                        value.observation_uid for value in observations
-                    ],
-                    "geometryOrdinals": frame_ordinals,
-                    "viewCount": len(frame_ordinals),
-                    "bridge": bridge,
-                    "parallaxDiagonals": parallax,
-                    "meanScore": sum(value.score for value in observations)
-                    / len(observations),
-                    "bucket": bucket,
-                }
-            )
-
+        candidates: list[dict[str, Any]],
+        rejected: Counter[str],
+    ) -> tuple[list[dict[str, Any]], Counter[tuple[int, int, int]]]:
         selected: list[dict[str, Any]] = []
         bucket_counts: Counter[tuple[int, int, int]] = Counter()
         remaining = list(candidates)
@@ -637,10 +737,64 @@ class ActiveTrackStore:
         rejected["active-budget-or-cell-cap"] += sum(
             len(values) for values in candidates_by_bucket.values()
         )
+        return selected, bucket_counts
 
-        constraints_per_frame = Counter()
-        for track in selected:
-            constraints_per_frame.update(track["geometryOrdinals"])
+    def _batch_constraints_per_frame(
+        self,
+        *,
+        ordinals: Any,
+        unique_active_observations: Any,
+        selected_component_indexes: list[list[int]],
+        intervals: list[tuple[int, int, int]],
+    ) -> list[Counter[int]]:
+        import torch
+
+        component_count, interval_count, _ = unique_active_observations.shape
+        selected_mask = torch.zeros(
+            (component_count, interval_count),
+            dtype=torch.bool,
+            device=ordinals.device,
+        )
+        for interval_index, indexes in enumerate(selected_component_indexes):
+            if indexes:
+                selected_mask[indexes, interval_index] = True
+        selected_observations = (
+            unique_active_observations & selected_mask[:, :, None]
+        )
+        first_ordinal = min(value[0] for value in intervals)
+        last_ordinal = max(value[1] for value in intervals)
+        span = last_ordinal - first_ordinal + 1
+        expanded_ordinals = ordinals[:, None, :].expand(-1, interval_count, -1)
+        interval_offsets = torch.arange(
+            interval_count, dtype=torch.int64, device=ordinals.device
+        )[None, :, None] * span
+        keys = (
+            expanded_ordinals - first_ordinal + interval_offsets
+        )[selected_observations]
+        counts = torch.bincount(keys, minlength=interval_count * span).reshape(
+            interval_count, span
+        ).cpu()
+        return [
+            Counter(
+                {
+                    ordinal: int(counts[interval_index, ordinal - first_ordinal])
+                    for ordinal in range(active_first, active_last + 1)
+                }
+            )
+            for interval_index, (active_first, active_last, _) in enumerate(intervals)
+        ]
+
+    def _build_report(
+        self,
+        *,
+        interval: tuple[int, int, int],
+        candidates: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        bucket_counts: Counter[tuple[int, int, int]],
+        rejected: Counter[str],
+        constraints_per_frame: Counter[int],
+    ) -> dict[str, Any]:
+        active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
         frame_constraints = {
             str(ordinal): constraints_per_frame[ordinal]
             for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
@@ -681,6 +835,7 @@ class ActiveTrackStore:
             "maximumActiveTracks": self.budget.maximum_active_tracks,
             "parallaxBackendPolicy": self.budget.parallax_backend_policy,
             "parallaxBackend": self.parallax_backend,
+            "gateMetricsBackend": self.parallax_backend,
             "parallaxMicrobatchComponents": (
                 self.budget.parallax_microbatch_components
             ),

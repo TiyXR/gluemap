@@ -113,7 +113,30 @@ def test_parallax_backend_and_microbatch_are_reported():
     )
     assert report["parallaxBackendPolicy"] == "cpu"
     assert report["parallaxBackend"] == "cpu"
+    assert report["gateMetricsBackend"] == "cpu"
     assert report["parallaxMicrobatchComponents"] == 2
+
+
+def test_batch_metrics_count_one_constraint_per_track_and_frame():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    first = observation(0, 0, x=10, y=10)
+    duplicate_view = TrackObservation(
+        **{
+            **observation(0, 0, x=12, y=10).__dict__,
+            "observation_uid": "track-0-frame-0-duplicate",
+        }
+    )
+    last = observation(0, 3, x=30, y=10)
+    store.add_observations([first, duplicate_view, last])
+    store.add_correspondences(
+        [
+            TrackCorrespondence(first.observation_uid, duplicate_view.observation_uid),
+            TrackCorrespondence(duplicate_view.observation_uid, last.observation_uid),
+        ]
+    )
+    report = store.evaluate_batch([(0, 3, 1)])[0]
+    assert report["constraintsPerFrame"] == {"0": 1, "1": 0, "2": 0, "3": 1}
+    assert report["selectedTrackCount"] == 1
 
 
 def test_gate_report_is_canonical_across_decimal_key_width_boundary():
