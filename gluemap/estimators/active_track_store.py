@@ -150,8 +150,49 @@ class _PersistentObservationTensorTable:
         self._row_by_uid[value.observation_uid] = row
         self._pending.append((row, value.observation_uid, value))
 
+    def queue_batch(self, values: list[TrackObservation]) -> None:
+        """Allocate one native-intern result with one Python call."""
+        pending = self._pending
+        row_by_uid = self._row_by_uid
+        free_rows = self._free_rows
+        next_row = self._next_row
+        reused = 0
+        for value in values:
+            uid = value.observation_uid
+            if uid in row_by_uid:
+                continue
+            if free_rows:
+                row = free_rows.popleft()
+                reused += 1
+            else:
+                row = next_row
+                next_row += 1
+            row_by_uid[uid] = row
+            pending.append((row, uid, value))
+        self._next_row = next_row
+        self.reused_row_count += reused
+
     def row(self, observation_uid: str) -> int:
         return self._row_by_uid[observation_uid]
+
+    def padded_rows(
+        self,
+        components: list[tuple[str, list[TrackObservation]]],
+        maximum_observations: int,
+    ) -> Any:
+        import numpy as np
+
+        result = np.full(
+            (len(components), maximum_observations), -1, dtype=np.int64
+        )
+        row_by_uid = self._row_by_uid
+        for index, (_, observations) in enumerate(components):
+            result[index, : len(observations)] = np.fromiter(
+                (row_by_uid[value.observation_uid] for value in observations),
+                dtype=np.int64,
+                count=len(observations),
+            )
+        return result
 
     def _grow(self, required: int) -> None:
         import torch
@@ -181,6 +222,7 @@ class _PersistentObservationTensorTable:
         self.capacity = capacity
 
     def flush(self) -> None:
+        import numpy as np
         import torch
 
         pending = [
@@ -192,37 +234,44 @@ class _PersistentObservationTensorTable:
         if not pending:
             return
         self._grow(max(row for row, _, _ in pending) + 1)
-        indexes = torch.tensor(
-            [row for row, _, _ in pending],
-            dtype=torch.int64,
-            device=self.device,
-        )
+        indexes = torch.from_numpy(
+            np.fromiter(
+                (row for row, _, _ in pending),
+                dtype=np.int64,
+                count=len(pending),
+            )
+        ).to(self.device)
         values = [value for _, _, value in pending]
-        self.coordinates[indexes] = torch.tensor(
-            [(value.x, value.y) for value in values],
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.ordinals[indexes] = torch.tensor(
-            [value.geometry_ordinal for value in values],
-            dtype=torch.int64,
-            device=self.device,
-        )
-        self.dimensions[indexes] = torch.tensor(
-            [(value.image_width, value.image_height) for value in values],
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.scores[indexes] = torch.tensor(
-            [value.score for value in values],
-            dtype=torch.float64,
-            device=self.device,
-        )
-        self.seconds[indexes] = torch.tensor(
-            [value.seconds for value in values],
-            dtype=torch.float64,
-            device=self.device,
-        )
+        self.coordinates[indexes] = torch.from_numpy(
+            np.asarray([(value.x, value.y) for value in values], dtype=np.float32)
+        ).to(self.device)
+        self.ordinals[indexes] = torch.from_numpy(
+            np.fromiter(
+                (value.geometry_ordinal for value in values),
+                dtype=np.int64,
+                count=len(values),
+            )
+        ).to(self.device)
+        self.dimensions[indexes] = torch.from_numpy(
+            np.asarray(
+                [(value.image_width, value.image_height) for value in values],
+                dtype=np.float32,
+            )
+        ).to(self.device)
+        self.scores[indexes] = torch.from_numpy(
+            np.fromiter(
+                (value.score for value in values),
+                dtype=np.float64,
+                count=len(values),
+            )
+        ).to(self.device)
+        self.seconds[indexes] = torch.from_numpy(
+            np.fromiter(
+                (value.seconds for value in values),
+                dtype=np.float64,
+                count=len(values),
+            )
+        ).to(self.device)
         self.uploaded_row_count += len(pending)
 
     def discard(self, observation_uids: Iterable[str]) -> None:
@@ -487,8 +536,8 @@ class ActiveTrackStore:
             native_y_by_frame[frame_id].append(value.y)
             union_parent[uid] = uid
             component_uid_by_root[uid] = uid
-            if table is not None:
-                table.queue(value)
+        if table is not None:
+            table.queue_batch(values)
 
     def intern_observations(
         self,
@@ -863,25 +912,43 @@ class ActiveTrackStore:
         ``_observations_by_frame`` instead of walking every retained history
         observation and discarding almost all of them afterwards.
         """
-        values: dict[str, list[TrackObservation]] = defaultdict(list)
+        selected_by_component_frame: dict[
+            tuple[str, int], TrackObservation
+        ] = {}
         source_observation_count = 0
+        observations = self._observations
+        parent_find = self._union_find.find
+        component_uid_by_root = self._component_uid_by_root
         for frame_id in sorted(set(int(value) for value in frame_ids)):
-            for observation_uid in sorted(
-                self._observations_by_frame.get(frame_id, ())
-            ):
+            for observation_uid in self._observations_by_frame.get(frame_id, ()):
                 source_observation_count += 1
-                root = self._union_find.find(observation_uid)
-                values[self._component_uid_by_root[root]].append(
-                    self._observations[observation_uid]
+                root = parent_find(observation_uid)
+                component_uid = component_uid_by_root[root]
+                key = (component_uid, frame_id)
+                previous = selected_by_component_frame.get(key)
+                if (
+                    previous is None
+                    or observation_uid < previous.observation_uid
+                ):
+                    selected_by_component_frame[key] = observations[
+                        observation_uid
+                    ]
+        values: dict[str, list[TrackObservation]] = defaultdict(list)
+        for (component_uid, _), observation in selected_by_component_frame.items():
+            values[component_uid].append(observation)
+        return (
+            {
+                component_uid: sorted(
+                    values[component_uid],
+                    key=lambda value: (
+                        value.geometry_ordinal,
+                        value.observation_uid,
+                    ),
                 )
-        for observations in values.values():
-            observations.sort(
-                key=lambda value: (
-                    value.geometry_ordinal,
-                    value.observation_uid,
-                )
-            )
-        return dict(values), source_observation_count
+                for component_uid in sorted(values)
+            },
+            source_observation_count,
+        )
 
     def _grid_cell(self, observation: TrackObservation) -> tuple[int, int]:
         column = min(
@@ -1078,6 +1145,9 @@ class ActiveTrackStore:
             unique_active_observations,
             component_values,
         ) = self._batch_component_metrics(components, values, frame_sets)
+        self._last_gate_tensor_report[
+            "activeComponentSourceObservationCount"
+        ] = component_source_observation_count
         metric_seconds = time.perf_counter() - phase_started
         phase_started = time.perf_counter()
         selected_by_interval: list[list[dict[str, Any]]] = []
@@ -1188,6 +1258,7 @@ class ActiveTrackStore:
         list[tuple[str, list[TrackObservation]]],
     ]:
         """Compute every read-only component/window metric as one tensor batch."""
+        import numpy as np
         import torch
 
         phase_wall: dict[str, float] = {}
@@ -1240,16 +1311,9 @@ class ActiveTrackStore:
         if self._gpu_observation_table is not None:
             table = self._gpu_observation_table
             table.flush()
-            padded_rows = []
-            for _, observations in component_values:
-                padding = maximum_observations - len(observations)
-                padded_rows.append(
-                    [table.row(value.observation_uid) for value in observations]
-                    + [-1] * padding
-                )
-            row_indexes = torch.tensor(
-                padded_rows, dtype=torch.int64, device=device
-            )
+            row_indexes = torch.from_numpy(
+                table.padded_rows(component_values, maximum_observations)
+            ).to(device)
             valid_rows = row_indexes >= 0
             safe_rows = row_indexes.clamp_min(0)
             coordinates = table.coordinates[safe_rows]
@@ -1470,14 +1534,22 @@ class ActiveTrackStore:
         rejected_by_interval: list[Counter[str]] = [
             Counter() for _ in intervals
         ]
+        integer_values = integer_metrics.numpy()
+        float_values = float_metrics.numpy()
         for component_index, track_uid in enumerate(component_uids):
             for interval_index in range(len(intervals)):
-                view_count, bridge, time_bin, row, column = integer_metrics[
+                view_count, bridge, time_bin, row, column = integer_values[
                     component_index, interval_index
-                ].tolist()
-                parallax_value, mean_score = float_metrics[
+                ]
+                parallax_value, mean_score = float_values[
                     component_index, interval_index
-                ].tolist()
+                ]
+                view_count = int(view_count)
+                time_bin = int(time_bin)
+                row = int(row)
+                column = int(column)
+                parallax_value = float(parallax_value)
+                mean_score = float(mean_score)
                 reasons = []
                 if view_count < self.budget.minimum_track_views:
                     reasons.append("insufficient-views")
