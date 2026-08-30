@@ -194,6 +194,89 @@ def _scatter_matrix_blocks(
             flattened.index_add_(0, indexes, blocks[:, row, column])
 
 
+def _runtime_point_schur_batch_size(
+    point_count: int,
+    maximum_views: int,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> int:
+    """Use at most 20% of currently free VRAM for one dense view-pair batch."""
+    if point_count < 1:
+        return 1
+    element_bytes = torch.empty((), dtype=dtype).element_size()
+    bytes_per_point = max(
+        1,
+        maximum_views
+        * maximum_views
+        * 36
+        * (element_bytes + torch.empty((), dtype=torch.int64).element_size()),
+    )
+    if device.type != "cuda":
+        return point_count
+    free_bytes, _ = torch.cuda.mem_get_info(device)
+    working_budget = max(bytes_per_point, int(free_bytes * 0.2))
+    return max(1, min(point_count, working_budget // bytes_per_point))
+
+
+def _apply_point_schur_correction(
+    hessian: torch.Tensor,
+    gradient: torch.Tensor,
+    camera_indexes: torch.Tensor,
+    camera_point: torch.Tensor,
+    point_inverse: torch.Tensor,
+    point_gradient: torch.Tensor,
+) -> tuple[int, int]:
+    """Accumulate every point/view correction with one kernel per microbatch."""
+    point_count, maximum_views = camera_indexes.shape
+    dimension = hessian.shape[0]
+    batch_size = _runtime_point_schur_batch_size(
+        point_count,
+        maximum_views,
+        dtype=hessian.dtype,
+        device=hessian.device,
+    )
+    tangent = torch.arange(6, device=hessian.device)
+    batch_count = 0
+    for start in range(0, point_count, batch_size):
+        stop = min(point_count, start + batch_size)
+        indexes = camera_indexes[start:stop]
+        blocks = camera_point[start:stop]
+        inverse = point_inverse[start:stop]
+        point_g = point_gradient[start:stop]
+        valid_views = indexes >= 0
+        gradient_correction = torch.einsum(
+            "pvij,pjk,pk->pvi", blocks, inverse, point_g
+        )
+        gradient_targets = indexes[:, :, None] * 6 + tangent
+        gradient.index_add_(
+            0,
+            gradient_targets[valid_views].reshape(-1),
+            -gradient_correction[valid_views].reshape(-1),
+        )
+
+        matrix_correction = torch.einsum(
+            "pvij,pjk,pwlk->pvwil", blocks, inverse, blocks
+        )
+        valid_pairs = valid_views[:, :, None] & valid_views[:, None, :]
+        row_targets = (
+            indexes[:, :, None, None, None] * 6
+            + tangent[None, None, None, :, None]
+        )
+        column_targets = (
+            indexes[:, None, :, None, None] * 6
+            + tangent[None, None, None, None, :]
+        )
+        flattened_targets = row_targets * dimension + column_targets
+        hessian.view(-1).index_add_(
+            0,
+            flattened_targets.expand_as(matrix_correction)[valid_pairs].reshape(-1),
+            -matrix_correction[valid_pairs].reshape(-1),
+        )
+        batch_count += 1
+    return batch_size, batch_count
+
+
 def _symmetric_pseudoinverse(
     matrix: torch.Tensor,
     relative_threshold: float,
@@ -601,28 +684,16 @@ def marginalize_ceres_linearization(
     point_inverse, point_eigenvalues, point_rank_mask = _symmetric_pseudoinverse(
         point_hessian_tensor, relative_rank_threshold
     )
-    for view in range(maximum_views):
-        indexes = camera_indexes[:, view]
-        correction_gradient = torch.einsum(
-            "pij,pjk,pk->pi",
-            camera_point[:, view],
+    schur_microbatch_points, schur_microbatch_count = (
+        _apply_point_schur_correction(
+            hessian,
+            gradient,
+            camera_indexes,
+            camera_point,
             point_inverse,
             point_gradient_tensor,
         )
-        _scatter_vector_blocks(gradient, indexes, -correction_gradient)
-        for other_view in range(maximum_views):
-            correction = torch.einsum(
-                "pij,pjk,plk->pil",
-                camera_point[:, view],
-                point_inverse,
-                camera_point[:, other_view],
-            )
-            _scatter_matrix_blocks(
-                hessian,
-                indexes,
-                camera_indexes[:, other_view],
-                -correction,
-            )
+    )
     hessian = (hessian + hessian.T) * 0.5
 
     eliminate_index = camera_ids.index(eliminate_camera_id)
@@ -743,6 +814,8 @@ def marginalize_ceres_linearization(
         "priorConditionEstimate": condition,
         "cpuSparseNormalWallSeconds": sparse_wall,
         "resolvedSchurWallSeconds": schur_wall,
+        "pointSchurMicrobatchPoints": schur_microbatch_points,
+        "pointSchurMicrobatchCount": schur_microbatch_count,
         "reasonCodes": reasons,
     }
     return FejPriorState(
