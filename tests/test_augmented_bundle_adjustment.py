@@ -345,6 +345,7 @@ class TestBundleAdjustmentEndToEnd:
         prior_image_id = sorted(reconstruction.reg_image_ids())[-1]
         baseline = copy.deepcopy(reconstruction)
         with_prior = copy.deepcopy(reconstruction)
+        baseline_callback_residuals = []
         _, _, baseline_summary = bundle_adjustment(
             baseline,
             None,
@@ -353,6 +354,9 @@ class TestBundleAdjustmentEndToEnd:
             fixed_pose_ids={fixed_image_id},
             fix_intrinsics=True,
             device_policy="cpu",
+            post_solve_problem_callback=lambda problem, _current: (
+                baseline_callback_residuals.append(problem.num_residuals())
+            ),
         )
         linearization = torch.from_numpy(
             with_prior.image(prior_image_id).cam_from_world().params.copy()
@@ -371,6 +375,7 @@ class TestBundleAdjustmentEndToEnd:
             report={},
         )
 
+        prior_callback_residuals = []
         _, _, prior_summary = bundle_adjustment(
             with_prior,
             None,
@@ -381,6 +386,9 @@ class TestBundleAdjustmentEndToEnd:
             device_policy="cpu",
             fej_prior=prior,
             fej_prior_image_ids={99: prior_image_id},
+            post_solve_problem_callback=lambda problem, _current: (
+                prior_callback_residuals.append(problem.num_residuals())
+            ),
         )
 
         expected_added_cost = 0.5 * float(factor_residual @ factor_residual)
@@ -391,6 +399,7 @@ class TestBundleAdjustmentEndToEnd:
         np.testing.assert_allclose(
             actual_added_cost, expected_added_cost, rtol=1e-10, atol=1e-10
         )
+        assert prior_callback_residuals == baseline_callback_residuals
 
     def test_solved_ceres_problem_is_linearized_without_rebuild(self):
         reconstruction = create_synthetic_reconstruction(

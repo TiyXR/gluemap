@@ -237,9 +237,9 @@ def _add_fej_pose_prior(
     reconstruction: pycolmap.Reconstruction,
     prior: FejPriorState | None,
     image_id_by_prior_camera_id: dict[int, int] | None,
-) -> list[object]:
+) -> tuple[list[object], list[object]]:
     if prior is None:
-        return []
+        return [], []
     mapping = image_id_by_prior_camera_id or {}
     if set(mapping) != set(prior.camera_ids):
         raise ValueError("FEJ prior camera/image identity differs")
@@ -255,8 +255,8 @@ def _add_fej_pose_prior(
     if any(not problem.has_parameter_block(value) for value in parameters):
         raise ValueError("FEJ prior pose is absent from the Ceres problem")
     cost = FejPosePriorCostFunction(prior)
-    problem.add_residual_block(cost, None, parameters)
-    return [cost]
+    residual_block = problem.add_residual_block(cost, None, parameters)
+    return [cost], [residual_block]
 
 
 def bundle_adjustment(
@@ -417,7 +417,7 @@ def bundle_adjustment(
         negative_depth_observations=negative_depth_observations,
         loss_function=_pyceres_loss_function(loss_type_virtual),
     )
-    fej_cost_handles = _add_fej_pose_prior(
+    fej_cost_handles, fej_residual_blocks = _add_fej_pose_prior(
         problem,
         reconstruction,
         fej_prior,
@@ -442,6 +442,13 @@ def bundle_adjustment(
 
     _validate_resolved_ba_backend(summary, ba_options.ceres.use_gpu)
     if post_solve_problem_callback is not None:
+        # The next fixed-lag prior is formed from visual residuals and merges
+        # ``previous_prior`` exactly once in the GPU Schur stage.  Remove the
+        # Python FEJ block before parallel CRS evaluation: retaining it here
+        # both double-counts history and drives Ceres worker threads through
+        # the Python GIL.
+        for residual_block in fej_residual_blocks:
+            problem.remove_residual_block(residual_block)
         callback_started = time.perf_counter()
         post_solve_problem_callback(problem, reconstruction)
         logger.info(
