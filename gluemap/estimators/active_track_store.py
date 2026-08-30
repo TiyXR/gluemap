@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from math import floor, hypot, isfinite
 from typing import Any, Iterable
@@ -455,24 +455,36 @@ class ActiveTrackStore:
             value["trackUid"],
         )
         remaining.sort(key=quality)
-        while remaining and len(selected) < self.budget.maximum_active_tracks:
+        candidates_by_bucket: dict[
+            tuple[int, int, int], deque[dict[str, Any]]
+        ] = defaultdict(deque)
+        for candidate in remaining:
+            candidates_by_bucket[candidate["bucket"]].append(candidate)
+        while (
+            candidates_by_bucket
+            and len(selected) < self.budget.maximum_active_tracks
+        ):
             progressed = False
-            for bucket in sorted({value["bucket"] for value in remaining}):
+            empty_buckets: list[tuple[int, int, int]] = []
+            for bucket in sorted(candidates_by_bucket):
                 if bucket_counts[bucket] >= self.budget.maximum_tracks_per_grid_cell:
                     continue
-                candidate = min(
-                    (value for value in remaining if value["bucket"] == bucket),
-                    key=quality,
-                )
-                remaining.remove(candidate)
+                values = candidates_by_bucket[bucket]
+                candidate = values.popleft()
                 selected.append(candidate)
                 bucket_counts[bucket] += 1
                 progressed = True
+                if not values:
+                    empty_buckets.append(bucket)
                 if len(selected) >= self.budget.maximum_active_tracks:
                     break
+            for bucket in empty_buckets:
+                del candidates_by_bucket[bucket]
             if not progressed:
                 break
-        rejected["active-budget-or-cell-cap"] += len(remaining)
+        rejected["active-budget-or-cell-cap"] += sum(
+            len(values) for values in candidates_by_bucket.values()
+        )
 
         constraints_per_frame = Counter()
         for track in selected:
