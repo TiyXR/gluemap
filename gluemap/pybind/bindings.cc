@@ -35,6 +35,16 @@ py::array_t<int64_t> ComputeConnectedComponentsWrapper(
     py::array_t<int64_t, py::array::c_style> edge_first,
     py::array_t<int64_t, py::array::c_style> edge_second);
 
+py::array_t<int64_t> BatchSpatialInternWrapper(
+    py::array_t<int64_t, py::array::c_style> existing_frames,
+    py::array_t<double, py::array::c_style> existing_x,
+    py::array_t<double, py::array::c_style> existing_y,
+    const std::vector<std::string> &existing_uids,
+    py::array_t<int64_t, py::array::c_style> incoming_frames,
+    py::array_t<double, py::array::c_style> incoming_x,
+    py::array_t<double, py::array::c_style> incoming_y,
+    const std::vector<std::string> &incoming_uids, double radius);
+
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
   return new ceres::ProductManifold<ceres::EigenQuaternionManifold,
@@ -179,4 +189,11 @@ PYBIND11_MODULE(pygluemap, m) {
   m.def("compute_connected_components", &ComputeConnectedComponentsWrapper,
         py::arg("node_count"), py::arg("edge_first"), py::arg("edge_second"),
         "Compute integer graph component labels with GIL-free OpenMP workers.");
+
+  m.def("batch_spatial_intern", &BatchSpatialInternWrapper,
+        py::arg("existing_frames"), py::arg("existing_x"),
+        py::arg("existing_y"), py::arg("existing_uids"),
+        py::arg("incoming_frames"), py::arg("incoming_x"),
+        py::arg("incoming_y"), py::arg("incoming_uids"), py::arg("radius"),
+        "Resolve one observation batch against a native per-frame spatial hash.");
 }

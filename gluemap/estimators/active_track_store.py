@@ -105,6 +105,7 @@ class ActiveTrackStore:
         self._pending_release: dict[str, Any] | None = None
         self._parallax_backend = self._resolve_parallax_backend()
         self._component_rebuild_backend = self._resolve_component_rebuild_backend()
+        self._spatial_intern_backend = self._resolve_spatial_intern_backend()
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
 
     @staticmethod
@@ -113,6 +114,17 @@ class ActiveTrackStore:
             import pygluemap
 
             if hasattr(pygluemap, "compute_connected_components"):
+                return "native-openmp"
+        except (ImportError, OSError):
+            pass
+        return "python"
+
+    @staticmethod
+    def _resolve_spatial_intern_backend() -> str:
+        try:
+            import pygluemap
+
+            if hasattr(pygluemap, "batch_spatial_intern"):
                 return "native-openmp"
         except (ImportError, OSError):
             pass
@@ -220,17 +232,118 @@ class ActiveTrackStore:
                 if existing != value:
                     raise ActiveTrackStoreError("observation identity was reused")
                 continue
-            frame_values = self._observations_by_frame[value.geometry_ordinal]
-            if (
-                len(frame_values)
-                >= self.budget.maximum_candidate_observations_per_keyframe
-            ):
-                raise ActiveTrackStoreError("per-keyframe observation bound exceeded")
-            self._observations[value.observation_uid] = value
-            frame_values.add(value.observation_uid)
-            self._add_spatial_observation(value)
-            root = self._union_find.find(value.observation_uid)
-            self._component_uid_by_root[root] = value.observation_uid
+            self._insert_observation(value)
+
+    def _insert_observation(self, value: TrackObservation) -> None:
+        """Insert one already validated, previously unseen observation."""
+        frame_values = self._observations_by_frame[value.geometry_ordinal]
+        if (
+            len(frame_values)
+            >= self.budget.maximum_candidate_observations_per_keyframe
+        ):
+            raise ActiveTrackStoreError("per-keyframe observation bound exceeded")
+        self._observations[value.observation_uid] = value
+        frame_values.add(value.observation_uid)
+        self._add_spatial_observation(value)
+        root = self._union_find.find(value.observation_uid)
+        self._component_uid_by_root[root] = value.observation_uid
+
+    def intern_observations(
+        self,
+        values: Iterable[TrackObservation],
+        *,
+        assume_valid: bool = False,
+    ) -> list[str]:
+        """Intern one deterministic Star batch without per-point API calls."""
+        if self._pending_release is not None:
+            raise ActiveTrackStoreError("cannot ingest while release is pending")
+        batch = list(values)
+        if not assume_valid:
+            for value in batch:
+                self._validate_observation(value)
+        if self._spatial_intern_backend == "native-openmp" and batch:
+            return self._intern_observations_native(batch)
+        resolved_uids: list[str] = []
+        radius_squared = self.budget.intra_image_merge_radius_pixels**2
+        for value in batch:
+            bucket = self._spatial_bucket(value)
+            candidates: list[tuple[float, str]] = []
+            frame_buckets = self._spatial_buckets_by_frame[
+                value.geometry_ordinal
+            ]
+            for column_delta in (-1, 0, 1):
+                for row_delta in (-1, 0, 1):
+                    for uid in frame_buckets.get(
+                        (bucket[0] + column_delta, bucket[1] + row_delta), ()
+                    ):
+                        existing = self._observations[uid]
+                        distance_squared = (existing.x - value.x) ** 2 + (
+                            existing.y - value.y
+                        ) ** 2
+                        if distance_squared <= radius_squared:
+                            candidates.append((distance_squared, uid))
+            if candidates:
+                resolved_uids.append(min(candidates)[1])
+                continue
+            existing = self._observations.get(value.observation_uid)
+            if existing is not None:
+                if existing != value:
+                    raise ActiveTrackStoreError("observation identity was reused")
+                resolved_uids.append(value.observation_uid)
+                continue
+            self._insert_observation(value)
+            resolved_uids.append(value.observation_uid)
+        return resolved_uids
+
+    def _intern_observations_native(
+        self, values: list[TrackObservation]
+    ) -> list[str]:
+        import numpy as np
+        import pygluemap
+
+        relevant_frames = {value.geometry_ordinal for value in values}
+        existing_uids = sorted(
+            uid
+            for frame in relevant_frames
+            for uid in self._observations_by_frame.get(frame, ())
+        )
+        existing_values = [self._observations[uid] for uid in existing_uids]
+        representatives = pygluemap.batch_spatial_intern(
+            np.fromiter(
+                (value.geometry_ordinal for value in existing_values),
+                dtype=np.int64,
+            ),
+            np.fromiter((value.x for value in existing_values), dtype=np.float64),
+            np.fromiter((value.y for value in existing_values), dtype=np.float64),
+            existing_uids,
+            np.fromiter(
+                (value.geometry_ordinal for value in values), dtype=np.int64
+            ),
+            np.fromiter((value.x for value in values), dtype=np.float64),
+            np.fromiter((value.y for value in values), dtype=np.float64),
+            [value.observation_uid for value in values],
+            self.budget.intra_image_merge_radius_pixels,
+        ).tolist()
+        existing_count = len(existing_uids)
+        resolved_uids: list[str] = []
+        for index, (value, representative) in enumerate(
+            zip(values, representatives, strict=True)
+        ):
+            if representative < existing_count:
+                resolved_uids.append(existing_uids[representative])
+                continue
+            representative_index = representative - existing_count
+            if representative_index != index:
+                resolved_uids.append(values[representative_index].observation_uid)
+                continue
+            existing = self._observations.get(value.observation_uid)
+            if existing is not None:
+                if existing != value:
+                    raise ActiveTrackStoreError("observation identity was reused")
+            else:
+                self._insert_observation(value)
+            resolved_uids.append(value.observation_uid)
+        return resolved_uids
 
     def _spatial_bucket(self, value: TrackObservation) -> tuple[int, int]:
         radius = self.budget.intra_image_merge_radius_pixels
@@ -250,26 +363,7 @@ class ActiveTrackStore:
         file or allowing overlap degree to multiply resident state.
         """
 
-        self._validate_observation(value)
-        bucket = self._spatial_bucket(value)
-        radius_squared = self.budget.intra_image_merge_radius_pixels**2
-        candidates: list[tuple[float, str]] = []
-        frame_buckets = self._spatial_buckets_by_frame[value.geometry_ordinal]
-        for column_delta in (-1, 0, 1):
-            for row_delta in (-1, 0, 1):
-                for uid in frame_buckets.get(
-                    (bucket[0] + column_delta, bucket[1] + row_delta), ()
-                ):
-                    existing = self._observations[uid]
-                    distance_squared = (existing.x - value.x) ** 2 + (
-                        existing.y - value.y
-                    ) ** 2
-                    if distance_squared <= radius_squared:
-                        candidates.append((distance_squared, uid))
-        if candidates:
-            return min(candidates)[1]
-        self.add_observations([value])
-        return value.observation_uid
+        return self.intern_observations([value])[0]
 
     def _validate_observation(self, value: TrackObservation) -> None:
         if (
@@ -849,6 +943,7 @@ class ActiveTrackStore:
             "parallaxBackend": self.parallax_backend,
             "gateMetricsBackend": self.parallax_backend,
             "componentRebuildBackend": self._component_rebuild_backend,
+            "spatialInternBackend": self._spatial_intern_backend,
             "parallaxMicrobatchComponents": (
                 self.budget.parallax_microbatch_components
             ),

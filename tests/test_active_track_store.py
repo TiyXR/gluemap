@@ -269,3 +269,22 @@ def test_overlapping_stars_merge_nearby_observations_without_new_files():
     second_uid = store.intern_observation(nearby)
     assert second_uid == first_uid
     assert store.observation_count == 1
+
+
+def test_star_batch_interns_in_order_and_merges_within_the_batch():
+    store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
+    first = observation(0, 0, x=50.0, y=20.0)
+    nearby = TrackObservation(
+        **{
+            **observation(1, 0, x=51.5, y=21.0).__dict__,
+            "observation_uid": "same-star-nearby",
+        }
+    )
+    distant = observation(2, 0, x=150.0, y=20.0)
+    resolved = store.intern_observations([first, nearby, distant])
+    assert resolved == [
+        first.observation_uid,
+        first.observation_uid,
+        distant.observation_uid,
+    ]
+    assert store.observation_count == 2

@@ -25,6 +25,21 @@ def test_connected_components_returns_minimum_integer_root():
     assert labels.tolist() == [0, 0, 0, 3, 4, 4, 6]
 
 
+def test_batch_spatial_intern_preserves_frame_and_input_order():
+    representatives = pygluemap.batch_spatial_intern(
+        np.asarray([0, 1], dtype=np.int64),
+        np.asarray([10.0, 10.0], dtype=np.float64),
+        np.asarray([10.0, 10.0], dtype=np.float64),
+        ["existing-frame-0", "existing-frame-1"],
+        np.asarray([0, 2, 2], dtype=np.int64),
+        np.asarray([11.0, 50.0, 51.0], dtype=np.float64),
+        np.asarray([10.0, 20.0, 20.0], dtype=np.float64),
+        ["incoming-0", "incoming-1", "incoming-2"],
+        2.0,
+    )
+    assert representatives.tolist() == [0, 3, 3]
+
+
 def _pair_key(a, b):
     lo, hi = (a, b) if a < b else (b, a)
     return (np.uint64(lo) << np.uint64(32)) | np.uint64(hi)
