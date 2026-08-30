@@ -127,6 +127,57 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     assert third.report["minimumConstraintCount"] == 64
 
 
+def test_batched_window_drops_the_previous_finalized_batch():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(12)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    coarse = _CoarseSolver(centers, intrinsics)
+    runner = SchurFejWindowRunner(
+        fixed_gauge_frame_id=0,
+        coarse_solver=coarse,
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    first_ids = list(range(9))
+    second_ids = [0, *range(4, 12)]
+
+    first = runner.advance_batch(
+        {},
+        first_ids,
+        _tracks(first_ids, centers, intrinsics),
+        advance_step_keyframes=3,
+    )
+    second = runner.advance_batch(
+        {},
+        second_ids,
+        _tracks(second_ids, centers, intrinsics),
+        advance_step_keyframes=3,
+    )
+
+    assert first.solved.finalized_frame_ids == (1, 2, 3)
+    assert second.solved.finalized_frame_ids == (4, 5, 6)
+    assert second.solved.prior.camera_ids == (7, 8, 9, 10, 11)
+    assert runner.next_window_ordinal == 6
+    assert coarse.calls == [
+        (tuple(first_ids), set()),
+        (tuple(second_ids), {0, 4, 5, 6, 7, 8}),
+    ]
+    assert second.report["advanceStepKeyframes"] == 3
+    assert second.report["marginalizedFrameIds"] == [4, 5, 6]
+    assert second.report["coarseFixedWarmStartCount"] == 6
+    assert second.report["actualBaCameraFrameUids"] == [
+        f"frame-{value}" for value in second_ids
+    ]
+    assert second.report["minimumConstraintCount"] == 64
+
+
 def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():
     centers = {
         frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)

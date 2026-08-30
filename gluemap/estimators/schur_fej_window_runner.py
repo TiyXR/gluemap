@@ -16,6 +16,7 @@ from gluemap.estimators.fixed_anchor_approximation import (
     FixedAnchorWindowSolution,
 )
 from gluemap.estimators.schur_fej_fixed_lag_runner import (
+    SchurFejFixedLagBatch,
     SchurFejFixedLagRunner,
     SchurFejFixedLagStep,
     SchurFejTerminalStep,
@@ -31,6 +32,14 @@ class SchurFejWindowStep:
     window_ordinal: int
     coarse: FixedAnchorWindowSolution
     solved: SchurFejFixedLagStep | SchurFejTerminalStep
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SchurFejWindowBatch:
+    window_ordinal: int
+    coarse: FixedAnchorWindowSolution
+    solved: SchurFejFixedLagBatch
     report: dict[str, Any]
 
 
@@ -68,11 +77,52 @@ class SchurFejWindowRunner:
         frame_ids: list[int],
         selected_tracks: list[SelectedTrackState],
     ) -> SchurFejWindowStep:
+        """Advance one keyframe while preserving the original API."""
+        batch = self.advance_batch(
+            predictions,
+            frame_ids,
+            selected_tracks,
+            advance_step_keyframes=1,
+        )
+        solved = batch.solved
+        finalized_frame_id = solved.finalized_frame_ids[0]
+        return SchurFejWindowStep(
+            window_ordinal=batch.window_ordinal,
+            coarse=batch.coarse,
+            solved=SchurFejFixedLagStep(
+                window_ordinal=solved.window_ordinal,
+                frame_ids=solved.frame_ids,
+                finalized_frame_id=finalized_frame_id,
+                finalized_rotation=solved.finalized_rotations[
+                    finalized_frame_id
+                ].copy(),
+                finalized_center=solved.finalized_centers[
+                    finalized_frame_id
+                ].copy(),
+                triangulated_tracks=solved.triangulated_tracks,
+                refined=solved.refined,
+                prior=solved.prior,
+                report=solved.report,
+            ),
+            report=batch.report,
+        )
+
+    def advance_batch(
+        self,
+        predictions: dict[str, list[Any]],
+        frame_ids: list[int],
+        selected_tracks: list[SelectedTrackState],
+        *,
+        advance_step_keyframes: int,
+    ) -> SchurFejWindowBatch:
+        """Advance a bounded keyframe batch with one coarse and BA solve."""
         started = time.perf_counter()
         if (
             len(frame_ids) < 3
             or frame_ids != sorted(set(frame_ids))
             or self.fixed_gauge_frame_id not in frame_ids
+            or isinstance(advance_step_keyframes, bool)
+            or not 1 <= advance_step_keyframes <= 8
         ):
             raise SchurFejWindowRunnerError(
                 "Schur/FEJ frame ordering or gauge is invalid"
@@ -98,15 +148,20 @@ class SchurFejWindowRunner:
                 - prior_ids
                 - {self.fixed_gauge_frame_id}
             )
-            if len(removed) != 1 or removed != already_marginalized:
+            if removed != already_marginalized:
                 raise SchurFejWindowRunnerError(
                     "Schur/FEJ advance did not drop the finalized pose"
                 )
-        marginalize_frame_id = min(
+        body_frame_ids = tuple(
             value
             for value in frame_ids
             if value != self.fixed_gauge_frame_id
         )
+        if advance_step_keyframes >= len(body_frame_ids):
+            raise SchurFejWindowRunnerError(
+                "Schur/FEJ advance would remove every body pose"
+            )
+        marginalize_frame_ids = body_frame_ids[:advance_step_keyframes]
 
         coarse_started = time.perf_counter()
         coarse = self.coarse_solver.solve(
@@ -117,10 +172,10 @@ class SchurFejWindowRunner:
             fixed_pose_ids=overlap,
         )
         coarse_wall = time.perf_counter() - coarse_started
-        solved = self.fixed_lag.advance(
+        solved = self.fixed_lag.advance_batch(
             coarse,
             selected_tracks,
-            marginalize_frame_id=marginalize_frame_id,
+            marginalize_frame_ids=marginalize_frame_ids,
         )
         constraint_counts = {frame_id: 0 for frame_id in frame_ids}
         frame_uid_by_id: dict[int, str] = {}
@@ -148,7 +203,8 @@ class SchurFejWindowRunner:
             "contractId": "jarailsense.gluemap-schur-fej-window-step/v1",
             "firstFrameId": frame_ids[0],
             "lastFrameId": frame_ids[-1],
-            "advanceStepKeyframes": 1,
+            "advanceStepKeyframes": advance_step_keyframes,
+            "marginalizedFrameIds": list(marginalize_frame_ids),
             "fixedGaugeFrameId": self.fixed_gauge_frame_id,
             "coarseFixedWarmStartCount": len(overlap),
             "actualBaCameraFrameUids": frame_uids,
@@ -165,7 +221,7 @@ class SchurFejWindowRunner:
             "coarse": coarse.report,
             "totalWallSeconds": time.perf_counter() - started,
         }
-        return SchurFejWindowStep(
+        return SchurFejWindowBatch(
             window_ordinal=solved.window_ordinal,
             coarse=coarse,
             solved=solved,
