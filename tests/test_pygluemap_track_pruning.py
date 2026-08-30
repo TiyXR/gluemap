@@ -15,6 +15,8 @@ the two image IDs.
 import numpy as np
 import pygluemap
 
+import hashlib
+
 
 def test_connected_components_returns_minimum_integer_root():
     labels = pygluemap.compute_connected_components(
@@ -38,6 +40,23 @@ def test_batch_spatial_intern_preserves_frame_and_input_order():
         2.0,
     )
     assert representatives.tolist() == [0, 3, 3]
+
+
+def test_batch_observation_uids_match_the_python_contract():
+    values = pygluemap.batch_observation_uids(
+        "a" * 64,
+        np.asarray([0, 12], dtype=np.int64),
+        np.asarray([1, 3], dtype=np.int64),
+        ["frame-a", "frame-b"],
+    )
+    expected = []
+    for track, view, frame in ((0, 1, "frame-a"), (12, 3, "frame-b")):
+        payload = (
+            "jarailsense.gluemap-track-observation/v1\0"
+            f"{'a' * 64}\0{track}\0{view}\0{frame}"
+        ).encode("utf-8")
+        expected.append(hashlib.sha256(payload).hexdigest())
+    assert values == expected
 
 
 def _pair_key(a, b):

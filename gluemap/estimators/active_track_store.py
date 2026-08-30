@@ -98,7 +98,7 @@ class ActiveTrackStore:
         self._spatial_buckets_by_frame: dict[
             int, dict[tuple[int, int], set[str]]
         ] = defaultdict(lambda: defaultdict(set))
-        self._edges: dict[tuple[str, str], TrackCorrespondence] = {}
+        self._edges: set[tuple[str, str]] = set()
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
         self._last_accepted_journal_head: str | None = None
@@ -384,24 +384,27 @@ class ActiveTrackStore:
             raise ActiveTrackStoreError("track observation is invalid")
 
     def add_correspondences(self, values: Iterable[TrackCorrespondence]) -> None:
+        self.add_correspondence_pairs(
+            (
+                (value.first_observation_uid, value.second_observation_uid)
+                for value in values
+            )
+        )
+
+    def add_correspondence_pairs(
+        self, values: Iterable[tuple[str, str]]
+    ) -> None:
         if self._pending_release is not None:
             raise ActiveTrackStoreError("cannot ingest while release is pending")
-        for value in values:
-            first = value.first_observation_uid
-            second = value.second_observation_uid
+        for first, second in values:
             if (
                 first == second
                 or first not in self._observations
                 or second not in self._observations
             ):
                 raise ActiveTrackStoreError("track correspondence is invalid")
-            key = tuple(sorted((first, second)))
-            existing = self._edges.get(key)
-            if existing is not None:
-                if existing != value and existing != TrackCorrespondence(
-                    second, first
-                ):
-                    raise ActiveTrackStoreError("correspondence identity was reused")
+            key = (first, second) if first < second else (second, first)
+            if key in self._edges:
                 continue
             first_root = self._union_find.find(first)
             second_root = self._union_find.find(second)
@@ -414,7 +417,7 @@ class ActiveTrackStore:
             self._component_uid_by_root.pop(first_root, None)
             self._component_uid_by_root.pop(second_root, None)
             self._component_uid_by_root[new_root] = component_uid
-            self._edges[key] = value
+            self._edges.add(key)
 
     def _components(self) -> dict[str, list[TrackObservation]]:
         values: dict[str, list[TrackObservation]] = defaultdict(list)
@@ -1022,8 +1025,8 @@ class ActiveTrackStore:
             if not self._spatial_buckets_by_frame[observation.geometry_ordinal]:
                 del self._spatial_buckets_by_frame[observation.geometry_ordinal]
         self._edges = {
-            key: value
-            for key, value in self._edges.items()
+            key
+            for key in self._edges
             if key[0] not in release_uids and key[1] not in release_uids
         }
         self._rebuild_components()

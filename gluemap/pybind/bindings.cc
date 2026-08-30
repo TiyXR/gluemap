@@ -45,6 +45,12 @@ py::array_t<int64_t> BatchSpatialInternWrapper(
     py::array_t<double, py::array::c_style> incoming_y,
     const std::vector<std::string> &incoming_uids, double radius);
 
+std::vector<std::string> BatchObservationUidsWrapper(
+    const std::string &prediction_uid,
+    py::array_t<int64_t, py::array::c_style> track_indexes,
+    py::array_t<int64_t, py::array::c_style> view_indexes,
+    const std::vector<std::string> &frame_uids);
+
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
   return new ceres::ProductManifold<ceres::EigenQuaternionManifold,
@@ -196,4 +202,9 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("incoming_frames"), py::arg("incoming_x"),
         py::arg("incoming_y"), py::arg("incoming_uids"), py::arg("radius"),
         "Resolve one observation batch against a native per-frame spatial hash.");
+
+  m.def("batch_observation_uids", &BatchObservationUidsWrapper,
+        py::arg("prediction_uid"), py::arg("track_indexes"),
+        py::arg("view_indexes"), py::arg("frame_uids"),
+        "Compute stable observation SHA-256 identities with OpenMP workers.");
 }

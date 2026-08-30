@@ -13,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include <openssl/sha.h>
+
 namespace {
 
 int64_t FindRoot(const std::atomic<int64_t> *parents, int64_t node) {
@@ -175,6 +177,40 @@ std::vector<int64_t> BatchSpatialIntern(
   return representatives;
 }
 
+std::string HexSha256(const std::string &payload) {
+  unsigned char digest[SHA256_DIGEST_LENGTH];
+  SHA256(reinterpret_cast<const unsigned char *>(payload.data()),
+         payload.size(), digest);
+  constexpr char hex[] = "0123456789abcdef";
+  std::string result(SHA256_DIGEST_LENGTH * 2, '0');
+  for (size_t index = 0; index < SHA256_DIGEST_LENGTH; ++index) {
+    result[index * 2] = hex[digest[index] >> 4];
+    result[index * 2 + 1] = hex[digest[index] & 0x0f];
+  }
+  return result;
+}
+
+std::vector<std::string> BatchObservationUids(
+    const std::string &prediction_uid, const int64_t *track_indexes,
+    const int64_t *view_indexes, const std::vector<std::string> &frame_uids,
+    int64_t count) {
+  std::vector<std::string> result(count);
+#pragma omp parallel for schedule(static)
+  for (int64_t index = 0; index < count; ++index) {
+    std::string payload = "jarailsense.gluemap-track-observation/v1";
+    payload.push_back('\0');
+    payload.append(prediction_uid);
+    payload.push_back('\0');
+    payload.append(std::to_string(track_indexes[index]));
+    payload.push_back('\0');
+    payload.append(std::to_string(view_indexes[index]));
+    payload.push_back('\0');
+    payload.append(frame_uids[index]);
+    result[index] = HexSha256(payload);
+  }
+  return result;
+}
+
 } // namespace
 
 py::array_t<int64_t> ComputeConnectedComponentsWrapper(
@@ -220,4 +256,23 @@ py::array_t<int64_t> BatchSpatialInternWrapper(
         incoming_frames.size(), radius);
   }
   return VecToArray1D(std::move(representatives));
+}
+
+std::vector<std::string> BatchObservationUidsWrapper(
+    const std::string &prediction_uid,
+    py::array_t<int64_t, py::array::c_style> track_indexes,
+    py::array_t<int64_t, py::array::c_style> view_indexes,
+    const std::vector<std::string> &frame_uids) {
+  if (track_indexes.size() != view_indexes.size() ||
+      track_indexes.size() != static_cast<int64_t>(frame_uids.size())) {
+    throw std::invalid_argument("observation UID arrays differ in length");
+  }
+  std::vector<std::string> result;
+  {
+    py::gil_scoped_release release;
+    result = BatchObservationUids(prediction_uid, track_indexes.data(),
+                                  view_indexes.data(), frame_uids,
+                                  track_indexes.size());
+  }
+  return result;
 }

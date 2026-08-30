@@ -14,6 +14,7 @@ find_package(Eigen3)
 find_package(Ceres REQUIRED)
 find_package(Boost REQUIRED)
 find_package(OpenMP REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 pybind11_add_module(
   pygluemap MODULE
@@ -32,6 +33,7 @@ target_link_libraries(
   ${CERES_LIBRARIES}
   Boost::headers
   OpenMP::OpenMP_CXX)
+target_link_libraries(pygluemap PRIVATE OpenSSL::Crypto)
 target_compile_definitions(pygluemap PRIVATE cxx_std_17)
 if (TARGET Ceres::ceres_cuda_kernels)
     set(CERES_HAS_CUDA TRUE)
