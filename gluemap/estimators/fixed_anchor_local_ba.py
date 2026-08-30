@@ -479,8 +479,8 @@ def refine_fixed_anchor_window(
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,
         "baProblemPolicy": (
-            "persistent-delta"
-            if persistent_problem is not None
+            persistent_ba_session.policy
+            if persistent_ba_session is not None
             else "rebuild-every-window"
         ),
         "persistentProblem": persistent_sync_report,

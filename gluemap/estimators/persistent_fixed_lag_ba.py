@@ -28,6 +28,7 @@ class PersistentFixedLagBaError(ValueError):
 class PersistentFixedLagBaSession:
     """Runner-owned, non-durable holder rebuilt after process recovery."""
 
+    policy: str = "persistent-delta"
     problem: "PersistentFixedLagBaProblem | None" = None
 
 

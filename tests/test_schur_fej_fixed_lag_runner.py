@@ -250,3 +250,68 @@ def test_persistent_problem_matches_rebuild_two_window_solution() -> None:
         rtol=1e-7,
         atol=1e-7,
     )
+
+
+def test_native_rebuild_matches_reconstruction_rebuild() -> None:
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+
+    def run(policy: str):
+        runner = SchurFejFixedLagRunner(
+            fixed_gauge_frame_ids={0},
+            camera_model="PINHOLE",
+            triangulation_device_policy="cuda-required",
+            ba_device_policy="cpu",
+            ceres_cuda_available=False,
+            prior_device_policy="cuda-required",
+            prior_expected_nullity=1,
+            ba_problem_policy=policy,
+        )
+        runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+        return runner.advance(
+            second_coarse, second_tracks, marginalize_frame_id=2
+        )
+
+    rebuilt = run("rebuild-every-window")
+    native = run("native-rebuild-every-window")
+
+    assert native.refined.report["baProblemPolicy"] == (
+        "native-rebuild-every-window"
+    )
+    assert native.refined.report["persistentProblem"][
+        "createdPointCount"
+    ] == 64
+    np.testing.assert_allclose(
+        native.finalized_rotation,
+        rebuilt.finalized_rotation,
+        rtol=1e-8,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        native.finalized_center,
+        rebuilt.finalized_center,
+        rtol=1e-8,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        native.prior.hessian.cpu(),
+        rebuilt.prior.hessian.cpu(),
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        native.prior.gradient.cpu(),
+        rebuilt.prior.gradient.cpu(),
+        rtol=1e-7,
+        atol=1e-7,
+    )

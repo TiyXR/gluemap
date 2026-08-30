@@ -111,6 +111,7 @@ class SchurFejFixedLagRunner:
         if ba_problem_policy not in {
             "rebuild-every-window",
             "persistent-delta",
+            "native-rebuild-every-window",
         }:
             raise SchurFejFixedLagRunnerError("BA problem policy is invalid")
         if ba_linear_solver_ordering_policy not in {"auto", "point-first"}:
@@ -141,8 +142,9 @@ class SchurFejFixedLagRunner:
         self._next_window_ordinal = 0
         self._terminal_finalized = False
         self._persistent_ba_session = (
-            PersistentFixedLagBaSession()
-            if ba_problem_policy == "persistent-delta"
+            PersistentFixedLagBaSession(policy=ba_problem_policy)
+            if ba_problem_policy
+            in {"persistent-delta", "native-rebuild-every-window"}
             else None
         )
 
@@ -256,6 +258,11 @@ class SchurFejFixedLagRunner:
         )
         triangulation_wall = time.perf_counter() - triangulation_started
         solve_started = time.perf_counter()
+        if (
+            self._persistent_ba_session is not None
+            and self.ba_problem_policy == "native-rebuild-every-window"
+        ):
+            self._persistent_ba_session.problem = None
         refined = refine_fixed_anchor_window(
             warm_coarse,
             triangulated,
