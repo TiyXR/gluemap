@@ -109,6 +109,7 @@ class SchurFejFixedLagRunner:
         self._poses: _PoseState | None = None
         self._frozen_intrinsics: np.ndarray | None = None
         self._next_window_ordinal = 0
+        self._terminal_finalized = False
 
     @property
     def prior(self) -> FejPriorState | None:
@@ -117,6 +118,10 @@ class SchurFejFixedLagRunner:
     @property
     def next_window_ordinal(self) -> int:
         return self._next_window_ordinal
+
+    @property
+    def terminal_finalized(self) -> bool:
+        return self._terminal_finalized
 
     @property
     def current_frame_ids(self) -> tuple[int, ...]:
@@ -435,7 +440,42 @@ class SchurFejFixedLagRunner:
             report=report,
         )
         self._next_window_ordinal += 1
+        self._terminal_finalized = True
         return step
+
+    def snapshot_terminal(self) -> dict[str, Any]:
+        """Return the terminal gauge state after every body pose is frozen."""
+        if (
+            not self._terminal_finalized
+            or self._prior is not None
+            or self._poses is None
+            or self._frozen_intrinsics is None
+            or set(self._poses.rotations) != self.fixed_gauge_frame_ids
+            or set(self._poses.centers) != self.fixed_gauge_frame_ids
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag terminal state is unavailable"
+            )
+        state = {
+            "contractId": "jarailsense.gluemap-schur-fej-terminal-state/v1",
+            "status": "passed",
+            "publishable": False,
+            "marginalizationMode": "schur-fej",
+            "nextWindowOrdinal": self._next_window_ordinal,
+            "fixedGaugeFrameIds": sorted(self.fixed_gauge_frame_ids),
+            "activeBodyFrameIds": [],
+            "rotations": {
+                str(key): value.tolist()
+                for key, value in sorted(self._poses.rotations.items())
+            },
+            "centers": {
+                str(key): value.tolist()
+                for key, value in sorted(self._poses.centers.items())
+            },
+            "frozenIntrinsics": self._frozen_intrinsics.tolist(),
+            "prior": None,
+        }
+        return {**state, "stateSha256": _canonical_sha256(state)}
 
     def snapshot(self) -> dict[str, Any]:
         """Return one JSON-compatible state containing the complete FEJ prior."""
@@ -482,6 +522,11 @@ class SchurFejFixedLagRunner:
         state = {
             key: value for key, value in checkpoint.items() if key != "stateSha256"
         }
+        if checkpoint.get("contractId") == (
+            "jarailsense.gluemap-schur-fej-terminal-state/v1"
+        ):
+            self._restore_terminal(checkpoint, state)
+            return
         if (
             checkpoint.get("contractId")
             != "jarailsense.gluemap-schur-fej-checkpoint/v1"
@@ -579,3 +624,46 @@ class SchurFejFixedLagRunner:
             report=dict(prior_value.get("report", {})),
         )
         self._next_window_ordinal = next_ordinal
+        self._terminal_finalized = False
+
+    def _restore_terminal(
+        self, checkpoint: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        rotations = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in checkpoint.get("rotations", {}).items()
+        }
+        centers = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in checkpoint.get("centers", {}).items()
+        }
+        intrinsics = np.asarray(
+            checkpoint.get("frozenIntrinsics"), dtype=np.float64
+        )
+        next_ordinal = checkpoint.get("nextWindowOrdinal")
+        fixed_gauge = set(checkpoint.get("fixedGaugeFrameIds", []))
+        if (
+            checkpoint.get("status") != "passed"
+            or checkpoint.get("publishable") is not False
+            or checkpoint.get("marginalizationMode") != "schur-fej"
+            or checkpoint.get("stateSha256") != _canonical_sha256(state)
+            or checkpoint.get("activeBodyFrameIds") != []
+            or checkpoint.get("prior") is not None
+            or fixed_gauge != self.fixed_gauge_frame_ids
+            or set(rotations) != fixed_gauge
+            or set(centers) != fixed_gauge
+            or any(value.shape != (3, 3) for value in rotations.values())
+            or any(value.shape != (3,) for value in centers.values())
+            or intrinsics.shape != (3, 3)
+            or isinstance(next_ordinal, bool)
+            or not isinstance(next_ordinal, int)
+            or next_ordinal < 1
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag terminal checkpoint state is invalid"
+            )
+        self._poses = _PoseState(rotations=rotations, centers=centers)
+        self._frozen_intrinsics = intrinsics
+        self._prior = None
+        self._next_window_ordinal = next_ordinal
+        self._terminal_finalized = True

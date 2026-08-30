@@ -153,3 +153,18 @@ def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():
     assert drained[-1].report["terminalFinalized"] is True
     assert drained[-1].report["prior"] is None
     assert runner.fixed_lag.current_frame_ids == (0,)
+    terminal = runner.snapshot_terminal()
+    resumed = SchurFejWindowRunner(
+        fixed_gauge_frame_id=0,
+        coarse_solver=_CoarseSolver(centers, intrinsics),
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    resumed.restore(terminal)
+    assert resumed.fixed_lag.terminal_finalized is True
+    assert resumed.fixed_lag.prior is None
+    assert resumed.fixed_lag.current_frame_ids == (0,)

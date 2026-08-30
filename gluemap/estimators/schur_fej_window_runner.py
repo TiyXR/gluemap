@@ -170,6 +170,9 @@ class SchurFejWindowRunner:
     def snapshot(self) -> dict[str, Any]:
         return self.fixed_lag.snapshot()
 
+    def snapshot_terminal(self) -> dict[str, Any]:
+        return self.fixed_lag.snapshot_terminal()
+
     def drain_next(
         self, selected_tracks: list[SelectedTrackState]
     ) -> SchurFejWindowStep:
