@@ -47,6 +47,8 @@ class TrackBudget:
     minimum_visibility: float
     minimum_confidence: float
     minimum_parallax_diagonals: float
+    parallax_backend_policy: str = "cuda-preferred"
+    parallax_microbatch_components: int = 256
 
     @property
     def maximum_active_tracks(self) -> int:
@@ -101,7 +103,22 @@ class ActiveTrackStore:
         self._component_uid_by_root: dict[Any, str] = {}
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
+        self._parallax_backend = self._resolve_parallax_backend()
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
+
+    def _resolve_parallax_backend(self) -> str:
+        import torch
+
+        policy = self.budget.parallax_backend_policy
+        if policy not in {"cuda-required", "cuda-preferred", "cpu"}:
+            raise ActiveTrackStoreError("parallax backend policy is invalid")
+        if policy == "cpu":
+            return "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if policy == "cuda-required":
+            raise ActiveTrackStoreError("CUDA parallax backend is unavailable")
+        return "cpu"
 
     def _validate_budget(self) -> None:
         integer_bounds = {
@@ -125,6 +142,10 @@ class ActiveTrackStore:
             "coverage_grid_rows": (self.budget.coverage_grid_rows, 2),
             "maximum_tracks_per_grid_cell": (
                 self.budget.maximum_tracks_per_grid_cell,
+                1,
+            ),
+            "parallax_microbatch_components": (
+                self.budget.parallax_microbatch_components,
                 1,
             ),
         }
@@ -168,6 +189,14 @@ class ActiveTrackStore:
     @property
     def last_accepted_journal_head(self) -> str | None:
         return self._last_accepted_journal_head
+
+    @property
+    def parallax_backend(self) -> str:
+        return self._parallax_backend
+
+    @property
+    def gpu_used(self) -> bool:
+        return self._parallax_backend == "cuda"
 
     def add_observations(self, values: Iterable[TrackObservation]) -> None:
         if self._pending_release is not None:
@@ -363,11 +392,19 @@ class ActiveTrackStore:
         active_last_ordinal: int,
         freeze_through_ordinal: int,
     ) -> dict[str, Any]:
+        interval = (
+            active_first_ordinal,
+            active_last_ordinal,
+            freeze_through_ordinal,
+        )
+        components = self._components()
+        parallax = self._batch_parallax(components, [interval])[0]
         return self._evaluate_components(
-            self._components(),
+            components,
             active_first_ordinal=active_first_ordinal,
             active_last_ordinal=active_last_ordinal,
             freeze_through_ordinal=freeze_through_ordinal,
+            parallax_by_track=parallax,
         )
 
     def evaluate_batch(
@@ -377,15 +414,129 @@ class ActiveTrackStore:
         """Evaluate one release group while building components only once."""
         values = list(intervals)
         components = self._components()
+        parallax = self._batch_parallax(components, values)
         return [
             self._evaluate_components(
                 components,
                 active_first_ordinal=active_first,
                 active_last_ordinal=active_last,
                 freeze_through_ordinal=freeze_through,
+                parallax_by_track=parallax[index],
             )
-            for active_first, active_last, freeze_through in values
+            for index, (active_first, active_last, freeze_through) in enumerate(values)
         ]
+
+    def _batch_parallax(
+        self,
+        components: dict[str, list[TrackObservation]],
+        intervals: list[tuple[int, int, int]],
+    ) -> list[dict[str, float]]:
+        import torch
+
+        results: list[dict[str, float]] = [dict() for _ in intervals]
+        if not intervals or not components:
+            return results
+        component_values = list(components.items())
+        maximum_observations = max(
+            len(observations) for _, observations in component_values
+        )
+        coordinates = torch.zeros(
+            (len(component_values), maximum_observations, 2),
+            dtype=torch.float32,
+        )
+        ordinals = torch.full(
+            (len(component_values), maximum_observations),
+            -1,
+            dtype=torch.int64,
+        )
+        dimensions = torch.ones(
+            (len(component_values), maximum_observations, 2),
+            dtype=torch.float32,
+        )
+        for index, (_, observations) in enumerate(component_values):
+            count = len(observations)
+            coordinates[index, :count] = torch.tensor(
+                [(value.x, value.y) for value in observations],
+                dtype=torch.float32,
+            )
+            ordinals[index, :count] = torch.tensor(
+                [value.geometry_ordinal for value in observations],
+                dtype=torch.int64,
+            )
+            dimensions[index, :count] = torch.tensor(
+                [
+                    (value.image_width, value.image_height)
+                    for value in observations
+                ],
+                dtype=torch.float32,
+            )
+
+        device = self._parallax_backend
+        coordinates = coordinates.to(device)
+        ordinals = ordinals.to(device)
+        dimensions = dimensions.to(device)
+        active_first = torch.tensor(
+            [value[0] for value in intervals],
+            dtype=torch.int64,
+            device=device,
+        )
+        active_last = torch.tensor(
+            [value[1] for value in intervals],
+            dtype=torch.int64,
+            device=device,
+        )
+        mask = (
+            (ordinals[:, None, :] >= active_first[None, :, None])
+            & (ordinals[:, None, :] <= active_last[None, :, None])
+        )
+        counts = mask.sum(dim=2)
+        first_indexes = mask.to(torch.int64).argmax(dim=2)
+        expanded_coordinates = coordinates[:, None, :, :].expand(
+            -1, len(intervals), -1, -1
+        )
+        gather_indexes = first_indexes[:, :, None, None].expand(-1, -1, 1, 2)
+        first_points = expanded_coordinates.gather(2, gather_indexes).squeeze(2)
+        selected_points = torch.where(
+            mask[:, :, :, None],
+            expanded_coordinates,
+            first_points[:, :, None, :],
+        ).reshape(-1, maximum_observations, 2)
+        expanded_dimensions = dimensions[:, None, :, :].expand(
+            -1, len(intervals), -1, -1
+        )
+        first_dimensions = expanded_dimensions.gather(
+            2, gather_indexes
+        ).squeeze(2)
+        diagonals = torch.sqrt((first_dimensions * first_dimensions).sum(dim=2))
+        diagonals = diagonals.reshape(-1)
+        counts = counts.reshape(-1)
+
+        batch_size = self.budget.parallax_microbatch_components
+        maximum_values: list[float] = []
+        with torch.no_grad():
+            for start in range(0, len(selected_points), batch_size):
+                points = selected_points[start : start + batch_size]
+                squared_norm = (points * points).sum(dim=2)
+                squared_distance = (
+                    squared_norm[:, :, None]
+                    + squared_norm[:, None, :]
+                    - 2.0 * torch.bmm(points, points.transpose(1, 2))
+                )
+                maximum = torch.sqrt(
+                    squared_distance.amax(dim=(1, 2)).clamp_min_(0.0)
+                ) / diagonals[start : start + batch_size]
+                maximum = torch.where(
+                    counts[start : start + batch_size] >= 2,
+                    maximum,
+                    torch.zeros_like(maximum),
+                )
+                maximum_values.extend(maximum.cpu().tolist())
+        interval_count = len(intervals)
+        for flat_index, value in enumerate(maximum_values):
+            component_index, interval_index = divmod(flat_index, interval_count)
+            track_uid = component_values[component_index][0]
+            results[interval_index][track_uid] = value
+        return results
 
     def _evaluate_components(
         self,
@@ -394,6 +545,7 @@ class ActiveTrackStore:
         active_first_ordinal: int,
         active_last_ordinal: int,
         freeze_through_ordinal: int,
+        parallax_by_track: dict[str, float],
     ) -> dict[str, Any]:
         if (
             active_first_ordinal < 0
@@ -414,7 +566,7 @@ class ActiveTrackStore:
             reasons: list[str] = []
             if len(frame_ordinals) < self.budget.minimum_track_views:
                 reasons.append("insufficient-views")
-            parallax = self._parallax(observations)
+            parallax = parallax_by_track.get(track_uid, 0.0)
             if parallax < self.budget.minimum_parallax_diagonals:
                 reasons.append("insufficient-parallax")
             if reasons:
@@ -527,6 +679,11 @@ class ActiveTrackStore:
             "selectedTrackCount": len(selected),
             "bridgeTrackCount": len(bridge_tracks),
             "maximumActiveTracks": self.budget.maximum_active_tracks,
+            "parallaxBackendPolicy": self.budget.parallax_backend_policy,
+            "parallaxBackend": self.parallax_backend,
+            "parallaxMicrobatchComponents": (
+                self.budget.parallax_microbatch_components
+            ),
             "observationCount": self.observation_count,
             "edgeCount": self.edge_count,
             "selectedTrackUidsSha256": _canonical_sha256(selected_track_uids),

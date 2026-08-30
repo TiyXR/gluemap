@@ -98,6 +98,24 @@ def test_release_group_batch_matches_individual_gate_results():
     assert store.evaluate_batch(intervals) == expected
 
 
+def test_parallax_backend_and_microbatch_are_reported():
+    store = ActiveTrackStore(
+        budget(
+            parallax_backend_policy="cpu",
+            parallax_microbatch_components=2,
+        )
+    )
+    add_track(store, 0, [0, 1, 2, 3])
+    report = store.evaluate(
+        active_first_ordinal=0,
+        active_last_ordinal=3,
+        freeze_through_ordinal=1,
+    )
+    assert report["parallaxBackendPolicy"] == "cpu"
+    assert report["parallaxBackend"] == "cpu"
+    assert report["parallaxMicrobatchComponents"] == 2
+
+
 def test_gate_report_is_canonical_across_decimal_key_width_boundary():
     store = ActiveTrackStore(budget(window_size_keyframes=4))
     add_track(store, 0, [8, 9, 10, 11])
