@@ -98,6 +98,25 @@ def test_release_group_batch_matches_individual_gate_results():
     assert store.evaluate_batch(intervals) == expected
 
 
+def test_materialized_gate_reuses_selected_tracks_without_report_payloads():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+    reports, tracks_by_interval = store.evaluate_batch_materialized(
+        [(0, 3, 1)]
+    )
+    report = reports[0]
+    tracks = tracks_by_interval[0]
+    assert report["status"] == "passed"
+    assert len(tracks) == report["selectedTrackCount"] == 2
+    assert all(len(track.observations) == 4 for track in tracks)
+    assert all(
+        [value.geometry_ordinal for value in track.observations] == [0, 1, 2, 3]
+        for track in tracks
+    )
+    assert "selectedTracks" not in report
+
+
 def test_parallax_backend_and_microbatch_are_reported():
     store = ActiveTrackStore(
         budget(

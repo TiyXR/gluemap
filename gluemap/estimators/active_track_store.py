@@ -80,6 +80,14 @@ class TrackCorrespondence:
     second_observation_uid: str
 
 
+@dataclass(frozen=True)
+class SelectedTrackState:
+    """One in-memory BA track selected by the existing GPU gate."""
+
+    track_uid: str
+    observations: tuple[TrackObservation, ...]
+
+
 class ActiveTrackStore:
     """Own candidate tracks only while their observations are in the lag.
 
@@ -516,24 +524,43 @@ class ActiveTrackStore:
         intervals: Iterable[tuple[int, int, int]],
     ) -> list[dict[str, Any]]:
         """Evaluate one release group with one tensor upload and one reduction."""
+        reports, _ = self._evaluate_batch_impl(intervals, materialize_tracks=False)
+        return reports
+
+    def evaluate_batch_materialized(
+        self,
+        intervals: Iterable[tuple[int, int, int]],
+    ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
+        """Return ephemeral selected observations from the same gate pass."""
+        return self._evaluate_batch_impl(intervals, materialize_tracks=True)
+
+    def _evaluate_batch_impl(
+        self,
+        intervals: Iterable[tuple[int, int, int]],
+        *,
+        materialize_tracks: bool,
+    ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         values = list(intervals)
         for active_first, active_last, freeze_through in values:
             self._validate_interval(active_first, active_last, freeze_through)
         components = self._components()
         if not values:
-            return []
+            return [], []
         if not components:
-            return [
-                self._build_report(
-                    interval=value,
-                    candidates=[],
-                    selected=[],
-                    bucket_counts=Counter(),
-                    rejected=Counter({"active-budget-or-cell-cap": 0}),
-                    constraints_per_frame=Counter(),
-                )
-                for value in values
-            ]
+            return (
+                [
+                    self._build_report(
+                        interval=value,
+                        candidates=[],
+                        selected=[],
+                        bucket_counts=Counter(),
+                        rejected=Counter({"active-budget-or-cell-cap": 0}),
+                        constraints_per_frame=Counter(),
+                    )
+                    for value in values
+                ],
+                [[] for _ in values],
+            )
 
         (
             candidates_by_interval,
@@ -560,8 +587,34 @@ class ActiveTrackStore:
             intervals=values,
         )
         reports = []
+        materialized_by_interval: list[list[SelectedTrackState]] = []
+        component_values = list(components.items())
         for index, interval in enumerate(values):
             selected = selected_by_interval[index]
+            materialized = []
+            if materialize_tracks:
+                active_first, active_last, _ = interval
+                for candidate in selected:
+                    component_uid, component_observations = component_values[
+                        candidate["componentIndex"]
+                    ]
+                    observation_by_frame: dict[int, TrackObservation] = {}
+                    for observation in component_observations:
+                        if (
+                            active_first
+                            <= observation.geometry_ordinal
+                            <= active_last
+                        ):
+                            observation_by_frame.setdefault(
+                                observation.geometry_ordinal, observation
+                            )
+                    materialized.append(
+                        SelectedTrackState(
+                            track_uid=component_uid,
+                            observations=tuple(observation_by_frame.values()),
+                        )
+                    )
+            materialized_by_interval.append(materialized)
             for candidate in selected:
                 candidate.pop("componentIndex", None)
             reports.append(
@@ -574,7 +627,7 @@ class ActiveTrackStore:
                     constraints_per_frame=constraints_by_interval[index],
                 )
             )
-        return reports
+        return reports, materialized_by_interval
 
     @staticmethod
     def _validate_interval(
