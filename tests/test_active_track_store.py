@@ -15,6 +15,7 @@ def budget(**changes):
     values = {
         "window_size_keyframes": 4,
         "query_tracks_per_keyframe": 8,
+        "maximum_candidate_observations_per_keyframe": 16,
         "active_track_budget_per_keyframe": 2,
         "minimum_constraints_per_keyframe": 1,
         "minimum_bridge_tracks": 1,
@@ -23,6 +24,7 @@ def budget(**changes):
         "coverage_grid_rows": 2,
         "selection_time_bin_seconds": 0.2,
         "maximum_tracks_per_grid_cell": 2,
+        "intra_image_merge_radius_pixels": 2.0,
         "minimum_parallax_diagonals": 0.005,
         "maximum_match_error_pixels": 2.0,
     }
@@ -163,10 +165,30 @@ def test_release_requires_accepted_journal_head_and_rebuilds_components():
 
 
 def test_per_frame_observation_bound_and_identity_reuse_are_rejected():
-    store = ActiveTrackStore(budget(query_tracks_per_keyframe=2))
+    store = ActiveTrackStore(
+        budget(
+            query_tracks_per_keyframe=2,
+            maximum_candidate_observations_per_keyframe=2,
+        )
+    )
     store.add_observations([observation(0, 0), observation(1, 0)])
     with pytest.raises(ActiveTrackStoreError, match="bound"):
         store.add_observations([observation(2, 0)])
     changed = TrackObservation(**{**observation(0, 0).__dict__, "x": 99.0})
     with pytest.raises(ActiveTrackStoreError, match="reused"):
         store.add_observations([changed])
+
+
+def test_overlapping_stars_merge_nearby_observations_without_new_files():
+    store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
+    first = observation(0, 0, x=50.0, y=20.0)
+    nearby = TrackObservation(
+        **{
+            **observation(1, 0, x=51.5, y=21.0).__dict__,
+            "observation_uid": "second-star-candidate",
+        }
+    )
+    first_uid = store.intern_observation(first)
+    second_uid = store.intern_observation(nearby)
+    assert second_uid == first_uid
+    assert store.observation_count == 1

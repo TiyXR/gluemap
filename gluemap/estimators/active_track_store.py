@@ -34,6 +34,7 @@ def _require_sha256(value: str, scope: str) -> None:
 class TrackBudget:
     window_size_keyframes: int
     query_tracks_per_keyframe: int
+    maximum_candidate_observations_per_keyframe: int
     active_track_budget_per_keyframe: int
     minimum_constraints_per_keyframe: int
     minimum_bridge_tracks: int
@@ -42,6 +43,7 @@ class TrackBudget:
     coverage_grid_rows: int
     selection_time_bin_seconds: float
     maximum_tracks_per_grid_cell: int
+    intra_image_merge_radius_pixels: float
     minimum_parallax_diagonals: float
     maximum_match_error_pixels: float
 
@@ -91,6 +93,9 @@ class ActiveTrackStore:
         self._validate_budget()
         self._observations: dict[str, TrackObservation] = {}
         self._observations_by_frame: dict[int, set[str]] = defaultdict(set)
+        self._spatial_buckets_by_frame: dict[
+            int, dict[tuple[int, int], set[str]]
+        ] = defaultdict(lambda: defaultdict(set))
         self._edges: dict[tuple[str, str], TrackCorrespondence] = {}
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
@@ -102,6 +107,10 @@ class ActiveTrackStore:
         integer_bounds = {
             "window_size_keyframes": (self.budget.window_size_keyframes, 2),
             "query_tracks_per_keyframe": (self.budget.query_tracks_per_keyframe, 1),
+            "maximum_candidate_observations_per_keyframe": (
+                self.budget.maximum_candidate_observations_per_keyframe,
+                1,
+            ),
             "active_track_budget_per_keyframe": (
                 self.budget.active_track_budget_per_keyframe,
                 1,
@@ -125,6 +134,8 @@ class ActiveTrackStore:
         if (
             not isfinite(self.budget.selection_time_bin_seconds)
             or self.budget.selection_time_bin_seconds <= 0
+            or not isfinite(self.budget.intra_image_merge_radius_pixels)
+            or self.budget.intra_image_merge_radius_pixels <= 0
             or not isfinite(self.budget.minimum_parallax_diagonals)
             or self.budget.minimum_parallax_diagonals < 0
             or not isfinite(self.budget.maximum_match_error_pixels)
@@ -136,6 +147,13 @@ class ActiveTrackStore:
             > self.budget.maximum_active_tracks
         ):
             raise ActiveTrackStoreError("minimum constraints exceed the active budget")
+        if (
+            self.budget.maximum_candidate_observations_per_keyframe
+            < self.budget.query_tracks_per_keyframe
+        ):
+            raise ActiveTrackStoreError(
+                "candidate observation bound is below the query track count"
+            )
 
     @property
     def observation_count(self) -> int:
@@ -160,12 +178,55 @@ class ActiveTrackStore:
                     raise ActiveTrackStoreError("observation identity was reused")
                 continue
             frame_values = self._observations_by_frame[value.geometry_ordinal]
-            if len(frame_values) >= self.budget.query_tracks_per_keyframe:
+            if (
+                len(frame_values)
+                >= self.budget.maximum_candidate_observations_per_keyframe
+            ):
                 raise ActiveTrackStoreError("per-keyframe observation bound exceeded")
             self._observations[value.observation_uid] = value
             frame_values.add(value.observation_uid)
+            self._add_spatial_observation(value)
             root = self._union_find.find(value.observation_uid)
             self._component_uid_by_root[root] = value.observation_uid
+
+    def _spatial_bucket(self, value: TrackObservation) -> tuple[int, int]:
+        radius = self.budget.intra_image_merge_radius_pixels
+        return floor(value.x / radius), floor(value.y / radius)
+
+    def _add_spatial_observation(self, value: TrackObservation) -> None:
+        self._spatial_buckets_by_frame[value.geometry_ordinal][
+            self._spatial_bucket(value)
+        ].add(value.observation_uid)
+
+    def intern_observation(self, value: TrackObservation) -> str:
+        """Return a stable nearby observation UID or insert ``value``.
+
+        Overlapping Stars often predict the same image keypoint more than once.
+        The caller processes Stars in deterministic center order; this method
+        merges nearby predictions without materializing a per-Star keypoint
+        file or allowing overlap degree to multiply resident state.
+        """
+
+        self._validate_observation(value)
+        bucket = self._spatial_bucket(value)
+        radius_squared = self.budget.intra_image_merge_radius_pixels**2
+        candidates: list[tuple[float, str]] = []
+        frame_buckets = self._spatial_buckets_by_frame[value.geometry_ordinal]
+        for column_delta in (-1, 0, 1):
+            for row_delta in (-1, 0, 1):
+                for uid in frame_buckets.get(
+                    (bucket[0] + column_delta, bucket[1] + row_delta), ()
+                ):
+                    existing = self._observations[uid]
+                    distance_squared = (existing.x - value.x) ** 2 + (
+                        existing.y - value.y
+                    ) ** 2
+                    if distance_squared <= radius_squared:
+                        candidates.append((distance_squared, uid))
+        if candidates:
+            return min(candidates)[1]
+        self.add_observations([value])
+        return value.observation_uid
 
     def _validate_observation(self, value: TrackObservation) -> None:
         if (
@@ -471,6 +532,17 @@ class ActiveTrackStore:
             frame_values.remove(uid)
             if not frame_values:
                 del self._observations_by_frame[observation.geometry_ordinal]
+            bucket = self._spatial_bucket(observation)
+            spatial_values = self._spatial_buckets_by_frame[
+                observation.geometry_ordinal
+            ][bucket]
+            spatial_values.remove(uid)
+            if not spatial_values:
+                del self._spatial_buckets_by_frame[
+                    observation.geometry_ordinal
+                ][bucket]
+            if not self._spatial_buckets_by_frame[observation.geometry_ordinal]:
+                del self._spatial_buckets_by_frame[observation.geometry_ordinal]
         self._edges = {
             key: value
             for key, value in self._edges.items()
