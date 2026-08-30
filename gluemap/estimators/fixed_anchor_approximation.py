@@ -96,6 +96,7 @@ class FixedAnchorApproximationSolver:
         *,
         valid_pose_threshold: float = 0.05,
         sequential_neighbor_distance: int = 1,
+        sequential_edges: set[tuple[int, int]] | None = None,
         camera_model: str = "SIMPLE_PINHOLE",
     ) -> None:
         if not 0 <= valid_pose_threshold <= 1:
@@ -106,6 +107,14 @@ class FixedAnchorApproximationSolver:
             )
         self.valid_pose_threshold = valid_pose_threshold
         self.sequential_neighbor_distance = sequential_neighbor_distance
+        self.sequential_edges = (
+            {
+                (min(first, second), max(first, second))
+                for first, second in sequential_edges
+            }
+            if sequential_edges is not None
+            else None
+        )
         self.camera_model = camera_model
 
     def solve(
@@ -156,13 +165,21 @@ class FixedAnchorApproximationSolver:
             use_ceres_rotation_averaging=True,
         )
         gluer = GlobalGluer(args)
-        gluer.sequential_edges = {
-            (first_local, second_local)
-            for first_local, first_global in local_to_global.items()
-            for second_local, second_global in local_to_global.items()
-            if first_local < second_local
-            and second_global - first_global <= self.sequential_neighbor_distance
-        }
+        if self.sequential_edges is None:
+            gluer.sequential_edges = {
+                (first_local, second_local)
+                for first_local, first_global in local_to_global.items()
+                for second_local, second_global in local_to_global.items()
+                if first_local < second_local
+                and second_global - first_global
+                <= self.sequential_neighbor_distance
+            }
+        else:
+            gluer.sequential_edges = {
+                (global_to_local[first], global_to_local[second])
+                for first, second in self.sequential_edges
+                if first in global_to_local and second in global_to_local
+            }
 
         started = time.perf_counter()
         (

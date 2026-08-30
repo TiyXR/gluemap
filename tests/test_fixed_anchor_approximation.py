@@ -70,3 +70,11 @@ def test_next_window_keeps_overlap_anchor_exact() -> None:
     assert second.report["fixedPoseCount"] == 3
     assert second.report["fixedAnchorMaximumRotationMatrixDelta"] < 1e-12
     assert second.report["fixedAnchorMaximumCenterDelta"] == 0
+
+
+def test_solver_keeps_exact_declared_sequential_edges() -> None:
+    solver = FixedAnchorApproximationSolver(
+        sequential_neighbor_distance=1,
+        sequential_edges={(0, 2), (1, 3)},
+    )
+    assert solver.sequential_edges == {(0, 2), (1, 3)}

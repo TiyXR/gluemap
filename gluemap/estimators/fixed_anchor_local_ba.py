@@ -215,9 +215,21 @@ def refine_fixed_anchor_window(
         raise FixedAnchorLocalBaError("BA backend changed across refinement passes")
     ceres = getattr(summaries[-1], "ceres_summary", summaries[-1])
     termination = getattr(summaries[-1], "termination_type", None)
+    termination_names = [
+        getattr(
+            getattr(summary, "termination_type", None),
+            "name",
+            str(getattr(summary, "termination_type", None)),
+        )
+        for summary in summaries
+    ]
+    solve_passed = all(
+        value in {"CONVERGENCE", "USER_SUCCESS"}
+        for value in termination_names
+    )
     report = {
         "contractId": "jarailsense.gluemap-fixed-anchor-local-ba/v1",
-        "status": "passed",
+        "status": "passed" if solve_passed else "failed",
         "publishable": False,
         "diagnosticMode": "fixed-anchor-approximation",
         "requestedDevicePolicy": device_policy,
@@ -244,11 +256,7 @@ def refine_fixed_anchor_window(
         "refinementPasses": [
             {
                 "passOrdinal": index,
-                "termination": getattr(
-                    getattr(summary, "termination_type", None),
-                    "name",
-                    str(getattr(summary, "termination_type", None)),
-                ),
+                "termination": termination_names[index],
                 "initialCost": float(
                     getattr(summary, "ceres_summary", summary).initial_cost
                 ),

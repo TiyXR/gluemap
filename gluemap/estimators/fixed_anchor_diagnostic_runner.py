@@ -178,6 +178,10 @@ class FixedAnchorDiagnosticRunner:
             device_policy=self.ba_device_policy,
             ceres_cuda_available=self.ceres_cuda_available,
         )
+        if refined.report["status"] != "passed":
+            raise FixedAnchorDiagnosticRunnerError(
+                "local BA did not reach an accepted termination"
+            )
         ba_wall = time.perf_counter() - ba_started
 
         overlap_rotation_delta = 0.0
