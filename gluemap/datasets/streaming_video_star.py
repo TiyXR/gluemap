@@ -56,6 +56,7 @@ class StreamingVideoStarDataset(IterableDataset):
         stream_factory: Callable[[], Iterator[DecodedRouteFrame]] | None = None,
         query_point_provider: Callable[[torch.Tensor], torch.Tensor]
         | None = None,
+        query_extractor_checkpoint: str | Path | None = None,
         require_cuda: bool = True,
     ) -> None:
         super().__init__()
@@ -69,6 +70,11 @@ class StreamingVideoStarDataset(IterableDataset):
         self.require_cuda = require_cuda
         self._stream_factory = stream_factory
         self._query_point_provider = query_point_provider
+        self.query_extractor_checkpoint = (
+            None
+            if query_extractor_checkpoint is None
+            else Path(query_extractor_checkpoint)
+        )
         self._extractor: ALIKED | None = None
         self.peak_resident_frames = 0
         self.released_frame_count = 0
@@ -184,14 +190,40 @@ class StreamingVideoStarDataset(IterableDataset):
         if self._query_point_provider is not None:
             return self._query_point_provider(query_image)
         if self._extractor is None:
-            self._extractor = (
-                ALIKED(
-                    max_num_keypoints=self.num_tracks,
-                    detection_threshold=0.005,
+            if (
+                self.query_extractor_checkpoint is None
+                or not self.query_extractor_checkpoint.is_file()
+            ):
+                raise GpuFrameStreamError(
+                    "locked ALIKED query-extractor checkpoint is required"
                 )
-                .eval()
-                .to(query_image.device)
-            )
+            original_loader = torch.hub.load_state_dict_from_url
+
+            def load_locked_state_dict(
+                url: str, *args: Any, **kwargs: Any
+            ) -> dict[str, torch.Tensor]:
+                if not url.endswith("/aliked-n16.pth"):
+                    raise GpuFrameStreamError(
+                        "ALIKED requested an unexpected checkpoint"
+                    )
+                return torch.load(
+                    self.query_extractor_checkpoint,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+
+            torch.hub.load_state_dict_from_url = load_locked_state_dict
+            try:
+                self._extractor = (
+                    ALIKED(
+                        max_num_keypoints=self.num_tracks,
+                        detection_threshold=0.005,
+                    )
+                    .eval()
+                    .to(query_image.device)
+                )
+            finally:
+                torch.hub.load_state_dict_from_url = original_loader
         return get_query_points_from_extractors(
             query_image,
             [self._extractor],

@@ -1,8 +1,16 @@
+import subprocess
+import sys
 from argparse import Namespace
+from pathlib import Path
 
 import torch
+from torch.nn.attention import SDPBackend
 from torch.utils.data import IterableDataset
 
+from gluemap.controllers.star_inference import (
+    pi3_sdpa_compatibility,
+    resolve_pi3_sdpa_backend,
+)
 from gluemap.controllers.streaming_star_inference import (
     StreamingStarInferenceError,
     StreamingStarInferencePipeline,
@@ -54,6 +62,7 @@ def args(**overrides):
         "batch_size": 1,
         "distributed": False,
         "use_dummy_tracks": False,
+        "enforce_g0_clean_process": False,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -64,6 +73,36 @@ def test_recursive_output_detach_keeps_structure():
     moved = move_output_to_cpu(value)
     assert moved["a"][0].device.type == "cpu"
     assert moved["a"][1][0].tolist() == [2]
+
+
+def test_pre_ampere_pi3_attention_replaces_flash_with_math(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda _device: (6, 1)
+    )
+    original = torch.nn.attention.sdpa_kernel
+
+    def recording(backends):
+        calls.append(backends)
+        return original(SDPBackend.MATH)
+
+    monkeypatch.setattr(torch.nn.attention, "sdpa_kernel", recording)
+    assert resolve_pi3_sdpa_backend("cuda:0") == "math"
+    with pi3_sdpa_compatibility("cuda:0") as backend:
+        with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+            pass
+    assert backend == "math"
+    assert calls == [[SDPBackend.MATH]]
+
+
+def test_ampere_pi3_attention_keeps_native_flash(monkeypatch):
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda _device: (8, 9)
+    )
+    assert resolve_pi3_sdpa_backend("cuda:0") == "flash"
+    with pi3_sdpa_compatibility("cuda:0") as backend:
+        assert backend == "flash"
 
 
 def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
@@ -94,3 +133,21 @@ def test_streaming_pipeline_rejects_distributed_execution():
         assert "one process" in str(error)
     else:
         raise AssertionError("distributed streaming was not rejected")
+
+
+def test_feature_extractor_import_does_not_eagerly_load_faiss():
+    source_root = Path(__file__).resolve().parents[1]
+    code = (
+        "import sys;"
+        f"sys.path.insert(0, {str(source_root)!r});"
+        "import gluemap.estimators.feature_extraction;"
+        "assert not any(x == 'faiss' or x.startswith('faiss.') "
+        "for x in sys.modules)"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

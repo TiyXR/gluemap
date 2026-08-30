@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -52,6 +53,27 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         if not getattr(dataset, "gpu_resident_stream", False):
             raise StreamingStarInferenceError(
                 "streaming Star inference requires a GPU-resident dataset"
+            )
+        forbidden_modules = (
+            "faiss",
+            "vpr_model",
+            "mast3r",
+            "gluemap.controllers.image_retrieval",
+        )
+        loaded_forbidden_before = sorted(
+            name
+            for name in sys.modules
+            if any(
+                name == prefix or name.startswith(f"{prefix}.")
+                for prefix in forbidden_modules
+            )
+        )
+        if loaded_forbidden_before and getattr(
+            self.args, "enforce_g0_clean_process", True
+        ):
+            raise StreamingStarInferenceError(
+                "G0 process imported retrieval/Doppelgangers modules: "
+                + ",".join(loaded_forbidden_before)
             )
 
         data_loader = self._make_dataloader(dataset)
@@ -113,6 +135,22 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             raise StreamingStarInferenceError(
                 "streaming Star output count differs from dataset"
             )
+        loaded_forbidden = sorted(
+            name
+            for name in sys.modules
+            if any(
+                name == prefix or name.startswith(f"{prefix}.")
+                for prefix in forbidden_modules
+            )
+        )
+        imported_forbidden = sorted(
+            set(loaded_forbidden) - set(loaded_forbidden_before)
+        )
+        if imported_forbidden:
+            raise StreamingStarInferenceError(
+                "G0 inference imported retrieval/Doppelgangers modules: "
+                + ",".join(imported_forbidden)
+            )
         peak_allocated = 0
         peak_reserved = 0
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
@@ -128,8 +166,13 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             "saladLoadCount": 0,
             "descriptorArtifactCount": 0,
             "faissArtifactCount": 0,
+            "forbiddenModulesPresentBefore": loaded_forbidden_before,
+            "forbiddenModuleImportDelta": imported_forbidden,
             "device": str(self.device),
             "dtype": str(self.dtype),
+            "resolvedAttentionBackend": getattr(
+                batch_inference, "resolved_attention_backend", "native"
+            ),
             "peakCudaAllocatedBytes": peak_allocated,
             "peakCudaReservedBytes": peak_reserved,
             "peakResidentFrames": int(

@@ -10,7 +10,11 @@ import torch
 
 from gluemap.controllers.base_inference import BaseInferencePipeline
 from gluemap.datasets.streaming_video_star import StreamingVideoStarDataset
-from gluemap.video.gpu_frame_stream import DecodedRouteFrame, FrameRoute
+from gluemap.video.gpu_frame_stream import (
+    DecodedRouteFrame,
+    FrameRoute,
+    GpuFrameStreamError,
+)
 
 
 def routes() -> tuple[FrameRoute, ...]:
@@ -115,3 +119,17 @@ def test_gpu_stream_dataloader_forces_main_process_without_pin_memory() -> None:
     args.distributed = True
     with pytest.raises(ValueError, match="DistributedSampler"):
         pipeline._make_dataloader(dataset)
+
+
+def test_streaming_dataset_requires_locked_query_extractor_checkpoint() -> None:
+    dataset = StreamingVideoStarDataset(
+        "fixture.mp4",
+        routes(),
+        np.asarray([[0, 1], [1, 2], [2, 3], [3, 4]]),
+        maximum_decoder_frames=4,
+        maximum_resident_frames=3,
+        stream_factory=stream,
+        require_cuda=False,
+    )
+    with pytest.raises(GpuFrameStreamError, match="locked ALIKED"):
+        next(iter(dataset))

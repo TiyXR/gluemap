@@ -1,19 +1,70 @@
+from __future__ import annotations
+
 import argparse
 import logging
 import time
-from typing import ClassVar
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
 
 from gluemap.controllers.base_inference import BaseInferencePipeline
-from gluemap.datasets.star import BaseStarDataset
 from gluemap.estimators.covisibility_extraction import CovisibilityExtraction
 from gluemap.estimators.track_inference import TrackInference
 from gluemap.ff_inference.local_inference import create_local_inference
 from gluemap.utils.model_loader import load_models
 
+if TYPE_CHECKING:
+    from gluemap.datasets.star import BaseStarDataset
+
 logger = logging.getLogger(__name__)
+
+
+def resolve_pi3_sdpa_backend(device: str | torch.device) -> str:
+    """Return the Pi3 attention backend that is valid on this GPU."""
+    resolved = torch.device(device)
+    if resolved.type != "cuda":
+        return "native"
+    major, _minor = torch.cuda.get_device_capability(resolved)
+    return "flash" if major >= 8 else "math"
+
+
+@contextmanager
+def pi3_sdpa_compatibility(
+    device: str | torch.device,
+) -> Iterator[str]:
+    """Make upstream Pi3 bf16 attention runnable on pre-Ampere GPUs.
+
+    Pi3 requests Flash SDPA unconditionally for bf16 tensors. PyTorch only
+    provides that kernel on sm80+, so a P6000 (sm61) otherwise aborts instead
+    of falling back. Keep the upstream submodule clean and replace only that
+    context-manager request while one Pi3 forward is active.
+    """
+    backend = resolve_pi3_sdpa_backend(device)
+    if backend != "math":
+        yield backend
+        return
+
+    original = torch.nn.attention.sdpa_kernel
+
+    def compatible(backends):
+        values = backends if isinstance(backends, list) else [backends]
+        if torch.nn.attention.SDPBackend.FLASH_ATTENTION in values:
+            values = [
+                torch.nn.attention.SDPBackend.MATH
+                if value == torch.nn.attention.SDPBackend.FLASH_ATTENTION
+                else value
+                for value in values
+            ]
+        return original(values)
+
+    torch.nn.attention.sdpa_kernel = compatible
+    try:
+        yield backend
+    finally:
+        torch.nn.attention.sdpa_kernel = original
 
 
 class BatchInferenceStar:
@@ -37,6 +88,11 @@ class BatchInferenceStar:
         self.model_track = model_track
         self.device = device
         self.dtype = dtype
+        self.resolved_attention_backend = (
+            resolve_pi3_sdpa_backend(device)
+            if model_type == "pi3"
+            else "native"
+        )
 
         self.local_inference = create_local_inference(
             model, model_type, device, dtype
@@ -127,7 +183,14 @@ class BatchInferenceStar:
         # Local inference (timed)
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        predictions = self.local_inference.predict(batch)
+        compatibility = (
+            pi3_sdpa_compatibility(self.device)
+            if self.model_type == "pi3"
+            else nullcontext("native")
+        )
+        with compatibility as attention_backend:
+            predictions = self.local_inference.predict(batch)
+        self.resolved_attention_backend = attention_backend
         torch.cuda.synchronize()
         forward_time = time.perf_counter() - t0
 
