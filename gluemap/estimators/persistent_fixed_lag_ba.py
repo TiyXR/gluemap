@@ -361,6 +361,14 @@ class PersistentFixedLagBaProblem:
             ],
             dtype=np.float64,
         )
+        fixed_pose_flags = np.fromiter(
+            (
+                int(observation.geometry_ordinal) in fixed_pose_ids
+                for _, _, observation in entering_observations
+            ),
+            dtype=np.uint8,
+            count=len(entering_observations),
+        )
         if entering_observations:
             if self.policy == "native-rebuild-every-window":
                 native_batch = (
@@ -369,6 +377,7 @@ class PersistentFixedLagBaProblem:
                         self.camera_model_id,
                         point_addresses,
                         pose_addresses,
+                        fixed_pose_flags,
                         int(self.camera_params.ctypes.data),
                         observation_xy,
                         self.loss_function,
@@ -410,14 +419,13 @@ class PersistentFixedLagBaProblem:
             for frame_id in frame_ids:
                 pose = self.poses[frame_id]
                 if not self.problem.has_parameter_block(pose.values):
+                    if frame_id in fixed_pose_ids:
+                        continue
                     raise PersistentFixedLagBaError(
-                        "native rebuild pose parameter is absent"
+                        "native rebuild variable pose parameter is absent"
                     )
                 self.problem.set_manifold(pose.values, pose.manifold)
-                if frame_id in fixed_pose_ids:
-                    self.problem.set_parameter_block_constant(pose.values)
-                else:
-                    self.problem.set_parameter_block_variable(pose.values)
+                self.problem.set_parameter_block_variable(pose.values)
         native_batch_wall_seconds = time.perf_counter() - native_batch_started
         self._ordered_frame_ids = tuple(int(value) for value in frame_ids)
         self._ordered_track_uids = tuple(track_by_uid)
@@ -515,9 +523,11 @@ class PersistentFixedLagBaProblem:
                 (
                     self.poses[value].values.ctypes.data
                     for value in self._ordered_frame_ids
+                    if self.problem.has_parameter_block(
+                        self.poses[value].values
+                    )
                 ),
                 dtype=np.uint64,
-                count=len(self._ordered_frame_ids),
             )
             pygluemap.solve_with_ba_ordering(
                 options,

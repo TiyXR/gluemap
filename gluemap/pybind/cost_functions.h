@@ -8,6 +8,37 @@
 #include "vendor/colmap/estimators/cost_functions/reprojection_error.h"
 #include "vendor/colmap/estimators/cost_functions/utils.h"
 
+namespace colmap {
+
+// The upstream COLMAP functor is intentionally omitted from the reduced
+// vendored header. Fixed-lag BA needs the same fixed-pose topology as
+// DefaultBundleAdjuster, so retain the exact two-parameter formulation here.
+template <typename CameraModel>
+class ReprojErrorConstantPoseCostFunctor
+    : public AutoDiffCostFunctor<
+          ReprojErrorConstantPoseCostFunctor<CameraModel>, 2, 3,
+          CameraModel::num_params> {
+public:
+  ReprojErrorConstantPoseCostFunctor(const Eigen::Vector2d &point2D,
+                                     const Rigid3d &cam_from_world)
+      : cam_from_world_(cam_from_world), reproj_cost_(point2D) {}
+
+  template <typename T>
+  bool operator()(const T *const point3D_in_world,
+                  const T *const camera_params, T *residuals) const {
+    const Eigen::Matrix<T, 7, 1> cam_from_world =
+        cam_from_world_.params.cast<T>();
+    return reproj_cost_(point3D_in_world, cam_from_world.data(),
+                        camera_params, residuals);
+  }
+
+private:
+  const Rigid3d cam_from_world_;
+  const ReprojErrorCostFunctor<CameraModel> reproj_cost_;
+};
+
+} // namespace colmap
+
 // ----------------------------------------
 // FejPosePriorCostFunction
 // ----------------------------------------
