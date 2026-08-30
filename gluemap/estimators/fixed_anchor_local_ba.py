@@ -14,6 +14,14 @@ from gluemap.estimators.fixed_anchor_approximation import (
     FixedAnchorWindowSolution,
 )
 from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
+from gluemap.estimators.fixed_lag_ceres_linearization import (
+    CeresProblemLinearization,
+    capture_ceres_problem_linearization,
+)
+from gluemap.estimators.fixed_lag_prior import (
+    FejPriorState,
+    marginalize_ceres_linearization,
+)
 from gluemap.utils.colmap import camera_from_intrinsics_matrix
 from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
@@ -30,6 +38,7 @@ class FixedAnchorLocalBaSolution:
     intrinsics: np.ndarray
     track_point3d_ids: dict[str, int]
     reconstruction: pycolmap.Reconstruction
+    next_prior: FejPriorState | None
     report: dict[str, Any]
 
 
@@ -60,6 +69,12 @@ def refine_fixed_anchor_window(
     linear_solver_policy: str = "auto",
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
+    previous_prior: FejPriorState | None = None,
+    marginalize_pose_id: int | None = None,
+    prior_device_policy: str = "cuda-preferred",
+    prior_relative_rank_threshold: float = 1e-10,
+    prior_maximum_condition_estimate: float | None = None,
+    prior_expected_nullity: int | None = None,
 ) -> FixedAnchorLocalBaSolution:
     """Run local BA over one fixed-lag window with canonical overlap poses."""
     frame_ids = tuple(coarse.frame_ids)
@@ -76,6 +91,15 @@ def refine_fixed_anchor_window(
         raise FixedAnchorLocalBaError("BA refinement pass count is invalid")
     if not tracks:
         raise FixedAnchorLocalBaError("triangulated track set is empty")
+    if previous_prior is not None and set(previous_prior.camera_ids) & fixed_pose_ids:
+        raise FixedAnchorLocalBaError("FEJ prior pose cannot also be fixed")
+    if previous_prior is not None and set(previous_prior.camera_ids) - frame_id_set:
+        raise FixedAnchorLocalBaError("FEJ prior pose is outside the window")
+    if marginalize_pose_id is not None and (
+        marginalize_pose_id not in frame_id_set
+        or marginalize_pose_id in fixed_pose_ids
+    ):
+        raise FixedAnchorLocalBaError("marginalized pose identity is invalid")
 
     matrix_k = _shared_intrinsics_matrix(intrinsics)
     frame_uid_by_id: dict[int, str] = {}
@@ -176,7 +200,13 @@ def refine_fixed_anchor_window(
     }
     solve_started = time.perf_counter()
     summaries = []
-    for _ in range(refinement_passes):
+    captured_linearization: list[CeresProblemLinearization] = []
+    variable_image_ids = {
+        frame_id: image_id_by_frame[frame_id]
+        for frame_id in frame_ids
+        if frame_id not in fixed_pose_ids
+    }
+    for pass_ordinal in range(refinement_passes):
         reconstruction, _, summary = bundle_adjustment(
             reconstruction,
             virtual_reconstruction=None,
@@ -188,9 +218,43 @@ def refine_fixed_anchor_window(
             fix_intrinsics=True,
             device_policy=device_policy,
             ceres_cuda_available=ceres_cuda_available,
+            fej_prior=previous_prior,
+            fej_prior_image_ids=(
+                {
+                    frame_id: image_id_by_frame[frame_id]
+                    for frame_id in previous_prior.camera_ids
+                }
+                if previous_prior is not None
+                else None
+            ),
+            post_solve_problem_callback=(
+                lambda problem, current: captured_linearization.append(
+                    capture_ceres_problem_linearization(
+                        problem,
+                        current,
+                        variable_image_ids,
+                    )
+                )
+                if marginalize_pose_id is not None
+                and pass_ordinal == refinement_passes - 1
+                else None
+            ),
         )
         summaries.append(summary)
     solve_wall = time.perf_counter() - solve_started
+    next_prior = None
+    if marginalize_pose_id is not None:
+        if len(captured_linearization) != 1:
+            raise FixedAnchorLocalBaError("Ceres linearization capture is incomplete")
+        next_prior = marginalize_ceres_linearization(
+            captured_linearization[0],
+            eliminate_camera_id=marginalize_pose_id,
+            previous_prior=previous_prior,
+            device_policy=prior_device_policy,
+            relative_rank_threshold=prior_relative_rank_threshold,
+            maximum_condition_estimate=prior_maximum_condition_estimate,
+            expected_nullity=prior_expected_nullity,
+        )
 
     rotations: dict[int, np.ndarray] = {}
     centers: dict[int, np.ndarray] = {}
@@ -274,6 +338,7 @@ def refine_fixed_anchor_window(
         ],
         "maximumFixedRotationMatrixDelta": maximum_fixed_rotation_delta,
         "maximumFixedCenterDelta": maximum_fixed_center_delta,
+        "prior": None if next_prior is None else next_prior.report,
     }
     return FixedAnchorLocalBaSolution(
         frame_ids=frame_ids,
@@ -282,5 +347,6 @@ def refine_fixed_anchor_window(
         intrinsics=np.asarray(reconstruction.cameras[1].calibration_matrix()),
         track_point3d_ids=track_point3d_ids,
         reconstruction=reconstruction,
+        next_prior=next_prior,
         report=report,
     )

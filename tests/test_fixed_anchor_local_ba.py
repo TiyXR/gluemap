@@ -97,6 +97,80 @@ def test_local_ba_keeps_fixed_overlap_poses() -> None:
     assert solution.report["maximumFixedCenterDelta"] == 0
     assert solution.report["ceresThreadsGiven"] >= 1
     assert solution.report["ceresThreadsUsed"] >= 1
+    assert solution.next_prior is None
     assert np.allclose(solution.centers[0], centers[0])
     assert np.allclose(solution.centers[1], centers[1])
     assert solution.report["finalCost"] <= solution.report["initialCost"]
+
+
+def test_local_ba_emits_gpu_schur_fej_prior() -> None:
+    frame_count = 5
+    rotations = {frame: np.eye(3) for frame in range(frame_count)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0))
+        for frame in range(frame_count)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    tracks = []
+    for track_index in range(64):
+        point = np.array(
+            (
+                ((track_index % 8) - 4) * 0.16,
+                ((track_index // 8) - 4) * 0.1,
+                6.0 + (track_index % 7) * 0.25,
+            )
+        )
+        observations = []
+        for frame, center in centers.items():
+            camera = point - center
+            observations.append(
+                _observation(
+                    track_index,
+                    frame,
+                    intrinsics[0, 0] * camera[0] / camera[2] + intrinsics[0, 2],
+                    intrinsics[1, 1] * camera[1] / camera[2] + intrinsics[1, 2],
+                )
+            )
+        tracks.append(
+            SelectedTrackState(
+                track_uid=f"track-{track_index}",
+                observations=tuple(observations),
+            )
+        )
+    triangulated, _ = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+    )
+    coarse = FixedAnchorWindowSolution(
+        frame_ids=tuple(range(frame_count)),
+        rotations=rotations,
+        centers=centers,
+        intrinsics=[intrinsics[None]],
+        report={},
+    )
+
+    solution = refine_fixed_anchor_window(
+        coarse,
+        triangulated,
+        intrinsics,
+        fixed_pose_ids={0},
+        camera_model="PINHOLE",
+        max_num_iterations=20,
+        device_policy="cpu",
+        ceres_cuda_available=False,
+        marginalize_pose_id=1,
+        prior_device_policy="cuda-required",
+    )
+
+    assert solution.report["status"] == "passed"
+    assert solution.next_prior is not None
+    assert solution.next_prior.camera_ids == (2, 3, 4)
+    assert solution.next_prior.report["status"] == "passed"
+    assert solution.next_prior.report["gpuUsed"] is True
+    assert solution.next_prior.report["eliminatedCameraId"] == 1
+    assert solution.next_prior.report["pointCount"] == 64
