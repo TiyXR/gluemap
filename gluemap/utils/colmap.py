@@ -8,6 +8,7 @@ import torch
 from tqdm import tqdm
 
 from gluemap.estimators.track_establishment import TrackEstablishment
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
 logger = logging.getLogger(__name__)
 
@@ -685,7 +686,9 @@ def prepare_sift_database(
         camera_mode,
         reader_opts,
         extraction_options=pycolmap.FeatureExtractionOptions(
-            num_threads=16, gpu_index=gpu_index, use_gpu=use_gpu
+            num_threads=resolve_native_thread_count(),
+            gpu_index=gpu_index,
+            use_gpu=use_gpu,
         ),
     )  # use the same camera model for all images
 

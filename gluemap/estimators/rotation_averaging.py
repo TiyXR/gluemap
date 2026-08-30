@@ -12,6 +12,7 @@ from gluemap.math.geometry import (
     quaternion_to_rotation_matrix,
     rotation_matrix_to_quaternion,
 )
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ def rotation_averaging(
         )
         options.minimizer_progress_to_stdout = True
 
-    options.num_threads = -1
+    options.num_threads = resolve_native_thread_count()
     options.max_num_iterations = 200
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)

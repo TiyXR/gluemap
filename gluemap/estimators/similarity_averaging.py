@@ -5,6 +5,8 @@ import pyceres
 import pygluemap
 import torch
 
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
+
 logger = logging.getLogger(__name__)
 # Minimum angle (in degrees) for a triangle to be considered valid for
 # scale estimation
@@ -289,7 +291,7 @@ def similarity_averaging(
 
     options = pyceres.SolverOptions()
     options.linear_solver_type = pyceres.LinearSolverType.SPARSE_NORMAL_CHOLESKY
-    options.num_threads = 32
+    options.num_threads = resolve_native_thread_count()
     options.max_num_iterations = max_num_iterations
     options.minimizer_progress_to_stdout = False
 
