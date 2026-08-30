@@ -83,11 +83,26 @@ class _PoseState:
     centers: dict[int, np.ndarray]
 
 
+@dataclass(frozen=True)
+class _CachedTrackPoint:
+    xyz: np.ndarray
+    observation_signature: str
+
+
 def _canonical_sha256(value: Any) -> str:
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _track_observation_signature(track: SelectedTrackState) -> str:
+    digest = hashlib.sha256()
+    for observation in track.observations:
+        encoded = str(observation.observation_uid).encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "little"))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 class SchurFejFixedLagRunner:
@@ -166,7 +181,7 @@ class SchurFejFixedLagRunner:
         self._frozen_intrinsics: np.ndarray | None = None
         self._next_window_ordinal = 0
         self._terminal_finalized = False
-        self._track_point_cache: dict[str, np.ndarray] = {}
+        self._track_point_cache: dict[str, _CachedTrackPoint] = {}
         self._persistent_ba_session = (
             PersistentFixedLagBaSession(policy=ba_problem_policy)
             if ba_problem_policy
@@ -313,15 +328,27 @@ class SchurFejFixedLagRunner:
         cache_before = len(self._track_point_cache)
         cached_by_uid: dict[str, TriangulatedTrackState] = {}
         dlt_tracks: list[SelectedTrackState] = []
+        observation_signature_by_uid = {
+            track.track_uid: _track_observation_signature(track)
+            for track in selected_tracks
+        }
+        cache_rejected_observation_identity_count = 0
         if self.triangulation_initialization_policy == "refined-point-cache":
             for track in selected_tracks:
-                cached_xyz = self._track_point_cache.get(track.track_uid)
-                if cached_xyz is None:
+                cached = self._track_point_cache.get(track.track_uid)
+                if cached is None:
+                    dlt_tracks.append(track)
+                    continue
+                if (
+                    cached.observation_signature
+                    != observation_signature_by_uid[track.track_uid]
+                ):
+                    cache_rejected_observation_identity_count += 1
                     dlt_tracks.append(track)
                     continue
                 cached_by_uid[track.track_uid] = TriangulatedTrackState(
                     track_uid=track.track_uid,
-                    xyz=tuple(float(value) for value in cached_xyz),
+                    xyz=tuple(float(value) for value in cached.xyz),
                     observations=track.observations,
                     positive_depth_fraction=None,
                     maximum_reprojection_error_pixels=None,
@@ -387,6 +414,9 @@ class SchurFejFixedLagRunner:
                 ),
                 "cacheResidentTrackCountBefore": cache_before,
                 "cacheReusedTrackCount": len(cached_by_uid),
+                "cacheRejectedObservationIdentityCount": (
+                    cache_rejected_observation_identity_count
+                ),
                 "dltInputTrackCount": len(dlt_tracks),
                 "dltOutputTrackCount": len(dlt_by_uid),
                 "dlt": dlt_report,
@@ -452,7 +482,7 @@ class SchurFejFixedLagRunner:
             )
 
         previous_cache_uids = set(self._track_point_cache)
-        next_track_point_cache: dict[str, np.ndarray] = {}
+        next_track_point_cache: dict[str, _CachedTrackPoint] = {}
         if self.triangulation_initialization_policy == "refined-point-cache":
             persistent_problem = (
                 None
@@ -471,7 +501,12 @@ class SchurFejFixedLagRunner:
                         dtype=np.float64,
                     ).copy()
                 if xyz.shape == (3,) and np.isfinite(xyz).all():
-                    next_track_point_cache[track_uid] = xyz
+                    next_track_point_cache[track_uid] = _CachedTrackPoint(
+                        xyz=xyz,
+                        observation_signature=(
+                            observation_signature_by_uid[track_uid]
+                        ),
+                    )
         self._track_point_cache = next_track_point_cache
         triangulation_report.update(
             {
@@ -789,8 +824,14 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "trackPointCache": [
-                [track_uid, *xyz.tolist()]
-                for track_uid, xyz in sorted(self._track_point_cache.items())
+                [
+                    track_uid,
+                    *cached.xyz.tolist(),
+                    cached.observation_signature,
+                ]
+                for track_uid, cached in sorted(
+                    self._track_point_cache.items()
+                )
             ],
         }
         return {**state, "stateSha256": _canonical_sha256(state)}
@@ -910,24 +951,33 @@ class SchurFejFixedLagRunner:
         )
         self._next_window_ordinal = next_ordinal
         self._terminal_finalized = False
-        restored_cache: dict[str, np.ndarray] = {}
+        restored_cache: dict[str, _CachedTrackPoint] = {}
         for row in cache_rows:
             if (
                 not isinstance(row, list)
-                or len(row) != 4
+                or len(row) != 5
                 or not isinstance(row[0], str)
                 or not row[0]
                 or row[0] in restored_cache
+                or not isinstance(row[4], str)
+                or len(row[4]) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in row[4]
+                )
             ):
                 raise SchurFejFixedLagRunnerError(
                     "fixed-lag checkpoint track-point cache is invalid"
                 )
-            xyz = np.asarray(row[1:], dtype=np.float64)
+            xyz = np.asarray(row[1:4], dtype=np.float64)
             if xyz.shape != (3,) or not np.isfinite(xyz).all():
                 raise SchurFejFixedLagRunnerError(
                     "fixed-lag checkpoint track-point cache is invalid"
                 )
-            restored_cache[row[0]] = xyz
+            restored_cache[row[0]] = _CachedTrackPoint(
+                xyz=xyz,
+                observation_signature=row[4],
+            )
         if (
             self.triangulation_initialization_policy == "full-dlt"
             and restored_cache

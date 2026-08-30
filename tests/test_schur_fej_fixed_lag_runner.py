@@ -236,6 +236,33 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
     second_coarse, second_tracks = _window(
         (0, 2, 3, 4, 5), centers, intrinsics
     )
+    stable_frames = {0, 2, 3, 4}
+    first_tracks = [
+        SelectedTrackState(
+            track_uid=value.track_uid,
+            observations=tuple(
+                observation
+                for observation in value.observations
+                if observation.geometry_ordinal in stable_frames
+            ),
+        )
+        if index < 32
+        else value
+        for index, value in enumerate(first_tracks)
+    ]
+    second_tracks = [
+        SelectedTrackState(
+            track_uid=value.track_uid,
+            observations=tuple(
+                observation
+                for observation in value.observations
+                if observation.geometry_ordinal in stable_frames
+            ),
+        )
+        if index < 32
+        else value
+        for index, value in enumerate(second_tracks)
+    ]
 
     def create_runner(policy: str = "refined-point-cache"):
         return SchurFejFixedLagRunner(
@@ -270,14 +297,16 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
         "refined-point-cache"
     )
     assert len(checkpoint["trackPointCache"]) == 64
-    assert second.report["triangulation"]["cacheReusedTrackCount"] == 64
-    assert second.report["triangulation"]["dltInputTrackCount"] == 0
-    assert second.report["triangulation"]["backend"] == "not-run-cache-hit"
-    assert all(
+    assert second.report["triangulation"]["cacheReusedTrackCount"] == 32
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 32
+    assert second.report["triangulation"]["dltInputTrackCount"] == 32
+    assert sum(
         value.initialization_source == "refined-ba-cache"
         for value in second.triangulated_tracks
-    )
-    assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 0
+    ) == 32
+    assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 32
     np.testing.assert_allclose(
         resumed_second.finalized_center,
         second.finalized_center,
@@ -312,8 +341,29 @@ def test_refined_point_cache_evicts_tracks_outside_the_active_window():
     second_coarse, second_tracks = _window(
         (0, 2, 3, 4, 5), centers, intrinsics
     )
+    stable_frames = {0, 2, 3, 4}
+    first_tracks = [
+        SelectedTrackState(
+            track_uid=value.track_uid,
+            observations=tuple(
+                observation
+                for observation in value.observations
+                if observation.geometry_ordinal in stable_frames
+            ),
+        )
+        if index < 32
+        else value
+        for index, value in enumerate(first_tracks)
+    ]
     second_tracks = [
-        value
+        SelectedTrackState(
+            track_uid=value.track_uid,
+            observations=tuple(
+                observation
+                for observation in value.observations
+                if observation.geometry_ordinal in stable_frames
+            ),
+        )
         if index < 32
         else SelectedTrackState(
             track_uid=f"replacement-{index}",
@@ -339,6 +389,9 @@ def test_refined_point_cache_evicts_tracks_outside_the_active_window():
     checkpoint = runner.snapshot()
 
     assert second.report["triangulation"]["cacheReusedTrackCount"] == 32
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 0
     assert second.report["triangulation"]["dltInputTrackCount"] == 32
     assert second.report["triangulation"]["cacheEvictedTrackCount"] == 32
     assert second.report["triangulation"]["cacheResidentTrackCountAfter"] == 64
