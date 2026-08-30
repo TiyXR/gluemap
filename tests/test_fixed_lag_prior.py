@@ -1,11 +1,16 @@
 import pytest
 import torch
+import numpy as np
 
 from gluemap.estimators.fixed_lag_prior import (
     FejPosePriorCostFunction,
     FejPriorState,
     FixedLagPriorError,
     marginalize_linearized_tracks,
+    marginalize_ceres_linearization,
+)
+from gluemap.estimators.fixed_lag_ceres_linearization import (
+    CeresProblemLinearization,
 )
 
 
@@ -219,3 +224,70 @@ def test_dense_fej_cost_moves_one_pose_on_ceres_manifold():
     )
     np.testing.assert_allclose(recovered_rotation, target[:3].numpy(), atol=1e-9)
     np.testing.assert_allclose(pose[4:], target[3:].numpy(), atol=1e-9)
+
+
+def test_ceres_crs_path_matches_direct_dense_elimination():
+    values = _fixture()
+    camera_indexes = values["observation_camera_indexes"]
+    residuals = values["residuals"]
+    camera_jacobians = values["camera_jacobians"]
+    point_jacobians = values["point_jacobians"]
+    point_count, maximum_views = camera_indexes.shape
+    camera_dimension = len(values["camera_ids"]) * 6
+    point_dimension = point_count * 3
+    rows = int((camera_indexes >= 0).sum().item()) * 2
+    jacobian = torch.zeros(
+        rows, camera_dimension + point_dimension, dtype=torch.float64
+    )
+    residual = torch.zeros(rows, dtype=torch.float64)
+    row = 0
+    for point in range(point_count):
+        for view in range(maximum_views):
+            camera = int(camera_indexes[point, view])
+            if camera < 0:
+                continue
+            jacobian[row : row + 2, camera * 6 : (camera + 1) * 6] = (
+                camera_jacobians[point, view]
+            )
+            jacobian[
+                row : row + 2,
+                camera_dimension + point * 3 : camera_dimension + (point + 1) * 3,
+            ] = point_jacobians[point, view]
+            residual[row : row + 2] = residuals[point, view]
+            row += 2
+    previous = values["previous_prior"]
+    prior_rows = previous.factor.shape[0]
+    prior_jacobian = torch.zeros(
+        prior_rows, camera_dimension + point_dimension, dtype=torch.float64
+    )
+    prior_jacobian[:, :camera_dimension] = previous.factor
+    jacobian = torch.cat((jacobian, prior_jacobian), dim=0)
+    residual = torch.cat((residual, previous.factor_residual), dim=0)
+    sparse = jacobian.to_sparse_csr()
+    linearization = CeresProblemLinearization(
+        camera_ids=values["camera_ids"],
+        image_ids=(1, 2, 3),
+        point3d_ids=tuple(range(point_count)),
+        pose_ambient_values=values["linearization_points"].numpy(),
+        point_values=np.zeros((point_count, 3), dtype=np.float64),
+        residuals=residual.numpy(),
+        row_offsets=sparse.crow_indices().numpy(),
+        column_indices=sparse.col_indices().numpy(),
+        jacobian_values=sparse.values().numpy(),
+        report={
+            "contractId": "jarailsense.gluemap-ceres-linearization/v1",
+            "columnCount": camera_dimension + point_dimension,
+        },
+    )
+    expected_hessian, expected_gradient = _dense_reference(values)
+
+    result = marginalize_ceres_linearization(
+        linearization,
+        eliminate_camera_id=10,
+        previous_prior=previous,
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+    )
+
+    torch.testing.assert_close(result.hessian, expected_hessian, rtol=1e-9, atol=1e-9)
+    torch.testing.assert_close(result.gradient, expected_gradient, rtol=1e-9, atol=1e-9)

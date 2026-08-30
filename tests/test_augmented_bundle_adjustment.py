@@ -13,7 +13,10 @@ import pycolmap
 import torch
 
 from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
-from gluemap.estimators.fixed_lag_prior import FejPriorState
+from gluemap.estimators.fixed_lag_prior import (
+    FejPriorState,
+    marginalize_ceres_linearization,
+)
 from gluemap.estimators.fixed_lag_ceres_linearization import (
     capture_ceres_problem_linearization,
 )
@@ -431,6 +434,20 @@ class TestBundleAdjustmentEndToEnd:
         assert linearization.report["jacobianNonzeroCount"] > 0
         assert linearization.row_offsets[-1] == len(
             linearization.jacobian_values
+        )
+        prior = marginalize_ceres_linearization(
+            linearization,
+            eliminate_camera_id=linearization.camera_ids[0],
+            device_policy="cpu",
+        )
+        assert prior.camera_ids == linearization.camera_ids[1:]
+        assert prior.report["status"] == "passed"
+        assert prior.report["pointCount"] == 40
+        torch.testing.assert_close(
+            prior.factor.T @ prior.factor,
+            prior.hessian,
+            rtol=1e-8,
+            atol=1e-8,
         )
 
     def test_ba_recovers_from_noise(self):
