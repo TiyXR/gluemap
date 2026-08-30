@@ -122,6 +122,29 @@ def _configure_ceres_cpu_concurrency(
     return thread_count
 
 
+def _solve_configured_bundle_adjuster(
+    bundle_adjuster: object,
+    ba_options: pycolmap.BundleAdjustmentOptions,
+    ba_config: pycolmap.BundleAdjustmentConfig,
+) -> object:
+    """Solve the already-built PyCOLMAP problem with the selected Ceres.
+
+    PyCOLMAP's embedded Ceres may not include CUDA/cuDSS even when the
+    separately version-pinned ``pygluemap`` Ceres does.  The exposed Problem
+    shares the pyceres ABI, so GPU policy must route that same problem through
+    ``pygluemap.solve_cuda`` instead of asking PyCOLMAP to silently fall back.
+    """
+    if not ba_options.ceres.use_gpu:
+        return bundle_adjuster.solve()
+    if not hasattr(bundle_adjuster, "problem"):
+        raise RuntimeError("CUDA bundle adjustment requires exposed Ceres problem")
+    problem = bundle_adjuster.problem
+    solver_options = ba_options.ceres.create_solver_options(ba_config, problem)
+    summary = pyceres.SolverSummary()
+    pygluemap.solve_cuda(solver_options, problem, summary)
+    return summary
+
+
 def _add_virtual_track_residuals(
     problem: pyceres.Problem,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -459,7 +482,9 @@ def bundle_adjustment(
     )
 
     # --- Solve -------------------------------------------------------------
-    summary = bundle_adjuster.solve()
+    summary = _solve_configured_bundle_adjuster(
+        bundle_adjuster, ba_options, ba_config
+    )
     logger.info(str(summary))
 
     _validate_resolved_ba_backend(summary, ba_options.ceres.use_gpu)

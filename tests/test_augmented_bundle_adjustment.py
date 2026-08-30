@@ -354,6 +354,40 @@ class TestBundleAdjustmentEndToEnd:
                 ceres_cuda_available=None,
             )
 
+    def test_cuda_solver_uses_pinned_pygluemap_ceres(self, monkeypatch):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=4, num_points3D=20, seed=18
+        )
+        calls = []
+
+        def solve_cuda(options, problem, summary):
+            calls.append((options.linear_solver_type, problem.num_residuals()))
+            import pyceres
+
+            pyceres.solve(options, problem, summary)
+
+        monkeypatch.setattr(
+            "gluemap.estimators.augmented_bundle_adjustment.pygluemap.solve_cuda",
+            solve_cuda,
+        )
+        monkeypatch.setattr(
+            "gluemap.estimators.augmented_bundle_adjustment._validate_resolved_ba_backend",
+            lambda summary, gpu_requested: None,
+        )
+
+        _, _, summary = bundle_adjustment(
+            reconstruction,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=1,
+            device_policy="cuda-required",
+            ceres_cuda_available=True,
+        )
+
+        assert calls
+        assert calls[0][1] > 0
+        assert summary.num_successful_steps >= 0
+
     def test_fej_prior_is_added_to_the_same_ceres_problem(self):
         reconstruction = create_synthetic_reconstruction(
             num_frames=5, num_points3D=40, seed=23

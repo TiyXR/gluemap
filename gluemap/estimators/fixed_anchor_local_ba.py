@@ -312,6 +312,16 @@ def refine_fixed_anchor_window(
     ]
     pass_acceptance = [_ba_summary_acceptance(summary) for summary in summaries]
     solve_passed = all(value[0] for value in pass_acceptance)
+    ceres_solve_wall = sum(
+        float(
+            getattr(summary, "ceres_summary", summary).total_time_in_seconds
+        )
+        for summary in summaries
+    )
+    linearization_capture_wall = sum(
+        float(value.report["captureWallSeconds"])
+        for value in captured_linearization
+    )
     report = {
         "contractId": "jarailsense.gluemap-fixed-anchor-local-ba/v1",
         "status": "passed" if solve_passed else "failed",
@@ -332,6 +342,12 @@ def refine_fixed_anchor_window(
         "observationCount": observation_count,
         "buildWallSeconds": build_wall,
         "solveWallSeconds": solve_wall,
+        "ceresSolveWallSeconds": ceres_solve_wall,
+        "linearizationCaptureWallSeconds": linearization_capture_wall,
+        "solveOrchestrationWallSeconds": max(
+            0.0,
+            solve_wall - ceres_solve_wall - linearization_capture_wall,
+        ),
         "totalWallSeconds": build_wall + solve_wall,
         "termination": getattr(termination, "name", str(termination)),
         "solveAcceptance": pass_acceptance[-1][1],
