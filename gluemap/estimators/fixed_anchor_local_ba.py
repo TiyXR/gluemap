@@ -56,6 +56,8 @@ def refine_fixed_anchor_window(
     fixed_pose_ids: set[int],
     camera_model: str = "SIMPLE_PINHOLE",
     max_num_iterations: int = 50,
+    refinement_passes: int = 1,
+    linear_solver_policy: str = "auto",
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
 ) -> FixedAnchorLocalBaSolution:
@@ -70,6 +72,8 @@ def refine_fixed_anchor_window(
         raise FixedAnchorLocalBaError("fixed pose identity is invalid")
     if max_num_iterations < 1:
         raise FixedAnchorLocalBaError("BA iteration limit is invalid")
+    if not 1 <= refinement_passes <= 3:
+        raise FixedAnchorLocalBaError("BA refinement pass count is invalid")
     if not tracks:
         raise FixedAnchorLocalBaError("triangulated track set is empty")
 
@@ -171,18 +175,21 @@ def refine_fixed_anchor_window(
         for frame_id in fixed_pose_ids
     }
     solve_started = time.perf_counter()
-    reconstruction, _, summary = bundle_adjustment(
-        reconstruction,
-        virtual_reconstruction=None,
-        negative_depth_observations={},
-        max_num_iterations=max_num_iterations,
-        loss_type_normal="huber",
-        linear_solver_type="auto",
-        fixed_pose_ids={image_id_by_frame[value] for value in fixed_pose_ids},
-        fix_intrinsics=True,
-        device_policy=device_policy,
-        ceres_cuda_available=ceres_cuda_available,
-    )
+    summaries = []
+    for _ in range(refinement_passes):
+        reconstruction, _, summary = bundle_adjustment(
+            reconstruction,
+            virtual_reconstruction=None,
+            negative_depth_observations={},
+            max_num_iterations=max_num_iterations,
+            loss_type_normal="huber",
+            linear_solver_type=linear_solver_policy,
+            fixed_pose_ids={image_id_by_frame[value] for value in fixed_pose_ids},
+            fix_intrinsics=True,
+            device_policy=device_policy,
+            ceres_cuda_available=ceres_cuda_available,
+        )
+        summaries.append(summary)
     solve_wall = time.perf_counter() - solve_started
 
     rotations: dict[int, np.ndarray] = {}
@@ -202,9 +209,12 @@ def refine_fixed_anchor_window(
         float(np.max(np.abs(centers[key] - before_fixed_centers[key])))
         for key in fixed_pose_ids
     )
-    dense_backend, sparse_backend, gpu_used = _resolved_backend(summary)
-    ceres = getattr(summary, "ceres_summary", summary)
-    termination = getattr(summary, "termination_type", None)
+    resolved_backends = [_resolved_backend(summary) for summary in summaries]
+    dense_backend, sparse_backend, gpu_used = resolved_backends[-1]
+    if any(value != resolved_backends[0] for value in resolved_backends[1:]):
+        raise FixedAnchorLocalBaError("BA backend changed across refinement passes")
+    ceres = getattr(summaries[-1], "ceres_summary", summaries[-1])
+    termination = getattr(summaries[-1], "termination_type", None)
     report = {
         "contractId": "jarailsense.gluemap-fixed-anchor-local-ba/v1",
         "status": "passed",
@@ -215,6 +225,10 @@ def refine_fixed_anchor_window(
         "denseLinearAlgebraBackend": dense_backend,
         "sparseLinearAlgebraBackend": sparse_backend,
         "nativeThreadCount": resolve_native_thread_count(),
+        "ceresThreadsGiven": int(ceres.num_threads_given),
+        "ceresThreadsUsed": int(ceres.num_threads_used),
+        "linearSolverPolicy": linear_solver_policy,
+        "refinementPassCount": refinement_passes,
         "frameCount": len(frame_ids),
         "fixedPoseCount": len(fixed_pose_ids),
         "trackCount": len(point_rows),
@@ -223,8 +237,33 @@ def refine_fixed_anchor_window(
         "solveWallSeconds": solve_wall,
         "totalWallSeconds": build_wall + solve_wall,
         "termination": getattr(termination, "name", str(termination)),
-        "initialCost": float(ceres.initial_cost),
+        "initialCost": float(
+            getattr(summaries[0], "ceres_summary", summaries[0]).initial_cost
+        ),
         "finalCost": float(ceres.final_cost),
+        "refinementPasses": [
+            {
+                "passOrdinal": index,
+                "termination": getattr(
+                    getattr(summary, "termination_type", None),
+                    "name",
+                    str(getattr(summary, "termination_type", None)),
+                ),
+                "initialCost": float(
+                    getattr(summary, "ceres_summary", summary).initial_cost
+                ),
+                "finalCost": float(
+                    getattr(summary, "ceres_summary", summary).final_cost
+                ),
+                "ceresThreadsGiven": int(
+                    getattr(summary, "ceres_summary", summary).num_threads_given
+                ),
+                "ceresThreadsUsed": int(
+                    getattr(summary, "ceres_summary", summary).num_threads_used
+                ),
+            }
+            for index, summary in enumerate(summaries)
+        ],
         "maximumFixedRotationMatrixDelta": maximum_fixed_rotation_delta,
         "maximumFixedCenterDelta": maximum_fixed_center_delta,
     }

@@ -303,11 +303,16 @@ def bundle_adjustment(
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
     ba_options.ceres.solver_options.num_threads = resolve_native_thread_count()
     ba_options.ceres.auto_select_solver_type = True
-    if linear_solver_type == "dense-schur":
+    solver_types = {
+        "dense-schur": pyceres.LinearSolverType.DENSE_SCHUR,
+        "sparse-schur": pyceres.LinearSolverType.SPARSE_SCHUR,
+        "iterative-schur": pyceres.LinearSolverType.ITERATIVE_SCHUR,
+    }
+    if linear_solver_type in solver_types:
         ba_options.ceres.auto_select_solver_type = False
-        ba_options.ceres.solver_options.linear_solver_type = (
-            pyceres.LinearSolverType.DENSE_SCHUR
-        )
+        ba_options.ceres.solver_options.linear_solver_type = solver_types[
+            linear_solver_type
+        ]
     elif linear_solver_type != "auto":
         raise ValueError(f"Unsupported BA solver: {linear_solver_type}")
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:

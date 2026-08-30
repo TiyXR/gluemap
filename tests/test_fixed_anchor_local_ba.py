@@ -95,6 +95,8 @@ def test_local_ba_keeps_fixed_overlap_poses() -> None:
     assert solution.report["observationCount"] == 96
     assert solution.report["maximumFixedRotationMatrixDelta"] == 0
     assert solution.report["maximumFixedCenterDelta"] == 0
+    assert solution.report["ceresThreadsGiven"] >= 1
+    assert solution.report["ceresThreadsUsed"] >= 1
     assert np.allclose(solution.centers[0], centers[0])
     assert np.allclose(solution.centers[1], centers[1])
     assert solution.report["finalCost"] <= solution.report["initialCost"]
