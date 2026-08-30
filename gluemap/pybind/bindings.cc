@@ -133,15 +133,52 @@ public:
 
   size_t Size() const { return residual_blocks_.size(); }
 
+  size_t ActiveSize() const {
+    return static_cast<size_t>(std::count_if(
+        residual_blocks_.begin(), residual_blocks_.end(),
+        [](ceres::ResidualBlockId value) { return value != nullptr; }));
+  }
+
+  void RemoveIndices(
+      py::array_t<int64_t, py::array::c_style> batch_indices) {
+    if (problem_ == nullptr) {
+      throw std::invalid_argument("reprojection batch is detached");
+    }
+    const py::buffer_info indices = batch_indices.request();
+    if (indices.ndim != 1) {
+      throw std::invalid_argument("reprojection batch indices are invalid");
+    }
+    auto *values = static_cast<const int64_t *>(indices.ptr);
+    std::unordered_set<size_t> unique_indices;
+    unique_indices.reserve(static_cast<size_t>(indices.shape[0]));
+    for (py::ssize_t offset = 0; offset < indices.shape[0]; ++offset) {
+      if (values[offset] < 0 ||
+          static_cast<size_t>(values[offset]) >= residual_blocks_.size() ||
+          residual_blocks_[static_cast<size_t>(values[offset])] == nullptr ||
+          !unique_indices.insert(static_cast<size_t>(values[offset])).second) {
+        throw std::invalid_argument(
+            "reprojection batch index is absent");
+      }
+    }
+    py::gil_scoped_release release;
+    for (py::ssize_t offset = 0; offset < indices.shape[0]; ++offset) {
+      const size_t index = static_cast<size_t>(values[offset]);
+      problem_->RemoveResidualBlock(residual_blocks_[index]);
+      residual_blocks_[index] = nullptr;
+    }
+  }
+
   void Remove() {
     if (problem_ == nullptr) {
       return;
     }
     py::gil_scoped_release release;
-    for (const ceres::ResidualBlockId residual : residual_blocks_) {
-      problem_->RemoveResidualBlock(residual);
+    for (ceres::ResidualBlockId &residual : residual_blocks_) {
+      if (residual != nullptr) {
+        problem_->RemoveResidualBlock(residual);
+        residual = nullptr;
+      }
     }
-    residual_blocks_.clear();
     problem_ = nullptr;
   }
 
@@ -355,6 +392,11 @@ PYBIND11_MODULE(pygluemap, m) {
 
   py::class_<ReprojectionResidualBatch>(m, "ReprojectionResidualBatch")
       .def_property_readonly("size", &ReprojectionResidualBatch::Size)
+      .def_property_readonly("active_size",
+                             &ReprojectionResidualBatch::ActiveSize)
+      .def("remove_indices", &ReprojectionResidualBatch::RemoveIndices,
+           py::arg("batch_indices"),
+           "Remove selected residuals in one GIL-free native call.")
       .def("remove", &ReprojectionResidualBatch::Remove,
            "Remove the complete native residual batch in one GIL-free call.");
 

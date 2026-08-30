@@ -41,6 +41,8 @@ class _PoseBlock:
 class _ObservationBlock:
     frame_id: int
     xy: tuple[float, float]
+    native_batch: object
+    native_batch_index: int
 
 
 @dataclass
@@ -105,10 +107,10 @@ def _solver_configuration(
 class PersistentFixedLagBaProblem:
     """Keep Ceres parameter/residual objects alive across sliding windows.
 
-    Pixel measurements are immutable and keyed by observation UID. Pose and
-    point blocks apply entering/leaving deltas. Visual residuals are rebound
-    as one native batch per window so their deterministic ordering remains
-    identical to a full rebuild without per-row Python calls.
+    Pixel measurements are immutable and keyed by observation UID. Pose,
+    point, and visual residual blocks apply entering/leaving deltas. Each
+    window submits its entering and leaving visual factors as native batches
+    without per-row Python calls.
     """
 
     def __init__(self, *, camera_model_id: int, camera_params: Any) -> None:
@@ -128,24 +130,32 @@ class PersistentFixedLagBaProblem:
         self._next_point_id = 1
         self._prior_residual_block: object | None = None
         self._prior_cost: object | None = None
-        self._visual_batch: object | None = None
 
-    def _remove_observation(self, track_uid: str, observation_uid: str) -> None:
+    def _remove_observation(
+        self, track_uid: str, observation_uid: str
+    ) -> _ObservationBlock:
         point = self.points[track_uid]
-        point.observations.pop(observation_uid)
+        return point.observations.pop(observation_uid)
 
-    def _add_observation(self, track_uid: str, observation: Any) -> None:
-        point = self.points[track_uid]
+    @staticmethod
+    def _remove_native_observations(
+        observations: list[_ObservationBlock],
+    ) -> None:
+        removals: dict[int, tuple[object, list[int]]] = {}
+        for observation in observations:
+            key = id(observation.native_batch)
+            if key not in removals:
+                removals[key] = (observation.native_batch, [])
+            removals[key][1].append(observation.native_batch_index)
+        for native_batch, indices in removals.values():
+            native_batch.remove_indices(np.asarray(indices, dtype=np.int64))
+
+    def _validate_observation(self, observation: Any) -> None:
         frame_id = int(observation.geometry_ordinal)
         if frame_id not in self.poses:
             raise PersistentFixedLagBaError(
                 "persistent BA observation pose is absent"
             )
-        xy = (float(observation.x), float(observation.y))
-        point.observations[str(observation.observation_uid)] = _ObservationBlock(
-            frame_id=frame_id,
-            xy=xy,
-        )
 
     def synchronize(
         self,
@@ -164,9 +174,6 @@ class PersistentFixedLagBaProblem:
             raise PersistentFixedLagBaError(
                 "persistent BA prior must be removed before synchronization"
             )
-        if self._visual_batch is not None:
-            self._visual_batch.remove()
-            self._visual_batch = None
         if int(camera_model_id) != self.camera_model_id:
             raise PersistentFixedLagBaError("persistent BA camera model changed")
         incoming_camera = np.asarray(camera_params, dtype=np.float64)
@@ -207,11 +214,16 @@ class PersistentFixedLagBaProblem:
                 target_observations[key] = observation
 
         removed_observations = 0
+        native_removals: list[_ObservationBlock] = []
         for track_uid, point in list(self.points.items()):
             for observation_uid in list(point.observations):
                 if (track_uid, observation_uid) not in target_observations:
-                    self._remove_observation(track_uid, observation_uid)
+                    native_removals.append(
+                        self._remove_observation(track_uid, observation_uid)
+                    )
                     removed_observations += 1
+        native_batch_started = time.perf_counter()
+        self._remove_native_observations(native_removals)
 
         removed_points = 0
         for track_uid in list(self.points):
@@ -273,6 +285,7 @@ class PersistentFixedLagBaProblem:
 
         created_observations = 0
         reused_observations = 0
+        entering_observations: list[tuple[str, str, Any]] = []
         for (track_uid, observation_uid), observation in target_observations.items():
             existing = self.points[track_uid].observations.get(observation_uid)
             xy = (float(observation.x), float(observation.y))
@@ -280,59 +293,75 @@ class PersistentFixedLagBaProblem:
             if existing is not None and (
                 existing.frame_id != frame_id or existing.xy != xy
             ):
-                self._remove_observation(track_uid, observation_uid)
+                removed = self._remove_observation(track_uid, observation_uid)
+                self._remove_native_observations([removed])
                 existing = None
                 removed_observations += 1
             if existing is None:
-                self._add_observation(track_uid, observation)
+                self._validate_observation(observation)
+                entering_observations.append(
+                    (track_uid, observation_uid, observation)
+                )
                 created_observations += 1
             else:
                 reused_observations += 1
 
-        native_batch_started = time.perf_counter()
-        ordered_observations = tuple(target_observations.items())
         point_addresses = np.fromiter(
             (
                 self.points[track_uid].values.ctypes.data
-                for (track_uid, _), _ in ordered_observations
+                for track_uid, _, _ in entering_observations
             ),
             dtype=np.uint64,
-            count=len(ordered_observations),
+            count=len(entering_observations),
         )
         pose_addresses = np.fromiter(
             (
                 self.poses[int(observation.geometry_ordinal)].values.ctypes.data
-                for _, observation in ordered_observations
+                for _, _, observation in entering_observations
             ),
             dtype=np.uint64,
-            count=len(ordered_observations),
+            count=len(entering_observations),
         )
         observation_xy = np.asarray(
             [
                 (float(observation.x), float(observation.y))
-                for _, observation in ordered_observations
+                for _, _, observation in entering_observations
             ],
             dtype=np.float64,
         )
-        self._visual_batch = pygluemap.add_reprojection_residual_batch(
-            self.problem,
-            self.camera_model_id,
-            point_addresses,
-            pose_addresses,
-            int(self.camera_params.ctypes.data),
-            observation_xy,
-            self.loss_function,
-        )
-        if self._visual_batch.size != len(ordered_observations):
-            raise PersistentFixedLagBaError(
-                "persistent BA native visual batch size differs"
+        if entering_observations:
+            native_batch = pygluemap.add_reprojection_residual_batch(
+                self.problem,
+                self.camera_model_id,
+                point_addresses,
+                pose_addresses,
+                int(self.camera_params.ctypes.data),
+                observation_xy,
+                self.loss_function,
             )
+            if native_batch.size != len(entering_observations):
+                raise PersistentFixedLagBaError(
+                    "persistent BA native visual batch size differs"
+                )
+            for batch_index, (
+                track_uid,
+                observation_uid,
+                observation,
+            ) in enumerate(entering_observations):
+                self.points[track_uid].observations[observation_uid] = (
+                    _ObservationBlock(
+                        frame_id=int(observation.geometry_ordinal),
+                        xy=(float(observation.x), float(observation.y)),
+                        native_batch=native_batch,
+                        native_batch_index=batch_index,
+                    )
+                )
         native_batch_wall_seconds = time.perf_counter() - native_batch_started
 
         return {
             "status": "passed",
             "mode": "persistent-delta",
-            "visualResidualBindingMode": "native-full-window-rebind",
+            "visualResidualBindingMode": "native-enter-leave-delta",
             "createdPoseCount": created_poses,
             "removedPoseCount": removed_poses,
             "createdPointCount": created_points,

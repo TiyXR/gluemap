@@ -56,7 +56,7 @@ def _tracks(frame_ids, centers, intrinsics):
     return values
 
 
-def test_persistent_problem_rebinds_visual_batch_in_stable_window_order() -> None:
+def test_persistent_problem_applies_native_visual_enter_leave_delta() -> None:
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
@@ -100,11 +100,20 @@ def test_persistent_problem_rebinds_visual_batch_in_stable_window_order() -> Non
         camera_model_id=camera.model,
         camera_params=camera.params,
     )
+    unchanged = problem.synchronize(
+        frame_ids=(0, 2, 3, 4, 5),
+        rotations={value: rotations[value] for value in (0, 2, 3, 4, 5)},
+        centers={value: centers[value] for value in (0, 2, 3, 4, 5)},
+        fixed_pose_ids={0},
+        tracks=_tracks((0, 2, 3, 4, 5), centers, intrinsics),
+        camera_model_id=camera.model,
+        camera_params=camera.params,
+    )
 
     assert first["createdPoseCount"] == 5
     assert first["createdPointCount"] == 32
     assert first["createdObservationCount"] == 160
-    assert first["visualResidualBindingMode"] == "native-full-window-rebind"
+    assert first["visualResidualBindingMode"] == "native-enter-leave-delta"
     assert first["problemResidualCount"] == 320
     assert solve["gpuRequested"] is False
     assert summary.final_cost <= summary.initial_cost
@@ -116,5 +125,9 @@ def test_persistent_problem_rebinds_visual_batch_in_stable_window_order() -> Non
     assert second["reusedObservationCount"] == 128
     assert second["removedObservationCount"] == 32
     assert second["residentObservationCount"] == 160
-    assert second["visualResidualBindingMode"] == "native-full-window-rebind"
+    assert second["visualResidualBindingMode"] == "native-enter-leave-delta"
     assert second["problemResidualCount"] == 320
+    assert unchanged["createdObservationCount"] == 0
+    assert unchanged["removedObservationCount"] == 0
+    assert unchanged["reusedObservationCount"] == 160
+    assert unchanged["problemResidualCount"] == 320
