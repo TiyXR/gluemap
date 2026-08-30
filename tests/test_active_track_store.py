@@ -117,6 +117,28 @@ def test_materialized_gate_reuses_selected_tracks_without_report_payloads():
     assert "selectedTracks" not in report
 
 
+def test_noncontiguous_fixed_lag_frame_set_excludes_marginalized_pose_on_gpu():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cuda-required"))
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+
+    reports, tracks_by_window = store.evaluate_frame_sets_materialized(
+        [((0, 2, 3), 2)]
+    )
+
+    report = reports[0]
+    assert report["status"] == "passed"
+    assert report["activeFrameIds"] == [0, 2, 3]
+    assert report["activeFrameCount"] == 3
+    assert report["constraintsPerFrame"] == {"0": 2, "2": 2, "3": 2}
+    assert "1" not in report["constraintsPerFrame"]
+    assert report["gateMetricsBackend"] == "cuda"
+    assert all(
+        [value.geometry_ordinal for value in track.observations] == [0, 2, 3]
+        for track in tracks_by_window[0]
+    )
+
+
 def test_parallax_backend_and_microbatch_are_reported():
     store = ActiveTrackStore(
         budget(
@@ -187,7 +209,10 @@ def test_parallax_uses_one_observation_per_frame_in_duplicate_heavy_component():
             )
     store.add_observations(values)
     store.add_correspondences(
-        TrackCorrespondence(values[index].observation_uid, values[index + 1].observation_uid)
+        TrackCorrespondence(
+            values[index].observation_uid,
+            values[index + 1].observation_uid,
+        )
         for index in range(len(values) - 1)
     )
 

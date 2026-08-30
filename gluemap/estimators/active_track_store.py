@@ -560,11 +560,38 @@ class ActiveTrackStore:
         """Return ephemeral selected observations from the same gate pass."""
         return self._evaluate_batch_impl(intervals, materialize_tracks=True)
 
+    def evaluate_frame_sets_materialized(
+        self,
+        windows: Iterable[tuple[Iterable[int], int]],
+    ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
+        """Evaluate arbitrary fixed-lag frame sets in one GPU membership batch."""
+        values: list[tuple[int, ...]] = []
+        intervals: list[tuple[int, int, int]] = []
+        for frame_ids, freeze_through in windows:
+            ordered = tuple(sorted(set(int(value) for value in frame_ids)))
+            if (
+                len(ordered) < 2
+                or ordered[0] < 0
+                or freeze_through not in ordered
+                or freeze_through == ordered[-1]
+            ):
+                raise ActiveTrackStoreError(
+                    "active frame-set/freeze identity is invalid"
+                )
+            values.append(ordered)
+            intervals.append((ordered[0], ordered[-1], freeze_through))
+        return self._evaluate_batch_impl(
+            intervals,
+            materialize_tracks=True,
+            active_frame_sets=values,
+        )
+
     def _evaluate_batch_impl(
         self,
         intervals: Iterable[tuple[int, int, int]],
         *,
         materialize_tracks: bool,
+        active_frame_sets: list[tuple[int, ...]] | None = None,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         values = list(intervals)
         for active_first, active_last, freeze_through in values:
@@ -587,13 +614,18 @@ class ActiveTrackStore:
                 ],
                 [[] for _ in values],
             )
+        frame_sets = active_frame_sets or [
+            tuple(range(first, last + 1)) for first, last, _ in values
+        ]
+        if len(frame_sets) != len(values):
+            raise ActiveTrackStoreError("active frame-set batch size differs")
 
         (
             candidates_by_interval,
             rejected_by_interval,
             ordinals,
             unique_active_observations,
-        ) = self._batch_component_metrics(components, values)
+        ) = self._batch_component_metrics(components, values, frame_sets)
         selected_by_interval: list[list[dict[str, Any]]] = []
         bucket_counts_by_interval: list[Counter[tuple[int, int, int]]] = []
         selected_component_indexes: list[list[int]] = []
@@ -611,6 +643,7 @@ class ActiveTrackStore:
             unique_active_observations=unique_active_observations,
             selected_component_indexes=selected_component_indexes,
             intervals=values,
+            frame_sets=frame_sets,
         )
         reports = []
         materialized_by_interval: list[list[SelectedTrackState]] = []
@@ -619,18 +652,14 @@ class ActiveTrackStore:
             selected = selected_by_interval[index]
             materialized = []
             if materialize_tracks:
-                active_first, active_last, _ = interval
+                active_frames = set(frame_sets[index])
                 for candidate in selected:
                     component_uid, component_observations = component_values[
                         candidate["componentIndex"]
                     ]
                     observation_by_frame: dict[int, TrackObservation] = {}
                     for observation in component_observations:
-                        if (
-                            active_first
-                            <= observation.geometry_ordinal
-                            <= active_last
-                        ):
+                        if observation.geometry_ordinal in active_frames:
                             observation_by_frame.setdefault(
                                 observation.geometry_ordinal, observation
                             )
@@ -651,6 +680,7 @@ class ActiveTrackStore:
                     bucket_counts=bucket_counts_by_interval[index],
                     rejected=rejected_by_interval[index],
                     constraints_per_frame=constraints_by_interval[index],
+                    frame_ids=frame_sets[index],
                 )
             )
         return reports, materialized_by_interval
@@ -673,6 +703,7 @@ class ActiveTrackStore:
         self,
         components: dict[str, list[TrackObservation]],
         intervals: list[tuple[int, int, int]],
+        frame_sets: list[tuple[int, ...]],
     ) -> tuple[
         list[list[dict[str, Any]]],
         list[Counter[str]],
@@ -722,20 +753,25 @@ class ActiveTrackStore:
         )
         scores = torch.tensor(padded_scores, dtype=torch.float64, device=device)
         seconds = torch.tensor(padded_seconds, dtype=torch.float64, device=device)
-        active_first = torch.tensor(
-            [value[0] for value in intervals],
-            dtype=torch.int64,
+        minimum_frame = min(value[0] for value in frame_sets)
+        maximum_frame = max(value[-1] for value in frame_sets)
+        membership = torch.zeros(
+            (len(frame_sets), maximum_frame - minimum_frame + 1),
+            dtype=torch.bool,
             device=device,
         )
-        active_last = torch.tensor(
-            [value[1] for value in intervals],
-            dtype=torch.int64,
-            device=device,
+        for index, frame_ids in enumerate(frame_sets):
+            frame_indexes = (
+                torch.tensor(frame_ids, device=device) - minimum_frame
+            )
+            membership[index, frame_indexes] = True
+        shifted_ordinals = ordinals - minimum_frame
+        valid_ordinals = (shifted_ordinals >= 0) & (
+            shifted_ordinals < membership.shape[1]
         )
-        mask = (
-            (ordinals[:, None, :] >= active_first[None, :, None])
-            & (ordinals[:, None, :] <= active_last[None, :, None])
-        )
+        lookup_indexes = shifted_ordinals.clamp(0, membership.shape[1] - 1)
+        mask = membership[:, lookup_indexes].permute(1, 0, 2)
+        mask &= valid_ordinals[:, None, :]
         previous_is_same_view = torch.zeros_like(mask)
         if maximum_observations > 1:
             previous_is_same_view[:, :, 1:] = (
@@ -853,7 +889,9 @@ class ActiveTrackStore:
         integer_metrics = torch.stack(
             (view_counts, bridges, time_bins, grid_rows, grid_columns), dim=2
         ).cpu()
-        float_metrics = torch.stack((parallax.to(torch.float64), mean_scores), dim=2).cpu()
+        float_metrics = torch.stack(
+            (parallax.to(torch.float64), mean_scores), dim=2
+        ).cpu()
         candidates_by_interval: list[list[dict[str, Any]]] = [
             [] for _ in intervals
         ]
@@ -949,6 +987,7 @@ class ActiveTrackStore:
         unique_active_observations: Any,
         selected_component_indexes: list[list[int]],
         intervals: list[tuple[int, int, int]],
+        frame_sets: list[tuple[int, ...]],
     ) -> list[Counter[int]]:
         import torch
 
@@ -964,8 +1003,8 @@ class ActiveTrackStore:
         selected_observations = (
             unique_active_observations & selected_mask[:, :, None]
         )
-        first_ordinal = min(value[0] for value in intervals)
-        last_ordinal = max(value[1] for value in intervals)
+        first_ordinal = min(value[0] for value in frame_sets)
+        last_ordinal = max(value[-1] for value in frame_sets)
         span = last_ordinal - first_ordinal + 1
         expanded_ordinals = ordinals[:, None, :].expand(-1, interval_count, -1)
         interval_offsets = torch.arange(
@@ -981,10 +1020,10 @@ class ActiveTrackStore:
             Counter(
                 {
                     ordinal: int(counts[interval_index, ordinal - first_ordinal])
-                    for ordinal in range(active_first, active_last + 1)
+                    for ordinal in frame_sets[interval_index]
                 }
             )
-            for interval_index, (active_first, active_last, _) in enumerate(intervals)
+            for interval_index, _interval in enumerate(intervals)
         ]
 
     def _build_report(
@@ -996,20 +1035,24 @@ class ActiveTrackStore:
         bucket_counts: Counter[tuple[int, int, int]],
         rejected: Counter[str],
         constraints_per_frame: Counter[int],
+        frame_ids: tuple[int, ...] | None = None,
     ) -> dict[str, Any]:
         active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
+        active_frame_ids = frame_ids or tuple(
+            range(active_first_ordinal, active_last_ordinal + 1)
+        )
         frame_constraints = {
             str(ordinal): constraints_per_frame[ordinal]
-            for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
+            for ordinal in active_frame_ids
         }
         zero_constraint_ordinals = [
             ordinal
-            for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
+            for ordinal in active_frame_ids
             if constraints_per_frame[ordinal] == 0
         ]
         under_constraint_ordinals = [
             ordinal
-            for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
+            for ordinal in active_frame_ids
             if constraints_per_frame[ordinal]
             < self.budget.minimum_constraints_per_keyframe
         ]
@@ -1058,6 +1101,12 @@ class ActiveTrackStore:
             "rejectedReasonHistogram": dict(sorted(rejected.items())),
             "pixelArtifactCount": 0,
         }
+        contiguous = active_frame_ids == tuple(
+            range(active_first_ordinal, active_last_ordinal + 1)
+        )
+        if not contiguous:
+            report["activeFrameIds"] = list(active_frame_ids)
+            report["activeFrameCount"] = len(active_frame_ids)
         report["reportSha256"] = _canonical_sha256(report)
         return report
 
