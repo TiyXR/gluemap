@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 
 from gluemap.estimators.active_track_store import (
@@ -7,7 +9,10 @@ from gluemap.estimators.active_track_store import (
 from gluemap.estimators.fixed_anchor_approximation import (
     FixedAnchorWindowSolution,
 )
-from gluemap.estimators.fixed_anchor_local_ba import refine_fixed_anchor_window
+from gluemap.estimators.fixed_anchor_local_ba import (
+    _ba_summary_acceptance,
+    refine_fixed_anchor_window,
+)
 from gluemap.estimators.fixed_lag_triangulation import triangulate_selected_tracks
 
 
@@ -25,6 +30,35 @@ def _observation(track: int, frame: int, x: float, y: float) -> TrackObservation
         image_height=480,
         score=1.0,
     )
+
+
+def test_iteration_limit_with_finite_cost_decrease_remains_usable() -> None:
+    summary = SimpleNamespace(
+        termination_type=SimpleNamespace(name="NO_CONVERGENCE"),
+        ceres_summary=SimpleNamespace(
+            initial_cost=10.0,
+            final_cost=4.0,
+            num_successful_steps=100,
+            message="Maximum number of iterations reached. Number of iterations: 100.",
+        ),
+    )
+    assert _ba_summary_acceptance(summary) == (
+        True,
+        "iteration-limit-cost-decrease",
+    )
+
+
+def test_iteration_limit_without_improvement_is_rejected() -> None:
+    summary = SimpleNamespace(
+        termination_type=SimpleNamespace(name="NO_CONVERGENCE"),
+        ceres_summary=SimpleNamespace(
+            initial_cost=10.0,
+            final_cost=11.0,
+            num_successful_steps=100,
+            message="Maximum number of iterations reached. Number of iterations: 100.",
+        ),
+    )
+    assert _ba_summary_acceptance(summary) == (False, "unusable-termination")
 
 
 def test_local_ba_keeps_fixed_overlap_poses() -> None:

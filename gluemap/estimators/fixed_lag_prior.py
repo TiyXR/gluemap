@@ -963,6 +963,63 @@ def marginalize_ceres_linearization(
         retained_gradient_current - retained_hessian @ delta_tensor
     )
 
+    unconstrained_eigenvalues, unconstrained_eigenvectors = torch.linalg.eigh(
+        retained_hessian
+    )
+    unconstrained_maximum_eigenvalue = unconstrained_eigenvalues.max().clamp_min(
+        torch.finfo(dtype).eps
+    )
+    scale_gauge = torch.zeros_like(retained_gradient).view(-1, 6)
+    scale_gauge[:, 3:] = _as_tensor(
+        target_points[:, 4:], dtype=dtype, device=device
+    )
+    scale_gauge = scale_gauge.reshape(-1)
+    scale_gauge_norm = torch.linalg.vector_norm(scale_gauge)
+    if bool(scale_gauge_norm > torch.finfo(dtype).eps):
+        scale_gauge /= scale_gauge_norm
+        scale_relative_rayleigh = float(
+            (
+                scale_gauge
+                @ retained_hessian
+                @ scale_gauge
+                / unconstrained_maximum_eigenvalue
+            )
+            .detach()
+            .cpu()
+            .item()
+        )
+        scale_smallest_eigenvector_cosine = float(
+            torch.abs(scale_gauge @ unconstrained_eigenvectors[:, 0])
+            .detach()
+            .cpu()
+            .item()
+        )
+    else:
+        scale_relative_rayleigh = float("inf")
+        scale_smallest_eigenvector_cosine = 0.0
+    scale_projection_applied = bool(
+        previous_prior is not None
+        and expected_nullity == 1
+        and scale_gauge_norm > torch.finfo(dtype).eps
+    )
+    removed_scale_gradient = 0.0
+    if scale_projection_applied:
+        hessian_scale = retained_hessian @ scale_gauge
+        scale_information = scale_gauge @ hessian_scale
+        retained_hessian = (
+            retained_hessian
+            - torch.outer(hessian_scale, scale_gauge)
+            - torch.outer(scale_gauge, hessian_scale)
+            + scale_information * torch.outer(scale_gauge, scale_gauge)
+        )
+        removed_scale_gradient = float(
+            (scale_gauge @ retained_gradient).detach().cpu().item()
+        )
+        retained_gradient = (
+            retained_gradient - scale_gauge * (scale_gauge @ retained_gradient)
+        )
+        retained_hessian = (retained_hessian + retained_hessian.T) * 0.5
+
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
@@ -1016,6 +1073,22 @@ def marginalize_ceres_linearization(
         "priorRank": rank,
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
+        "scaleGaugeProjectionApplied": scale_projection_applied,
+        "scaleGaugeUnconstrainedRelativeRayleigh": scale_relative_rayleigh,
+        "scaleGaugeUnconstrainedSmallestEigenvectorCosine": (
+            scale_smallest_eigenvector_cosine
+        ),
+        "scaleGaugeRemovedGradient": removed_scale_gradient,
+        "priorUnconstrainedSmallestRelativeEigenvalues": [
+            float(value)
+            for value in (
+                unconstrained_eigenvalues[:8]
+                / unconstrained_maximum_eigenvalue
+            )
+            .detach()
+            .cpu()
+            .tolist()
+        ],
         "cpuSparseNormalWallSeconds": sparse_wall,
         "resolvedSchurWallSeconds": schur_wall,
         "pointSchurMicrobatchPoints": schur_microbatch_points,

@@ -57,6 +57,29 @@ def _resolved_backend(summary: object) -> tuple[str, str, bool]:
     return dense, sparse, gpu_used
 
 
+def _ba_summary_acceptance(summary: object) -> tuple[bool, str]:
+    """Keep a finite improving solve that only exhausted its iteration budget."""
+    termination = getattr(summary, "termination_type", None)
+    termination_name = getattr(termination, "name", str(termination))
+    if termination_name in {"CONVERGENCE", "USER_SUCCESS"}:
+        return True, "converged"
+    ceres = getattr(summary, "ceres_summary", summary)
+    initial_cost = float(getattr(ceres, "initial_cost", float("nan")))
+    final_cost = float(getattr(ceres, "final_cost", float("nan")))
+    successful_steps = int(getattr(ceres, "num_successful_steps", 0))
+    message = str(getattr(ceres, "message", ""))
+    if (
+        termination_name == "NO_CONVERGENCE"
+        and "Maximum number of iterations reached" in message
+        and np.isfinite(initial_cost)
+        and np.isfinite(final_cost)
+        and final_cost <= initial_cost
+        and successful_steps > 0
+    ):
+        return True, "iteration-limit-cost-decrease"
+    return False, "unusable-termination"
+
+
 def refine_fixed_anchor_window(
     coarse: FixedAnchorWindowSolution,
     tracks: list[TriangulatedTrackState],
@@ -287,10 +310,8 @@ def refine_fixed_anchor_window(
         )
         for summary in summaries
     ]
-    solve_passed = all(
-        value in {"CONVERGENCE", "USER_SUCCESS"}
-        for value in termination_names
-    )
+    pass_acceptance = [_ba_summary_acceptance(summary) for summary in summaries]
+    solve_passed = all(value[0] for value in pass_acceptance)
     report = {
         "contractId": "jarailsense.gluemap-fixed-anchor-local-ba/v1",
         "status": "passed" if solve_passed else "failed",
@@ -313,6 +334,11 @@ def refine_fixed_anchor_window(
         "solveWallSeconds": solve_wall,
         "totalWallSeconds": build_wall + solve_wall,
         "termination": getattr(termination, "name", str(termination)),
+        "solveAcceptance": pass_acceptance[-1][1],
+        "degradedPassCount": sum(
+            value[1] == "iteration-limit-cost-decrease"
+            for value in pass_acceptance
+        ),
         "initialCost": float(
             getattr(summaries[0], "ceres_summary", summaries[0]).initial_cost
         ),
@@ -321,6 +347,7 @@ def refine_fixed_anchor_window(
             {
                 "passOrdinal": index,
                 "termination": termination_names[index],
+                "solveAcceptance": pass_acceptance[index][1],
                 "initialCost": float(
                     getattr(summary, "ceres_summary", summary).initial_cost
                 ),

@@ -120,6 +120,8 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     assert second.report["coarseFixedWarmStartCount"] == 4
     assert second.report["localBa"]["fixedPoseCount"] == 1
     assert second.report["prior"]["priorNullity"] == 1
+    assert second.report["prior"]["scaleGaugeProjectionApplied"] is True
+    assert third.report["prior"]["scaleGaugeProjectionApplied"] is True
     assert third.report["constraintExemptFrameIds"] == [0]
     assert third.report["zeroConstraintFrameIds"] == []
     assert third.report["minimumConstraintCount"] == 64
