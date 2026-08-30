@@ -21,8 +21,9 @@ class TriangulatedTrackState:
     track_uid: str
     xyz: tuple[float, float, float]
     observations: tuple[Any, ...]
-    positive_depth_fraction: float
-    maximum_reprojection_error_pixels: float
+    positive_depth_fraction: float | None
+    maximum_reprojection_error_pixels: float | None
+    initialization_source: str = "dlt"
 
 
 def _intrinsics_matrix(value: Any, device: str) -> torch.Tensor:

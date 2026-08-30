@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from gluemap.estimators.active_track_store import (
     SelectedTrackState,
@@ -9,6 +10,7 @@ from gluemap.estimators.fixed_anchor_approximation import (
 )
 from gluemap.estimators.schur_fej_fixed_lag_runner import (
     SchurFejFixedLagRunner,
+    SchurFejFixedLagRunnerError,
 )
 
 
@@ -218,6 +220,132 @@ def test_three_pose_batches_use_one_ba_and_resume_exactly():
         second.prior.gradient.cpu(),
         rtol=1e-9,
         atol=1e-9,
+    )
+
+
+def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+
+    def create_runner(policy: str = "refined-point-cache"):
+        return SchurFejFixedLagRunner(
+            fixed_gauge_frame_ids={0},
+            camera_model="PINHOLE",
+            triangulation_device_policy="cuda-required",
+            triangulation_initialization_policy=policy,
+            ba_device_policy="cpu",
+            ceres_cuda_available=False,
+            prior_device_policy="cuda-required",
+            prior_expected_nullity=1,
+        )
+
+    runner = create_runner()
+    first = runner.advance(
+        first_coarse, first_tracks, marginalize_frame_id=1
+    )
+    checkpoint = runner.snapshot()
+    second = runner.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+    resumed = create_runner()
+    resumed.restore(checkpoint)
+    resumed_second = resumed.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+
+    assert first.report["triangulation"]["cacheReusedTrackCount"] == 0
+    assert first.report["triangulation"]["dltInputTrackCount"] == 64
+    assert first.report["triangulation"]["cacheResidentTrackCountAfter"] == 64
+    assert checkpoint["triangulationInitializationPolicy"] == (
+        "refined-point-cache"
+    )
+    assert len(checkpoint["trackPointCache"]) == 64
+    assert second.report["triangulation"]["cacheReusedTrackCount"] == 64
+    assert second.report["triangulation"]["dltInputTrackCount"] == 0
+    assert second.report["triangulation"]["backend"] == "not-run-cache-hit"
+    assert all(
+        value.initialization_source == "refined-ba-cache"
+        for value in second.triangulated_tracks
+    )
+    assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 0
+    np.testing.assert_allclose(
+        resumed_second.finalized_center,
+        second.finalized_center,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        resumed_second.prior.hessian.cpu(),
+        second.prior.hessian.cpu(),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+    incompatible = create_runner("full-dlt")
+    with pytest.raises(
+        SchurFejFixedLagRunnerError,
+        match="checkpoint state is invalid",
+    ):
+        incompatible.restore(checkpoint)
+
+
+def test_refined_point_cache_evicts_tracks_outside_the_active_window():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+    second_tracks = [
+        value
+        if index < 32
+        else SelectedTrackState(
+            track_uid=f"replacement-{index}",
+            observations=value.observations,
+        )
+        for index, value in enumerate(second_tracks)
+    ]
+    runner = SchurFejFixedLagRunner(
+        fixed_gauge_frame_ids={0},
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        triangulation_initialization_policy="refined-point-cache",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+
+    runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+    second = runner.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+    checkpoint = runner.snapshot()
+
+    assert second.report["triangulation"]["cacheReusedTrackCount"] == 32
+    assert second.report["triangulation"]["dltInputTrackCount"] == 32
+    assert second.report["triangulation"]["cacheEvictedTrackCount"] == 32
+    assert second.report["triangulation"]["cacheResidentTrackCountAfter"] == 64
+    assert len(checkpoint["trackPointCache"]) == 64
+    assert not any(
+        row[0].startswith("track-") and int(row[0].split("-")[1]) >= 32
+        for row in checkpoint["trackPointCache"]
     )
 
 
