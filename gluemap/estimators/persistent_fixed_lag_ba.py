@@ -181,6 +181,7 @@ class PersistentFixedLagBaProblem:
     ) -> dict[str, Any]:
         """Apply one active-window delta without changing factor semantics."""
         started = time.perf_counter()
+        phase_wall_seconds: dict[str, float] = {}
         if self._prior_residual_block is not None:
             raise PersistentFixedLagBaError(
                 "persistent BA prior must be removed before synchronization"
@@ -210,6 +211,8 @@ class PersistentFixedLagBaProblem:
             raise PersistentFixedLagBaError(
                 "persistent BA track identity is invalid"
             )
+        phase_wall_seconds["identityValidation"] = time.perf_counter() - started
+        phase_started = time.perf_counter()
         target_observations: dict[tuple[str, str], Any] = {}
         for track_uid, track in track_by_uid.items():
             for observation in track.observations:
@@ -223,7 +226,11 @@ class PersistentFixedLagBaProblem:
                         "persistent BA observation identity is invalid"
                     )
                 target_observations[key] = observation
+        phase_wall_seconds["targetObservationBuild"] = (
+            time.perf_counter() - phase_started
+        )
 
+        phase_started = time.perf_counter()
         removed_observations = 0
         native_removals: list[_ObservationBlock] = []
         for track_uid, point in list(self.points.items()):
@@ -233,9 +240,13 @@ class PersistentFixedLagBaProblem:
                         self._remove_observation(track_uid, observation_uid)
                     )
                     removed_observations += 1
+        phase_wall_seconds["removalScan"] = time.perf_counter() - phase_started
         native_batch_started = time.perf_counter()
+        phase_started = time.perf_counter()
         self._remove_native_observations(native_removals)
+        phase_wall_seconds["nativeRemoval"] = time.perf_counter() - phase_started
 
+        phase_started = time.perf_counter()
         removed_points = 0
         for track_uid in list(self.points):
             if track_uid not in track_by_uid:
@@ -296,7 +307,9 @@ class PersistentFixedLagBaProblem:
             else:
                 point.values[:] = values
                 reused_points += 1
+        phase_wall_seconds["posePointBuild"] = time.perf_counter() - phase_started
 
+        phase_started = time.perf_counter()
         created_observations = 0
         reused_observations = 0
         entering_observations: list[tuple[str, str, Any]] = []
@@ -335,7 +348,11 @@ class PersistentFixedLagBaProblem:
                     track_order[value[0]],
                 )
             )
+        phase_wall_seconds["enteringObservationBuild"] = (
+            time.perf_counter() - phase_started
+        )
 
+        phase_started = time.perf_counter()
         point_addresses = np.fromiter(
             (
                 self.points[track_uid].values.ctypes.data
@@ -367,7 +384,9 @@ class PersistentFixedLagBaProblem:
             dtype=np.uint8,
             count=len(entering_observations),
         )
+        phase_wall_seconds["nativeArrayBuild"] = time.perf_counter() - phase_started
         if entering_observations:
+            phase_started = time.perf_counter()
             if self.policy == "native-rebuild-every-window":
                 native_batch = (
                     pygluemap.add_reprojection_residual_batch_implicit_parameters(
@@ -395,6 +414,10 @@ class PersistentFixedLagBaProblem:
                 raise PersistentFixedLagBaError(
                     "persistent BA native visual batch size differs"
                 )
+            phase_wall_seconds["nativeResidualBatch"] = (
+                time.perf_counter() - phase_started
+            )
+            phase_started = time.perf_counter()
             for batch_index, (
                 track_uid,
                 observation_uid,
@@ -408,6 +431,13 @@ class PersistentFixedLagBaProblem:
                         native_batch_index=batch_index,
                     )
                 )
+            phase_wall_seconds["observationBookkeeping"] = (
+                time.perf_counter() - phase_started
+            )
+        else:
+            phase_wall_seconds["nativeResidualBatch"] = 0.0
+            phase_wall_seconds["observationBookkeeping"] = 0.0
+        phase_started = time.perf_counter()
         if self.policy == "native-rebuild-every-window":
             if not self.problem.has_parameter_block(self.camera_params):
                 raise PersistentFixedLagBaError(
@@ -424,9 +454,14 @@ class PersistentFixedLagBaProblem:
                     )
                 self.problem.set_manifold(pose.values, pose.manifold)
                 self.problem.set_parameter_block_variable(pose.values)
+        phase_wall_seconds["parameterFinalize"] = time.perf_counter() - phase_started
         native_batch_wall_seconds = time.perf_counter() - native_batch_started
         self._ordered_frame_ids = tuple(int(value) for value in frame_ids)
         self._ordered_track_uids = tuple(track_by_uid)
+        wall_seconds = time.perf_counter() - started
+        phase_wall_seconds["other"] = max(
+            0.0, wall_seconds - sum(phase_wall_seconds.values())
+        )
 
         return {
             "status": "passed",
@@ -453,7 +488,8 @@ class PersistentFixedLagBaProblem:
             "problemResidualBlockCount": self.problem.num_residual_blocks(),
             "problemResidualCount": self.problem.num_residuals(),
             "nativeVisualBatchWallSeconds": native_batch_wall_seconds,
-            "wallSeconds": time.perf_counter() - started,
+            "phaseWallSeconds": phase_wall_seconds,
+            "wallSeconds": wall_seconds,
         }
 
     def add_prior(self, prior: FejPriorState | None) -> None:
