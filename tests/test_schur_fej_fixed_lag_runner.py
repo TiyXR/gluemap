@@ -181,6 +181,8 @@ def test_two_advances_reuse_persistent_ceres_problem() -> None:
     assert first.refined is not None
     assert second.refined is not None
     assert first.refined.report["baProblemPolicy"] == "persistent-delta"
+    assert first.refined.report["reconstructionBuildBypassed"] is True
+    assert len(first.refined.reconstruction.images) == 0
     assert first.refined.report["persistentProblem"]["createdPointCount"] == 64
     assert second.refined.report["persistentProblem"]["createdPointCount"] == 0
     assert second.refined.report["persistentProblem"]["reusedPointCount"] == 64

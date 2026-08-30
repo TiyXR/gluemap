@@ -124,6 +124,7 @@ def test_local_ba_keeps_fixed_overlap_poses() -> None:
     )
 
     assert solution.report["status"] == "passed"
+    assert solution.report["reconstructionBuildBypassed"] is False
     assert solution.report["marginalizationResidualPolicy"] == "all-active"
     assert solution.report["gpuUsed"] is False
     assert solution.report["trackCount"] == 32

@@ -158,6 +158,7 @@ def refine_fixed_anchor_window(
     fallback_size = next(iter(image_size_by_id.values()))
 
     build_started = time.perf_counter()
+    persistent_mode = persistent_ba_session is not None
     reconstruction = pycolmap.Reconstruction()
     width, height = fallback_size
     camera = camera_from_intrinsics_matrix(
@@ -167,24 +168,28 @@ def refine_fixed_anchor_window(
         height=height,
         camera_id=1,
     )
-    reconstruction.add_camera_with_trivial_rig(camera)
+    if not persistent_mode:
+        reconstruction.add_camera_with_trivial_rig(camera)
 
     image_id_by_frame = {
         frame_id: index + 1 for index, frame_id in enumerate(frame_ids)
     }
     images: dict[int, pycolmap.Image] = {}
-    for frame_id in frame_ids:
-        image = pycolmap.Image()
-        image.image_id = image_id_by_frame[frame_id]
-        image.camera_id = 1
-        image.name = frame_uid_by_id.get(frame_id, f"geometry-{frame_id}")
-        images[frame_id] = image
+    if not persistent_mode:
+        for frame_id in frame_ids:
+            image = pycolmap.Image()
+            image.image_id = image_id_by_frame[frame_id]
+            image.camera_id = 1
+            image.name = frame_uid_by_id.get(
+                frame_id, f"geometry-{frame_id}"
+            )
+            images[frame_id] = image
 
     point_rows: list[tuple[str, np.ndarray, pycolmap.Track]] = []
     marginalize_track_uids: set[str] = set()
     observation_count = 0
     for track in tracks:
-        colmap_track = pycolmap.Track()
+        colmap_track = None if persistent_mode else pycolmap.Track()
         seen_frames: set[int] = set()
         for observation in track.observations:
             frame_id = observation.geometry_ordinal
@@ -193,14 +198,17 @@ def refine_fixed_anchor_window(
                     "one track contains duplicate frame observations"
                 )
             seen_frames.add(frame_id)
-            image = images[frame_id]
-            point2d_index = len(image.points2D)
-            image.points2D.append(
-                pycolmap.Point2D(
-                    np.asarray((observation.x, observation.y), dtype=np.float64)
+            if not persistent_mode:
+                image = images[frame_id]
+                point2d_index = len(image.points2D)
+                image.points2D.append(
+                    pycolmap.Point2D(
+                        np.asarray(
+                            (observation.x, observation.y), dtype=np.float64
+                        )
+                    )
                 )
-            )
-            colmap_track.add_element(image.image_id, point2d_index)
+                colmap_track.add_element(image.image_id, point2d_index)
             observation_count += 1
         if len(seen_frames) < 2:
             continue
@@ -214,22 +222,31 @@ def refine_fixed_anchor_window(
             )
         )
 
-    for frame_id in frame_ids:
-        rotation = np.asarray(coarse.rotations[frame_id], dtype=np.float64)
-        center = np.asarray(coarse.centers[frame_id], dtype=np.float64)
-        cam_from_world = pycolmap.Rigid3d(
-            pycolmap.Rotation3d(rotation), -rotation @ center
-        )
-        reconstruction.add_image_with_trivial_frame(
-            images[frame_id], cam_from_world
-        )
+    if not persistent_mode:
+        for frame_id in frame_ids:
+            rotation = np.asarray(coarse.rotations[frame_id], dtype=np.float64)
+            center = np.asarray(coarse.centers[frame_id], dtype=np.float64)
+            cam_from_world = pycolmap.Rigid3d(
+                pycolmap.Rotation3d(rotation), -rotation @ center
+            )
+            reconstruction.add_image_with_trivial_frame(
+                images[frame_id], cam_from_world
+            )
 
     track_point3d_ids: dict[str, int] = {}
-    for track_uid, xyz, colmap_track in point_rows:
-        point3d_id = reconstruction.add_point3D(xyz, colmap_track)
-        track_point3d_ids[track_uid] = int(point3d_id)
-    marginalize_point3d_ids = tuple(
-        sorted(track_point3d_ids[value] for value in marginalize_track_uids)
+    if not persistent_mode:
+        for track_uid, xyz, colmap_track in point_rows:
+            point3d_id = reconstruction.add_point3D(xyz, colmap_track)
+            track_point3d_ids[track_uid] = int(point3d_id)
+    marginalize_point3d_ids = (
+        ()
+        if persistent_mode
+        else tuple(
+            sorted(
+                track_point3d_ids[value]
+                for value in marginalize_track_uids
+            )
+        )
     )
     capture_point3d_ids = (
         marginalize_point3d_ids
@@ -254,6 +271,21 @@ def refine_fixed_anchor_window(
             tracks=tracks,
             camera_model_id=camera.model,
             camera_params=camera.params,
+        )
+        track_point3d_ids = {
+            track_uid: persistent_problem.point_id(track_uid)
+            for track_uid, _, _ in point_rows
+        }
+        marginalize_point3d_ids = tuple(
+            sorted(
+                track_point3d_ids[value]
+                for value in marginalize_track_uids
+            )
+        )
+        capture_point3d_ids = (
+            marginalize_point3d_ids
+            if marginalization_residual_policy == "retiring-track-closure"
+            else None
         )
     build_wall = time.perf_counter() - build_started
 
@@ -362,15 +394,6 @@ def refine_fixed_anchor_window(
                 )
         summaries.append(summary)
     solve_wall = time.perf_counter() - solve_started
-    if persistent_problem is not None:
-        for frame_id, image_id in image_id_by_frame.items():
-            reconstruction.frames[image_id].rig_from_world.params[:] = (
-                persistent_problem.pose_values(frame_id)
-            )
-        for track_uid, point3d_id in track_point3d_ids.items():
-            reconstruction.points3D[point3d_id].xyz[:] = (
-                persistent_problem.point_values(track_uid)
-            )
     next_prior = None
     if marginalize_pose_id is not None:
         if len(captured_linearization) != 1:
@@ -388,7 +411,14 @@ def refine_fixed_anchor_window(
     rotations: dict[int, np.ndarray] = {}
     centers: dict[int, np.ndarray] = {}
     for frame_id, image_id in image_id_by_frame.items():
-        pose = reconstruction.images[image_id].cam_from_world()
+        if persistent_problem is None:
+            pose = reconstruction.images[image_id].cam_from_world()
+        else:
+            pose_values = persistent_problem.pose_values(frame_id)
+            pose = pycolmap.Rigid3d(
+                pycolmap.Rotation3d(pose_values[:4]),
+                pose_values[4:],
+            )
         rotation = np.asarray(pose.rotation.matrix(), dtype=np.float64)
         translation = np.asarray(pose.translation, dtype=np.float64)
         rotations[frame_id] = rotation
@@ -450,6 +480,7 @@ def refine_fixed_anchor_window(
         ),
         "persistentProblem": persistent_sync_report,
         "persistentSolvePasses": persistent_solve_reports,
+        "reconstructionBuildBypassed": persistent_mode,
         "frameCount": len(frame_ids),
         "fixedPoseCount": len(fixed_pose_ids),
         "trackCount": len(point_rows),
@@ -507,7 +538,11 @@ def refine_fixed_anchor_window(
         frame_ids=frame_ids,
         rotations=rotations,
         centers=centers,
-        intrinsics=np.asarray(reconstruction.cameras[1].calibration_matrix()),
+        intrinsics=(
+            matrix_k.copy()
+            if persistent_problem is not None
+            else np.asarray(reconstruction.cameras[1].calibration_matrix())
+        ),
         track_point3d_ids=track_point3d_ids,
         reconstruction=reconstruction,
         next_prior=next_prior,
