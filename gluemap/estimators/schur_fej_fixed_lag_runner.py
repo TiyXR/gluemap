@@ -164,6 +164,7 @@ class SchurFejFixedLagRunner:
             "inhomogeneous-lstsq",
             "homogeneous-gram-eigh-fallback-svd",
             "homogeneous-svd-cpu-lapack",
+            "homogeneous-svd-auto-benchmark",
         }:
             raise SchurFejFixedLagRunnerError(
                 "triangulation solver policy is invalid"
@@ -182,6 +183,12 @@ class SchurFejFixedLagRunner:
         self.triangulation_solver_policy = triangulation_solver_policy
         self.triangulation_solver_fallback_relative_eigenvalue = (
             triangulation_solver_fallback_relative_eigenvalue
+        )
+        self._resolved_triangulation_solver_policy = (
+            None
+            if triangulation_solver_policy
+            == "homogeneous-svd-auto-benchmark"
+            else triangulation_solver_policy
         )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
@@ -388,11 +395,26 @@ class SchurFejFixedLagRunner:
                 matrix_k,
                 device_policy=self.triangulation_device_policy,
                 microbatch_tracks=self.triangulation_microbatch_tracks,
-                solver_policy=self.triangulation_solver_policy,
+                solver_policy=(
+                    self._resolved_triangulation_solver_policy
+                    or self.triangulation_solver_policy
+                ),
                 solver_fallback_relative_eigenvalue=(
                     self.triangulation_solver_fallback_relative_eigenvalue
                 ),
             )
+            resolved_solver_policy = dlt_report["resolvedSolverPolicy"]
+            if self._resolved_triangulation_solver_policy is None:
+                self._resolved_triangulation_solver_policy = (
+                    resolved_solver_policy
+                )
+            elif (
+                self._resolved_triangulation_solver_policy
+                != resolved_solver_policy
+            ):
+                raise SchurFejFixedLagRunnerError(
+                    "triangulation solver backend changed during one run"
+                )
             dlt_by_uid = {value.track_uid: value for value in dlt_results}
         triangulated_by_uid = {**cached_by_uid, **dlt_by_uid}
         triangulated = [
@@ -421,6 +443,10 @@ class SchurFejFixedLagRunner:
                 "microbatchTracks": self.triangulation_microbatch_tracks,
                 "microbatchCount": 0,
                 "solverPolicy": self.triangulation_solver_policy,
+                "resolvedSolverPolicy": (
+                    self._resolved_triangulation_solver_policy
+                    or self.triangulation_solver_policy
+                ),
                 "solverComputeBackend": "not-run-cache-hit",
                 "solverFallbackRelativeEigenvalue": (
                     self.triangulation_solver_fallback_relative_eigenvalue
@@ -748,6 +774,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "resolvedTriangulationSolverPolicy": (
+                self._resolved_triangulation_solver_policy
+            ),
             "triangulationSolverFallbackRelativeEigenvalue": (
                 self.triangulation_solver_fallback_relative_eigenvalue
             ),
@@ -809,6 +838,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "resolvedTriangulationSolverPolicy": (
+                self._resolved_triangulation_solver_policy
+            ),
             "triangulationSolverFallbackRelativeEigenvalue": (
                 self.triangulation_solver_fallback_relative_eigenvalue
             ),
@@ -867,6 +899,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "resolvedTriangulationSolverPolicy": (
+                self._resolved_triangulation_solver_policy
+            ),
             "triangulationSolverFallbackRelativeEigenvalue": (
                 self.triangulation_solver_fallback_relative_eigenvalue
             ),
@@ -925,8 +960,20 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_solver_policy = checkpoint.get(
             "triangulationSolverPolicy", "homogeneous-svd"
         )
+        checkpoint_resolved_triangulation_solver_policy = checkpoint.get(
+            "resolvedTriangulationSolverPolicy",
+            checkpoint_triangulation_solver_policy,
+        )
         checkpoint_triangulation_fallback_threshold = checkpoint.get(
             "triangulationSolverFallbackRelativeEigenvalue", 1e-6
+        )
+        checkpoint_resolved_solver_valid = (
+            checkpoint_resolved_triangulation_solver_policy
+            in {"homogeneous-svd", "homogeneous-svd-cpu-lapack"}
+            if self.triangulation_solver_policy
+            == "homogeneous-svd-auto-benchmark"
+            else checkpoint_resolved_triangulation_solver_policy
+            == self.triangulation_solver_policy
         )
         cache_rows = checkpoint.get("trackPointCache", [])
         if (
@@ -945,6 +992,7 @@ class SchurFejFixedLagRunner:
             != self.triangulation_initialization_policy
             or checkpoint_triangulation_solver_policy
             != self.triangulation_solver_policy
+            or not checkpoint_resolved_solver_valid
             or checkpoint_triangulation_fallback_threshold
             != self.triangulation_solver_fallback_relative_eigenvalue
             or not isinstance(cache_rows, list)
@@ -1008,6 +1056,9 @@ class SchurFejFixedLagRunner:
         )
         self._next_window_ordinal = next_ordinal
         self._terminal_finalized = False
+        self._resolved_triangulation_solver_policy = (
+            checkpoint_resolved_triangulation_solver_policy
+        )
         restored_cache: dict[str, _CachedTrackPoint] = {}
         for row in cache_rows:
             if (
@@ -1068,8 +1119,20 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_solver_policy = checkpoint.get(
             "triangulationSolverPolicy", "homogeneous-svd"
         )
+        checkpoint_resolved_triangulation_solver_policy = checkpoint.get(
+            "resolvedTriangulationSolverPolicy",
+            checkpoint_triangulation_solver_policy,
+        )
         checkpoint_triangulation_fallback_threshold = checkpoint.get(
             "triangulationSolverFallbackRelativeEigenvalue", 1e-6
+        )
+        checkpoint_resolved_solver_valid = (
+            checkpoint_resolved_triangulation_solver_policy
+            in {"homogeneous-svd", "homogeneous-svd-cpu-lapack"}
+            if self.triangulation_solver_policy
+            == "homogeneous-svd-auto-benchmark"
+            else checkpoint_resolved_triangulation_solver_policy
+            == self.triangulation_solver_policy
         )
         if (
             checkpoint.get("status") != "passed"
@@ -1083,6 +1146,7 @@ class SchurFejFixedLagRunner:
             != self.triangulation_initialization_policy
             or checkpoint_triangulation_solver_policy
             != self.triangulation_solver_policy
+            or not checkpoint_resolved_solver_valid
             or checkpoint_triangulation_fallback_threshold
             != self.triangulation_solver_fallback_relative_eigenvalue
             or set(rotations) != fixed_gauge
@@ -1102,6 +1166,9 @@ class SchurFejFixedLagRunner:
         self._prior = None
         self._next_window_ordinal = next_ordinal
         self._terminal_finalized = True
+        self._resolved_triangulation_solver_policy = (
+            checkpoint_resolved_triangulation_solver_policy
+        )
         self._track_point_cache = {}
         if self._persistent_ba_session is not None:
             self._persistent_ba_session.problem = None

@@ -102,6 +102,12 @@ class FixedAnchorDiagnosticRunner:
         self.triangulation_solver_fallback_relative_eigenvalue = (
             triangulation_solver_fallback_relative_eigenvalue
         )
+        self._resolved_triangulation_solver_policy = (
+            None
+            if triangulation_solver_policy
+            == "homogeneous-svd-auto-benchmark"
+            else triangulation_solver_policy
+        )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_max_iterations = ba_max_iterations
@@ -168,11 +174,23 @@ class FixedAnchorDiagnosticRunner:
             matrix_k,
             device_policy=self.triangulation_device_policy,
             microbatch_tracks=self.triangulation_microbatch_tracks,
-            solver_policy=self.triangulation_solver_policy,
+            solver_policy=(
+                self._resolved_triangulation_solver_policy
+                or self.triangulation_solver_policy
+            ),
             solver_fallback_relative_eigenvalue=(
                 self.triangulation_solver_fallback_relative_eigenvalue
             ),
         )
+        resolved_solver_policy = triangulation_report[
+            "resolvedSolverPolicy"
+        ]
+        if self._resolved_triangulation_solver_policy is None:
+            self._resolved_triangulation_solver_policy = resolved_solver_policy
+        elif self._resolved_triangulation_solver_policy != resolved_solver_policy:
+            raise FixedAnchorDiagnosticRunnerError(
+                "triangulation solver backend changed during one run"
+            )
         triangulation_wall = time.perf_counter() - triangulation_started
 
         ba_started = time.perf_counter()

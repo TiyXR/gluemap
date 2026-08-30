@@ -56,6 +56,7 @@ def triangulate_selected_tracks(
         "inhomogeneous-lstsq",
         "homogeneous-gram-eigh-fallback-svd",
         "homogeneous-svd-cpu-lapack",
+        "homogeneous-svd-auto-benchmark",
     }:
         raise FixedLagTriangulationError("triangulation solver policy is invalid")
     if not 0.0 < solver_fallback_relative_eigenvalue <= 1.0:
@@ -117,6 +118,10 @@ def triangulate_selected_tracks(
     solver_fast_track_count = 0
     solver_fallback_track_count = 0
     relative_eigenvalues: list[torch.Tensor] = []
+    resolved_solver_policy: str | None = None
+    benchmark_gpu_wall_seconds: float | None = None
+    benchmark_cpu_wall_seconds: float | None = None
+    benchmark_track_count = 0
     for start in range(0, len(usable), microbatch_tracks):
         batch = usable[start : start + microbatch_tracks]
         microbatch_count += 1
@@ -156,17 +161,45 @@ def triangulate_selected_tracks(
         design = torch.stack((row_x, row_y), dim=2)
         design = design.masked_fill(~mask_tensor[..., None, None], 0.0)
         design = design.reshape(len(batch), batch_maximum_views * 2, 4)
-        if solver_policy == "homogeneous-svd":
+        active_solver_policy = solver_policy
+        if solver_policy == "homogeneous-svd-auto-benchmark":
+            if resolved_solver_policy is None:
+                benchmark_track_count = min(len(batch), 256)
+                sample = design[:benchmark_track_count]
+                if device == "cuda":
+                    torch.cuda.synchronize()
+                    benchmark_started = time.perf_counter()
+                    torch.linalg.svd(sample, full_matrices=False)
+                    torch.cuda.synchronize()
+                    benchmark_gpu_wall_seconds = (
+                        time.perf_counter() - benchmark_started
+                    )
+                benchmark_started = time.perf_counter()
+                np.linalg.svd(
+                    sample.detach().cpu().numpy(), full_matrices=False
+                )
+                benchmark_cpu_wall_seconds = (
+                    time.perf_counter() - benchmark_started
+                )
+                resolved_solver_policy = (
+                    "homogeneous-svd"
+                    if benchmark_gpu_wall_seconds is not None
+                    and benchmark_gpu_wall_seconds
+                    <= benchmark_cpu_wall_seconds
+                    else "homogeneous-svd-cpu-lapack"
+                )
+            active_solver_policy = resolved_solver_policy
+        if active_solver_policy == "homogeneous-svd":
             _, _, right = torch.linalg.svd(design, full_matrices=False)
             homogeneous = right[:, -1, :]
-        elif solver_policy == "homogeneous-svd-cpu-lapack":
+        elif active_solver_policy == "homogeneous-svd-cpu-lapack":
             _, _, right_cpu = np.linalg.svd(
                 design.detach().cpu().numpy(), full_matrices=False
             )
             homogeneous = torch.as_tensor(
                 right_cpu[:, -1, :], dtype=torch.float64, device=device
             )
-        elif solver_policy in {
+        elif active_solver_policy in {
             "homogeneous-gram-eigh",
             "homogeneous-gram-eigh-fallback-svd",
         }:
@@ -177,7 +210,7 @@ def triangulate_selected_tracks(
                 eigenvalues[:, 1].abs(), min=torch.finfo(torch.float64).tiny
             )
             relative_eigenvalues.append(relative_eigenvalue)
-            if solver_policy == "homogeneous-gram-eigh-fallback-svd":
+            if active_solver_policy == "homogeneous-gram-eigh-fallback-svd":
                 fallback = (
                     ~torch.isfinite(relative_eigenvalue)
                     | (
@@ -193,7 +226,7 @@ def triangulate_selected_tracks(
                         design[fallback], full_matrices=False
                     )
                     homogeneous[fallback] = fallback_right[:, -1, :]
-        elif solver_policy == "homogeneous-qr-svd":
+        elif active_solver_policy == "homogeneous-qr-svd":
             reduced = torch.linalg.qr(design, mode="reduced").R
             _, _, right = torch.linalg.svd(reduced, full_matrices=False)
             homogeneous = right[:, -1, :]
@@ -294,11 +327,16 @@ def triangulate_selected_tracks(
         "microbatchTracks": microbatch_tracks,
         "microbatchCount": microbatch_count,
         "solverPolicy": solver_policy,
+        "resolvedSolverPolicy": resolved_solver_policy or solver_policy,
         "solverComputeBackend": (
             "cpu-lapack"
-            if solver_policy == "homogeneous-svd-cpu-lapack"
+            if (resolved_solver_policy or solver_policy)
+            == "homogeneous-svd-cpu-lapack"
             else device
         ),
+        "solverBenchmarkTrackCount": benchmark_track_count,
+        "solverBenchmarkGpuWallSeconds": benchmark_gpu_wall_seconds,
+        "solverBenchmarkCpuWallSeconds": benchmark_cpu_wall_seconds,
         "solverFallbackRelativeEigenvalue": (
             solver_fallback_relative_eigenvalue
         ),

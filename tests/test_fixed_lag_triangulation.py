@@ -154,6 +154,15 @@ def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
         microbatch_tracks=7,
         solver_policy="homogeneous-svd-cpu-lapack",
     )
+    automatic, automatic_report = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+        microbatch_tracks=7,
+        solver_policy="homogeneous-svd-auto-benchmark",
+    )
 
     assert svd_report["solverPolicy"] == "homogeneous-svd"
     assert gram_report["solverPolicy"] == "homogeneous-gram-eigh"
@@ -168,6 +177,10 @@ def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
         == len(tracks)
     )
     assert cpu_lapack_report["solverComputeBackend"] == "cpu-lapack"
+    assert automatic_report["resolvedSolverPolicy"] == (
+        "homogeneous-svd-cpu-lapack"
+    )
+    assert automatic_report["solverBenchmarkTrackCount"] == 7
     assert [value.track_uid for value in gram] == [value.track_uid for value in svd]
     assert np.allclose(
         np.asarray([value.xyz for value in gram]),
@@ -195,6 +208,12 @@ def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
     )
     assert np.allclose(
         np.asarray([value.xyz for value in cpu_lapack]),
+        np.asarray([value.xyz for value in svd]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert np.allclose(
+        np.asarray([value.xyz for value in automatic]),
         np.asarray([value.xyz for value in svd]),
         rtol=1e-10,
         atol=1e-10,
