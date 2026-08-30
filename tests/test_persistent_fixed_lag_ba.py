@@ -116,6 +116,11 @@ def test_persistent_problem_applies_native_visual_enter_leave_delta() -> None:
     assert first["visualResidualBindingMode"] == "native-enter-leave-delta"
     assert first["problemResidualCount"] == 320
     assert solve["gpuRequested"] is False
+    assert solve["linearSolverOrdering"] == (
+        "points-group-0-poses-group-1"
+    )
+    assert solve["orderedPointCount"] == 32
+    assert solve["orderedPoseCount"] == 5
     assert summary.final_cost <= summary.initial_cost
     assert second["createdPoseCount"] == 1
     assert second["removedPoseCount"] == 1

@@ -130,6 +130,8 @@ class PersistentFixedLagBaProblem:
         self._next_point_id = 1
         self._prior_residual_block: object | None = None
         self._prior_cost: object | None = None
+        self._ordered_frame_ids: tuple[int, ...] = ()
+        self._ordered_track_uids: tuple[str, ...] = ()
 
     def _remove_observation(
         self, track_uid: str, observation_uid: str
@@ -357,6 +359,8 @@ class PersistentFixedLagBaProblem:
                     )
                 )
         native_batch_wall_seconds = time.perf_counter() - native_batch_started
+        self._ordered_frame_ids = tuple(int(value) for value in frame_ids)
+        self._ordered_track_uids = tuple(track_by_uid)
 
         return {
             "status": "passed",
@@ -428,15 +432,39 @@ class PersistentFixedLagBaProblem:
             ceres_cuda_available=ceres_cuda_available,
         )
         summary = pyceres.SolverSummary()
-        if use_gpu:
-            pygluemap.solve_cuda(options, self.problem, summary)
-        else:
-            pyceres.solve(options, self.problem, summary)
+        point_addresses = np.fromiter(
+            (
+                self.points[value].values.ctypes.data
+                for value in self._ordered_track_uids
+            ),
+            dtype=np.uint64,
+            count=len(self._ordered_track_uids),
+        )
+        pose_addresses = np.fromiter(
+            (
+                self.poses[value].values.ctypes.data
+                for value in self._ordered_frame_ids
+            ),
+            dtype=np.uint64,
+            count=len(self._ordered_frame_ids),
+        )
+        pygluemap.solve_with_ba_ordering(
+            options,
+            self.problem,
+            summary,
+            point_addresses,
+            pose_addresses,
+            int(self.camera_params.ctypes.data),
+            use_gpu,
+        )
         _validate_resolved_ba_backend(summary, use_gpu)
         return summary, {
             "status": "passed",
             "requestedThreadCount": requested_threads,
             "gpuRequested": use_gpu,
+            "linearSolverOrdering": "points-group-0-poses-group-1",
+            "orderedPointCount": len(self._ordered_track_uids),
+            "orderedPoseCount": len(self._ordered_frame_ids),
             "wallSeconds": time.perf_counter() - started,
         }
 

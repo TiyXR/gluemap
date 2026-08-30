@@ -81,29 +81,88 @@ ceres::Manifold *CreateTranslationOnlyManifold() {
       ceres::SubsetManifold(4, constant_quat), ceres::EuclideanManifold<3>());
 }
 
-// Solve a Ceres problem with CUDA GPU acceleration
-void SolveCUDA(const ceres::Solver::Options &input_options,
-               ceres::Problem *problem, ceres::Solver::Summary *summary) {
-  ceres::Solver::Options options = input_options;
-
+void ConfigureCUDA(ceres::Solver::Options *options) {
 #ifdef CERES_HAS_CUDA
-  switch (options.linear_solver_type) {
+  switch (options->linear_solver_type) {
   case ceres::SPARSE_NORMAL_CHOLESKY:
   case ceres::SPARSE_SCHUR:
 #ifndef CERES_NO_CUDSS
-    options.sparse_linear_algebra_library_type = ceres::CUDA_SPARSE;
+    options->sparse_linear_algebra_library_type = ceres::CUDA_SPARSE;
 #endif
     break;
   case ceres::DENSE_NORMAL_CHOLESKY:
   case ceres::DENSE_SCHUR:
   case ceres::DENSE_QR:
-    options.dense_linear_algebra_library_type = ceres::CUDA;
+    options->dense_linear_algebra_library_type = ceres::CUDA;
     break;
   default:
     break;
   }
 #endif
+}
 
+// Solve a Ceres problem with CUDA GPU acceleration
+void SolveCUDA(const ceres::Solver::Options &input_options,
+               ceres::Problem *problem, ceres::Solver::Summary *summary) {
+  ceres::Solver::Options options = input_options;
+  ConfigureCUDA(&options);
+
+  py::gil_scoped_release release;
+  ceres::Solve(options, problem, summary);
+}
+
+void SolveWithBAOrdering(
+    const ceres::Solver::Options &input_options, ceres::Problem *problem,
+    ceres::Solver::Summary *summary,
+    py::array_t<uint64_t, py::array::c_style> point_addresses,
+    py::array_t<uint64_t, py::array::c_style> pose_addresses,
+    uint64_t camera_address, bool use_cuda) {
+  if (problem == nullptr || camera_address == 0) {
+    throw std::invalid_argument("ordered BA problem is invalid");
+  }
+  const py::buffer_info points = point_addresses.request();
+  const py::buffer_info poses = pose_addresses.request();
+  if (points.ndim != 1 || poses.ndim != 1 || points.shape[0] < 1 ||
+      poses.shape[0] < 1) {
+    throw std::invalid_argument("ordered BA dimensions are invalid");
+  }
+  auto *point_values = static_cast<const uint64_t *>(points.ptr);
+  auto *pose_values = static_cast<const uint64_t *>(poses.ptr);
+  auto ordering = std::make_shared<ceres::ParameterBlockOrdering>();
+  std::unordered_set<double *> ordered_blocks;
+  ordered_blocks.reserve(static_cast<size_t>(points.shape[0] +
+                                             poses.shape[0] + 1));
+  for (py::ssize_t index = 0; index < points.shape[0]; ++index) {
+    auto *parameter = reinterpret_cast<double *>(
+        static_cast<uintptr_t>(point_values[index]));
+    if (!problem->HasParameterBlock(parameter) ||
+        !ordered_blocks.insert(parameter).second) {
+      throw std::invalid_argument("ordered BA point block is invalid");
+    }
+    ordering->AddElementToGroup(parameter, 0);
+  }
+  for (py::ssize_t index = 0; index < poses.shape[0]; ++index) {
+    auto *parameter = reinterpret_cast<double *>(
+        static_cast<uintptr_t>(pose_values[index]));
+    if (!problem->HasParameterBlock(parameter) ||
+        !ordered_blocks.insert(parameter).second) {
+      throw std::invalid_argument("ordered BA pose block is invalid");
+    }
+    ordering->AddElementToGroup(parameter, 1);
+  }
+  auto *camera = reinterpret_cast<double *>(
+      static_cast<uintptr_t>(camera_address));
+  if (!problem->HasParameterBlock(camera) ||
+      !ordered_blocks.insert(camera).second) {
+    throw std::invalid_argument("ordered BA camera block is invalid");
+  }
+  ordering->AddElementToGroup(camera, 1);
+
+  ceres::Solver::Options options = input_options;
+  options.linear_solver_ordering = std::move(ordering);
+  if (use_cuda) {
+    ConfigureCUDA(&options);
+  }
   py::gil_scoped_release release;
   ceres::Solve(options, problem, summary);
 }
@@ -382,6 +441,12 @@ PYBIND11_MODULE(pygluemap, m) {
   m.def("solve_cuda", &SolveCUDA, py::arg("options"), py::arg("problem"),
         py::arg("summary"),
         "Solve a Ceres problem with CUDA GPU acceleration.");
+
+  m.def("solve_with_ba_ordering", &SolveWithBAOrdering,
+        py::arg("options"), py::arg("problem"), py::arg("summary"),
+        py::arg("point_addresses"), py::arg("pose_addresses"),
+        py::arg("camera_address"), py::arg("use_cuda"),
+        "Solve with explicit point-first BA elimination groups.");
 
   m.def("is_cuda_available", &IsCUDAAvailable,
         "Returns True if the module was compiled with CUDA support.");
