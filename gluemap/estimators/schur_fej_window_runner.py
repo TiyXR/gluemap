@@ -198,18 +198,9 @@ class SchurFejWindowRunner:
             },
         )
         finalized_frame_id = min(prior.camera_ids)
-        if len(prior.camera_ids) == 1:
-            solved = self.fixed_lag.finalize_terminal(
-                coarse,
-                selected_tracks,
-                final_frame_id=finalized_frame_id,
-            )
-        else:
-            solved = self.fixed_lag.advance(
-                coarse,
-                selected_tracks,
-                marginalize_frame_id=finalized_frame_id,
-            )
+        solved = self.fixed_lag.drain_prior_only(
+            finalized_frame_id=finalized_frame_id,
+        )
         constraint_counts = {frame_id: 0 for frame_id in frame_ids}
         frame_uid_by_id: dict[int, str] = {}
         for track in selected_tracks:
@@ -223,10 +214,6 @@ class SchurFejWindowRunner:
             for frame_id, count in constraint_counts.items()
             if count == 0
         ]
-        if zero_constraint_frames:
-            raise SchurFejWindowRunnerError(
-                "Schur/FEJ terminal drain contains zero-constraint frames"
-            )
         frame_uids = [
             frame_uid_by_id.get(frame_id, f"geometry-{frame_id}")
             for frame_id in frame_ids
@@ -239,12 +226,18 @@ class SchurFejWindowRunner:
             "lastFrameId": frame_ids[-1],
             "advanceStepKeyframes": 1,
             "fixedGaugeFrameId": self.fixed_gauge_frame_id,
-            "coarseFixedWarmStartCount": len(frame_ids),
-            "actualBaCameraFrameUids": frame_uids,
-            "actualBaCameraFrameUidsSha256": _canonical_sha256(frame_uids),
+            "coarseFixedWarmStartCount": 0,
+            "actualBaCameraFrameUids": [],
+            "actualBaCameraFrameUidsSha256": _canonical_sha256([]),
             "nonKeyframeBaCameraCount": 0,
-            "zeroConstraintFrameIds": zero_constraint_frames,
-            "minimumConstraintCount": min(constraint_counts.values()),
+            "zeroConstraintFrameIds": [],
+            "minimumConstraintCount": 0,
+            "terminalContextFrameUids": frame_uids,
+            "terminalContextFrameUidsSha256": _canonical_sha256(frame_uids),
+            "terminalGateZeroConstraintFrameIds": zero_constraint_frames,
+            "terminalGateMinimumConstraintCount": min(
+                constraint_counts.values(), default=0
+            ),
             "coarseWallSeconds": 0.0,
             "totalWallSeconds": time.perf_counter() - started,
         }

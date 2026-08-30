@@ -6,10 +6,7 @@ import numpy as np
 import pyceres
 import pycolmap
 
-from gluemap.estimators.fixed_lag_prior import (
-    FejPosePriorCostFunction,
-    FejPriorState,
-)
+from gluemap.estimators.fixed_lag_prior import FejPriorState
 import pygluemap
 
 from gluemap.utils.runtime_capacity import resolve_native_thread_count
@@ -107,6 +104,22 @@ def _validate_resolved_ba_backend(summary: object, gpu_requested: bool) -> None:
     )
     if not actual_cuda:
         raise RuntimeError("Ceres CUDA BA request resolved to a CPU solver")
+
+
+def _configure_ceres_cpu_concurrency(
+    options: pycolmap.CeresBundleAdjustmentOptions,
+) -> int:
+    """Keep PyCOLMAP from silently serializing real fixed-lag windows.
+
+    COLMAP defaults to one thread below 50,000 residuals.  A 16-camera
+    railway window is usually just below that threshold but is repeated
+    thousands of times, so the startup-resolved 95% CPU budget remains the
+    authoritative worker count for every window.
+    """
+    thread_count = resolve_native_thread_count()
+    options.solver_options.num_threads = thread_count
+    options.min_num_residuals_for_cpu_multi_threading = 0
+    return thread_count
 
 
 def _add_virtual_track_residuals(
@@ -254,7 +267,11 @@ def _add_fej_pose_prior(
     ]
     if any(not problem.has_parameter_block(value) for value in parameters):
         raise ValueError("FEJ prior pose is absent from the Ceres problem")
-    cost = FejPosePriorCostFunction(prior)
+    cost = pygluemap.CreateFejPosePriorCost(
+        prior.factor.detach().cpu().numpy(),
+        prior.factor_residual.detach().cpu().numpy(),
+        prior.linearization_points.detach().cpu().numpy(),
+    )
     residual_block = problem.add_residual_block(cost, None, parameters)
     return [cost], [residual_block]
 
@@ -344,7 +361,7 @@ def bundle_adjustment(
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
-    ba_options.ceres.solver_options.num_threads = resolve_native_thread_count()
+    requested_thread_count = _configure_ceres_cpu_concurrency(ba_options.ceres)
     ba_options.ceres.auto_select_solver_type = True
     solver_types = {
         "dense-schur": pyceres.LinearSolverType.DENSE_SCHUR,
@@ -386,6 +403,11 @@ def bundle_adjustment(
 
     bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
         ba_options, ba_config, reconstruction
+    )
+    logger.info(
+        "Ceres BA concurrency: requested=%d, residual threshold=%d",
+        requested_thread_count,
+        ba_options.ceres.min_num_residuals_for_cpu_multi_threading,
     )
 
     if num_virtual == 0 and fej_prior is None and not hasattr(

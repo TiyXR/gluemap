@@ -311,6 +311,161 @@ def _validate_prior_identity(
     return indexes
 
 
+def marginalize_pose_prior(
+    prior: FejPriorState,
+    *,
+    eliminate_camera_id: int,
+    device_policy: str = "cuda-preferred",
+    relative_rank_threshold: float = 1e-10,
+    maximum_condition_estimate: float | None = None,
+    expected_nullity: int | None = None,
+) -> FejPriorState:
+    """Schur-eliminate one pose directly from an existing FEJ prior.
+
+    A sealed forward-only stream has no reason to reconstruct new landmarks
+    merely to release its retained tail poses.  The pose-only prior already
+    contains the complete history needed for that release, so this path keeps
+    the small dense normal form on the resolved torch device and performs one
+    six-dimensional Schur complement without triangulation or Ceres BA.
+    """
+    started = time.perf_counter()
+    camera_ids = tuple(int(value) for value in prior.camera_ids)
+    if (
+        len(camera_ids) < 2
+        or len(set(camera_ids)) != len(camera_ids)
+        or eliminate_camera_id not in camera_ids
+        or not 0 < relative_rank_threshold < 1
+    ):
+        raise FixedLagPriorError("pose-only prior marginalization identity is invalid")
+    device = _resolve_device(device_policy)
+    dtype = torch.float64
+    camera_count = len(camera_ids)
+    dimension = camera_count * 6
+    hessian = _as_tensor(prior.hessian, dtype=dtype, device=device)
+    gradient = _as_tensor(prior.gradient, dtype=dtype, device=device)
+    linearization = _as_tensor(
+        prior.linearization_points, dtype=dtype, device=device
+    )
+    if (
+        hessian.shape != (dimension, dimension)
+        or gradient.shape != (dimension,)
+        or linearization.shape != (camera_count, 7)
+        or not all(
+            bool(torch.isfinite(value).all())
+            for value in (hessian, gradient, linearization)
+        )
+    ):
+        raise FixedLagPriorError("pose-only prior marginalization shape is invalid")
+
+    hessian = (hessian + hessian.T) * 0.5
+    eliminate_index = camera_ids.index(eliminate_camera_id)
+    eliminate_columns = torch.arange(
+        eliminate_index * 6,
+        (eliminate_index + 1) * 6,
+        device=device,
+    )
+    retained_columns = torch.cat(
+        (
+            torch.arange(0, eliminate_index * 6, device=device),
+            torch.arange((eliminate_index + 1) * 6, dimension, device=device),
+        )
+    )
+    h_mm = hessian[eliminate_columns[:, None], eliminate_columns]
+    h_mr = hessian[eliminate_columns[:, None], retained_columns]
+    h_rr = hessian[retained_columns[:, None], retained_columns]
+    g_m = gradient[eliminate_columns]
+    g_r = gradient[retained_columns]
+    inverse_mm, marginal_eigenvalues, marginal_rank_mask = (
+        _symmetric_pseudoinverse(h_mm, relative_rank_threshold)
+    )
+    retained_hessian = h_rr - h_mr.T @ inverse_mm @ h_mr
+    retained_gradient = g_r - h_mr.T @ inverse_mm @ g_m
+    retained_hessian = (retained_hessian + retained_hessian.T) * 0.5
+
+    eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
+    maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
+    accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
+    positive_values = eigenvalues[accepted]
+    positive_vectors = eigenvectors[:, accepted]
+    factor = positive_values.sqrt()[:, None] * positive_vectors.T
+    factor_residual = (
+        positive_vectors.T @ retained_gradient
+    ) / positive_values.sqrt()
+    reconstructed_gradient = factor.T @ factor_residual
+    gradient_error = float(
+        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
+    )
+    rank = int(accepted.sum().item())
+    nullity = int(len(eigenvalues) - rank)
+    condition = (
+        float((positive_values.max() / positive_values.min()).item())
+        if rank
+        else float("inf")
+    )
+    status = "passed"
+    reasons: list[str] = []
+    if expected_nullity is not None and nullity != expected_nullity:
+        status = "failed"
+        reasons.append("unexpected-prior-nullity")
+    if (
+        maximum_condition_estimate is not None
+        and condition > maximum_condition_estimate
+    ):
+        status = "failed"
+        reasons.append("prior-condition-exceeded")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    wall = time.perf_counter() - started
+    retained_camera_ids = tuple(
+        value for value in camera_ids if value != eliminate_camera_id
+    )
+    retained_points = torch.cat(
+        (
+            linearization[:eliminate_index],
+            linearization[eliminate_index + 1 :],
+        ),
+        dim=0,
+    )
+    report = {
+        "contractId": "jarailsense.gluemap-schur-fej-prior/v1",
+        "status": status,
+        "sourceLinearizationContractId": "pose-only-fej-prior",
+        "terminalSolveMode": "prior-only-schur",
+        "backend": device.type,
+        "gpuUsed": device.type == "cuda",
+        "cameraCountBefore": camera_count,
+        "cameraCountAfter": camera_count - 1,
+        "eliminatedCameraId": eliminate_camera_id,
+        "pointCount": 0,
+        "pointWithoutVariableCameraCount": 0,
+        "residualCount": int(prior.factor.shape[0]),
+        "maximumPointCameraCount": 0,
+        "degeneratePointCount": 0,
+        "marginalPoseRank": int(marginal_rank_mask.sum().item()),
+        "marginalPoseEigenvalues": [
+            float(value) for value in marginal_eigenvalues.detach().cpu().tolist()
+        ],
+        "priorRank": rank,
+        "priorNullity": nullity,
+        "priorConditionEstimate": condition,
+        "factorGradientMaximumAbsoluteError": gradient_error,
+        "cpuSparseNormalWallSeconds": 0.0,
+        "resolvedSchurWallSeconds": wall,
+        "pointSchurMicrobatchPoints": 0,
+        "pointSchurMicrobatchCount": 0,
+        "reasonCodes": reasons,
+    }
+    return FejPriorState(
+        camera_ids=retained_camera_ids,
+        linearization_points=retained_points,
+        hessian=retained_hessian,
+        gradient=retained_gradient,
+        factor=factor,
+        factor_residual=factor_residual,
+        report=report,
+    )
+
+
 def marginalize_linearized_tracks(
     *,
     camera_ids: list[int] | tuple[int, ...],

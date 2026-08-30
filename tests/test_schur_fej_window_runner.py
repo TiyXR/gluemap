@@ -150,6 +150,16 @@ def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():
 
     assert [value.solved.finalized_frame_id for value in drained] == [3, 4, 5]
     assert [value.report["terminalDrain"] for value in drained] == [True] * 3
+    assert [value.report["terminalSolveMode"] for value in drained] == [
+        "prior-only-schur",
+        "prior-only-schur",
+        "sealed-pose-freeze",
+    ]
+    assert all(value.solved.triangulated_tracks == () for value in drained)
+    assert all(value.report["actualBaCameraFrameUids"] == [] for value in drained)
+    assert all(value.report["zeroConstraintFrameIds"] == [] for value in drained)
+    assert all(value.report["localBa"]["ceresThreadsUsed"] == 0 for value in drained)
+    assert drained[0].report["prior"]["gpuUsed"] is True
     assert drained[-1].report["terminalFinalized"] is True
     assert drained[-1].report["prior"] is None
     assert runner.fixed_lag.current_frame_ids == (0,)

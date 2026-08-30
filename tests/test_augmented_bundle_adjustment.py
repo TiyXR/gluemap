@@ -12,7 +12,10 @@ import numpy as np
 import pycolmap
 import torch
 
-from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
+from gluemap.estimators.augmented_bundle_adjustment import (
+    _configure_ceres_cpu_concurrency,
+    bundle_adjustment,
+)
 from gluemap.estimators.fixed_lag_prior import (
     FejPriorState,
     marginalize_ceres_linearization,
@@ -23,6 +26,20 @@ from gluemap.estimators.fixed_lag_ceres_linearization import (
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
+
+
+def test_ceres_concurrency_does_not_restore_the_small_problem_serial_gate(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "gluemap.estimators.augmented_bundle_adjustment.resolve_native_thread_count",
+        lambda: 30,
+    )
+    options = pycolmap.CeresBundleAdjustmentOptions()
+    requested = _configure_ceres_cpu_concurrency(options)
+    assert requested == 30
+    assert options.solver_options.num_threads == 30
+    assert options.min_num_residuals_for_cpu_multi_threading == 0
 
 
 def split_reconstruction(source, point_ids_to_keep):

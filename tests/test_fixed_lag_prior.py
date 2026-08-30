@@ -6,6 +6,7 @@ from gluemap.estimators.fixed_lag_prior import (
     FejPosePriorCostFunction,
     FejPriorState,
     FixedLagPriorError,
+    marginalize_pose_prior,
     marginalize_linearized_tracks,
     marginalize_ceres_linearization,
 )
@@ -65,6 +66,58 @@ def _fixture(dtype=torch.float64):
         "previous_prior": previous,
         "relative_rank_threshold": 1e-12,
     }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_pose_only_prior_schur_eliminates_one_tail_pose_on_cuda():
+    generator = torch.Generator().manual_seed(1957)
+    basis = torch.randn(17, 18, generator=generator, dtype=torch.float64)
+    _, _, right = torch.linalg.svd(basis, full_matrices=False)
+    factor = right[:17]
+    hessian = factor.T @ factor
+    delta = torch.randn(18, generator=generator, dtype=torch.float64)
+    gradient = hessian @ delta
+    factor_residual = factor @ delta
+    linearization = torch.zeros((3, 7), dtype=torch.float64)
+    linearization[:, 3] = 1.0
+    prior = FejPriorState(
+        camera_ids=(10, 11, 12),
+        linearization_points=linearization,
+        hessian=hessian,
+        gradient=gradient,
+        factor=factor,
+        factor_residual=factor_residual,
+        report={},
+    )
+
+    result = marginalize_pose_prior(
+        prior,
+        eliminate_camera_id=10,
+        device_policy="cuda-required",
+        relative_rank_threshold=1e-10,
+        expected_nullity=1,
+    )
+
+    assert result.camera_ids == (11, 12)
+    assert result.hessian.device.type == "cuda"
+    assert result.report["status"] == "passed"
+    assert result.report["terminalSolveMode"] == "prior-only-schur"
+    assert result.report["gpuUsed"] is True
+    assert result.report["pointCount"] == 0
+    assert result.report["priorRank"] == 11
+    assert result.report["priorNullity"] == 1
+    torch.testing.assert_close(
+        result.factor.T @ result.factor,
+        result.hessian,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    torch.testing.assert_close(
+        result.factor.T @ result.factor_residual,
+        result.gradient,
+        rtol=1e-9,
+        atol=1e-9,
+    )
 
 
 def _dense_reference(values):
@@ -224,6 +277,52 @@ def test_dense_fej_cost_moves_one_pose_on_ceres_manifold():
     )
     np.testing.assert_allclose(recovered_rotation, target[:3].numpy(), atol=1e-9)
     np.testing.assert_allclose(pose[4:], target[3:].numpy(), atol=1e-9)
+
+
+def test_native_dense_fej_cost_matches_python_cost_with_parallel_ceres():
+    import numpy as np
+    import pyceres
+    import pygluemap
+
+    linearization = torch.tensor(
+        [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], dtype=torch.float64
+    )
+    target = torch.tensor(
+        [0.02, -0.01, 0.03, 1.0, -2.0, 0.5], dtype=torch.float64
+    )
+    prior = FejPriorState(
+        camera_ids=(7,),
+        linearization_points=linearization,
+        hessian=torch.eye(6, dtype=torch.float64),
+        gradient=-target,
+        factor=torch.eye(6, dtype=torch.float64),
+        factor_residual=-target,
+        report={},
+    )
+    pose = linearization[0].numpy().copy()
+    problem = pyceres.Problem()
+    problem.add_parameter_block(pose, 7, pygluemap.CreatePoseManifold())
+    cost = pygluemap.CreateFejPosePriorCost(
+        prior.factor.numpy(),
+        prior.factor_residual.numpy(),
+        prior.linearization_points.numpy(),
+    )
+    problem.add_residual_block(cost, None, [pose])
+    options = pyceres.SolverOptions()
+    options.max_num_iterations = 20
+    options.num_threads = 4
+    summary = pyceres.SolverSummary()
+
+    pyceres.solve(options, problem, summary)
+
+    quaternion = pose[:4]
+    recovered_rotation = quaternion[:3] / np.linalg.norm(quaternion[:3])
+    recovered_rotation *= np.arctan2(
+        np.linalg.norm(quaternion[:3]), quaternion[3]
+    )
+    np.testing.assert_allclose(recovered_rotation, target[:3].numpy(), atol=1e-9)
+    np.testing.assert_allclose(pose[4:], target[3:].numpy(), atol=1e-9)
+    assert summary.num_threads_given == 4
 
 
 def test_ceres_crs_path_matches_direct_dense_elimination():

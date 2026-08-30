@@ -1,10 +1,99 @@
 #include <Eigen/Dense>
 #include <Eigen/Geometry>
+#include <cmath>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
+#include <stdexcept>
 
 #include "vendor/colmap/estimators/cost_functions/reprojection_error.h"
 #include "vendor/colmap/estimators/cost_functions/utils.h"
+
+// ----------------------------------------
+// FejPosePriorCostFunction
+// ----------------------------------------
+// Dense pose-only square-root prior evaluated entirely in native code.  The
+// parameter blocks use COLMAP's [x, y, z, w, tx, ty, tz] ambient layout and
+// Ceres EigenQuaternionManifold tangent convention.
+class FejPosePriorCostFunction final : public ceres::CostFunction {
+public:
+  FejPosePriorCostFunction(const Eigen::MatrixXd &factor,
+                           const Eigen::VectorXd &factor_residual,
+                           const Eigen::MatrixXd &linearization)
+      : factor_(factor), factor_residual_(factor_residual),
+        linearization_(linearization) {
+    const Eigen::Index pose_count = linearization_.rows();
+    if (pose_count < 1 || linearization_.cols() != 7 ||
+        factor_.cols() != pose_count * 6 || factor_.rows() < 1 ||
+        factor_residual_.size() != factor_.rows()) {
+      throw std::invalid_argument("FEJ pose prior dimensions differ");
+    }
+    set_num_residuals(static_cast<int>(factor_.rows()));
+    mutable_parameter_block_sizes()->assign(
+        static_cast<size_t>(pose_count), 7);
+  }
+
+  bool Evaluate(double const *const *parameters, double *residuals,
+                double **jacobians) const override {
+    const Eigen::Index pose_count = linearization_.rows();
+    Eigen::VectorXd delta(pose_count * 6);
+    for (Eigen::Index index = 0; index < pose_count; ++index) {
+      const double *current_value = parameters[index];
+      const Eigen::Quaterniond current(current_value[3], current_value[0],
+                                       current_value[1], current_value[2]);
+      const Eigen::Quaterniond origin(
+          linearization_(index, 3), linearization_(index, 0),
+          linearization_(index, 1), linearization_(index, 2));
+      const Eigen::Quaterniond difference = current * origin.conjugate();
+      const Eigen::Vector3d imaginary = difference.vec();
+      const double norm = imaginary.norm();
+      if (norm == 0.0) {
+        delta.segment<3>(index * 6).setZero();
+      } else {
+        delta.segment<3>(index * 6) =
+            imaginary * (std::atan2(norm, difference.w()) / norm);
+      }
+      delta.segment<3>(index * 6 + 3) =
+          Eigen::Map<const Eigen::Vector3d>(current_value + 4) -
+          linearization_.row(index).segment<3>(4).transpose();
+    }
+    Eigen::Map<Eigen::VectorXd>(residuals, factor_.rows()) =
+        factor_ * delta + factor_residual_;
+
+    if (jacobians == nullptr) {
+      return true;
+    }
+    for (Eigen::Index index = 0; index < pose_count; ++index) {
+      if (jacobians[index] == nullptr) {
+        continue;
+      }
+      const double *current = parameters[index];
+      Eigen::Matrix<double, 4, 3> plus;
+      plus << current[3], current[2], -current[1], -current[2],
+          current[3], current[0], current[1], -current[0], current[3],
+          -current[0], -current[1], -current[2];
+      Eigen::Map<
+          Eigen::Matrix<double, Eigen::Dynamic, 7, Eigen::RowMajor>>
+          jacobian(jacobians[index], factor_.rows(), 7);
+      jacobian.setZero();
+      const auto tangent = factor_.middleCols(index * 6, 6);
+      jacobian.leftCols<4>() = tangent.leftCols<3>() * plus.transpose();
+      jacobian.rightCols<3>() = tangent.rightCols<3>();
+    }
+    return true;
+  }
+
+private:
+  const Eigen::MatrixXd factor_;
+  const Eigen::VectorXd factor_residual_;
+  const Eigen::MatrixXd linearization_;
+};
+
+inline ceres::CostFunction *
+CreateFejPosePriorCost(const Eigen::MatrixXd &factor,
+                       const Eigen::VectorXd &factor_residual,
+                       const Eigen::MatrixXd &linearization) {
+  return new FejPosePriorCostFunction(factor, factor_residual, linearization);
+}
 
 // ----------------------------------------
 // RotationGeodesicError

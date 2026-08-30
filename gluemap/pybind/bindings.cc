@@ -132,6 +132,11 @@ PYBIND11_MODULE(pygluemap, m) {
         &PairwiseDirectionError::Create<const Eigen::Vector3d &>,
         py::arg("translation_obs"));
 
+  m.def("CreateFejPosePriorCost", &CreateFejPosePriorCost,
+        py::arg("factor"), py::arg("factor_residual"),
+        py::arg("linearization"), py::return_value_policy::take_ownership,
+        "Create a GIL-free dense Schur/FEJ pose prior cost function.");
+
   m.def("ReprojErrorCost",
         &colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor,
                                           const Eigen::Vector2d &>,
