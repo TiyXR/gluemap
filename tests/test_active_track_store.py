@@ -75,6 +75,26 @@ def test_bridge_and_constraint_gate_passes_with_deterministic_identity():
     assert report["zeroConstraintOrdinals"] == []
     assert report["pixelArtifactCount"] == 0
     assert len(report["reportSha256"]) == 64
+    assert "selectedTrackUids" not in report
+    assert "bridgeTrackUids" not in report
+    assert len(report["selectedTrackUidsSha256"]) == 64
+    assert len(report["bridgeTrackUidsSha256"]) == 64
+
+
+def test_release_group_batch_matches_individual_gate_results():
+    store = ActiveTrackStore(budget())
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+    intervals = [(0, 3, 1), (0, 3, 2)]
+    expected = [
+        store.evaluate(
+            active_first_ordinal=active_first,
+            active_last_ordinal=active_last,
+            freeze_through_ordinal=freeze_through,
+        )
+        for active_first, active_last, freeze_through in intervals
+    ]
+    assert store.evaluate_batch(intervals) == expected
 
 
 def test_zero_constraint_and_bridge_failure_stop_instead_of_filling_pose():

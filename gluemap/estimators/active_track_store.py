@@ -315,20 +315,81 @@ class ActiveTrackStore:
         return row, column
 
     def _parallax(self, observations: list[TrackObservation]) -> float:
+        if len(observations) < 2:
+            return 0.0
+        diagonal = hypot(
+            observations[0].image_width,
+            observations[0].image_height,
+        )
+        if diagonal <= 0:
+            return 0.0
+        points = sorted({(value.x, value.y) for value in observations})
+        if len(points) < 2:
+            return 0.0
+
+        def cross(
+            origin: tuple[float, float],
+            first: tuple[float, float],
+            second: tuple[float, float],
+        ) -> float:
+            return (first[0] - origin[0]) * (second[1] - origin[1]) - (
+                first[1] - origin[1]
+            ) * (second[0] - origin[0])
+
+        lower: list[tuple[float, float]] = []
+        for point in points:
+            while len(lower) >= 2 and cross(lower[-2], lower[-1], point) <= 0:
+                lower.pop()
+            lower.append(point)
+        upper: list[tuple[float, float]] = []
+        for point in reversed(points):
+            while len(upper) >= 2 and cross(upper[-2], upper[-1], point) <= 0:
+                upper.pop()
+            upper.append(point)
+        hull = lower[:-1] + upper[:-1]
         maximum = 0.0
-        for index, first in enumerate(observations):
-            first_diagonal = hypot(first.image_width, first.image_height)
-            for second in observations[index + 1 :]:
-                if first_diagonal <= 0:
-                    continue
+        for index, first in enumerate(hull):
+            for second in hull[index + 1 :]:
                 maximum = max(
                     maximum,
-                    hypot(second.x - first.x, second.y - first.y) / first_diagonal,
+                    hypot(second[0] - first[0], second[1] - first[1]),
                 )
-        return maximum
+        return maximum / diagonal
 
     def evaluate(
         self,
+        *,
+        active_first_ordinal: int,
+        active_last_ordinal: int,
+        freeze_through_ordinal: int,
+    ) -> dict[str, Any]:
+        return self._evaluate_components(
+            self._components(),
+            active_first_ordinal=active_first_ordinal,
+            active_last_ordinal=active_last_ordinal,
+            freeze_through_ordinal=freeze_through_ordinal,
+        )
+
+    def evaluate_batch(
+        self,
+        intervals: Iterable[tuple[int, int, int]],
+    ) -> list[dict[str, Any]]:
+        """Evaluate one release group while building components only once."""
+        values = list(intervals)
+        components = self._components()
+        return [
+            self._evaluate_components(
+                components,
+                active_first_ordinal=active_first,
+                active_last_ordinal=active_last,
+                freeze_through_ordinal=freeze_through,
+            )
+            for active_first, active_last, freeze_through in values
+        ]
+
+    def _evaluate_components(
+        self,
+        components: dict[str, list[TrackObservation]],
         *,
         active_first_ordinal: int,
         active_last_ordinal: int,
@@ -341,7 +402,6 @@ class ActiveTrackStore:
             or freeze_through_ordinal >= active_last_ordinal
         ):
             raise ActiveTrackStoreError("active/freeze interval is invalid")
-        components = self._components()
         candidates: list[dict[str, Any]] = []
         rejected = Counter()
         for track_uid, all_observations in components.items():
@@ -430,6 +490,8 @@ class ActiveTrackStore:
             if count < self.budget.minimum_constraints_per_keyframe
         ]
         bridge_tracks = [value for value in selected if value["bridge"]]
+        selected_track_uids = [value["trackUid"] for value in selected]
+        bridge_track_uids = [value["trackUid"] for value in bridge_tracks]
         reason_codes: list[str] = []
         if not selected or zero_constraint_ordinals:
             reason_codes.append("ZERO_CONSTRAINT")
@@ -452,11 +514,8 @@ class ActiveTrackStore:
             "maximumActiveTracks": self.budget.maximum_active_tracks,
             "observationCount": self.observation_count,
             "edgeCount": self.edge_count,
-            "selectedTrackUids": [value["trackUid"] for value in selected],
-            "selectedTrackUidsSha256": _canonical_sha256(
-                [value["trackUid"] for value in selected]
-            ),
-            "bridgeTrackUids": [value["trackUid"] for value in bridge_tracks],
+            "selectedTrackUidsSha256": _canonical_sha256(selected_track_uids),
+            "bridgeTrackUidsSha256": _canonical_sha256(bridge_track_uids),
             "constraintsPerFrame": frame_constraints,
             "zeroConstraintOrdinals": zero_constraint_ordinals,
             "underConstraintOrdinals": under_constraint_ordinals,
