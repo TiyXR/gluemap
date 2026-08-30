@@ -6,6 +6,7 @@
 #include "cost_functions.h"
 
 #include <algorithm>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -121,6 +122,86 @@ bool IsCUDSSAvailable() {
 #else
   return false;
 #endif
+}
+
+class ReprojectionResidualBatch {
+public:
+  ReprojectionResidualBatch(
+      ceres::Problem *problem,
+      std::vector<ceres::ResidualBlockId> residual_blocks)
+      : problem_(problem), residual_blocks_(std::move(residual_blocks)) {}
+
+  size_t Size() const { return residual_blocks_.size(); }
+
+  void Remove() {
+    if (problem_ == nullptr) {
+      return;
+    }
+    py::gil_scoped_release release;
+    for (const ceres::ResidualBlockId residual : residual_blocks_) {
+      problem_->RemoveResidualBlock(residual);
+    }
+    residual_blocks_.clear();
+    problem_ = nullptr;
+  }
+
+private:
+  ceres::Problem *problem_;
+  std::vector<ceres::ResidualBlockId> residual_blocks_;
+};
+
+std::unique_ptr<ReprojectionResidualBatch> AddReprojectionResidualBatch(
+    ceres::Problem *problem, int camera_model_id,
+    py::array_t<uint64_t, py::array::c_style> point_addresses,
+    py::array_t<uint64_t, py::array::c_style> pose_addresses,
+    uint64_t camera_address,
+    py::array_t<double, py::array::c_style> observation_xy,
+    ceres::LossFunction *loss_function) {
+  if (problem == nullptr || camera_address == 0) {
+    throw std::invalid_argument("reprojection batch problem is invalid");
+  }
+  const py::buffer_info points = point_addresses.request();
+  const py::buffer_info poses = pose_addresses.request();
+  const py::buffer_info xy = observation_xy.request();
+  if (points.ndim != 1 || poses.ndim != 1 || xy.ndim != 2 ||
+      xy.shape[1] != 2 || points.shape[0] != poses.shape[0] ||
+      points.shape[0] != xy.shape[0] || points.shape[0] < 1) {
+    throw std::invalid_argument("reprojection batch dimensions differ");
+  }
+  auto *point_values = static_cast<const uint64_t *>(points.ptr);
+  auto *pose_values = static_cast<const uint64_t *>(poses.ptr);
+  auto *measurements = static_cast<const double *>(xy.ptr);
+  auto *camera = reinterpret_cast<double *>(
+      static_cast<uintptr_t>(camera_address));
+  if (!problem->HasParameterBlock(camera)) {
+    throw std::invalid_argument("reprojection batch camera is absent");
+  }
+
+  std::vector<ceres::ResidualBlockId> residuals;
+  residuals.reserve(static_cast<size_t>(points.shape[0]));
+  {
+    py::gil_scoped_release release;
+    for (py::ssize_t index = 0; index < points.shape[0]; ++index) {
+      auto *point = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(point_values[index]));
+      auto *pose = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(pose_values[index]));
+      if (!problem->HasParameterBlock(point) ||
+          !problem->HasParameterBlock(pose)) {
+        throw std::invalid_argument(
+            "reprojection batch parameter is absent");
+      }
+      const Eigen::Vector2d point2d(measurements[index * 2],
+                                    measurements[index * 2 + 1]);
+      ceres::CostFunction *cost =
+          colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor>(
+              static_cast<colmap::CameraModelId>(camera_model_id), point2d);
+      residuals.push_back(problem->AddResidualBlock(
+          cost, loss_function, point, pose, camera));
+    }
+  }
+  return std::make_unique<ReprojectionResidualBatch>(problem,
+                                                      std::move(residuals));
 }
 
 py::dict EvaluateConnectedCRS(
@@ -271,6 +352,19 @@ PYBIND11_MODULE(pygluemap, m) {
   m.def("is_cuda_sparse_available", &IsCUDSSAvailable,
         "Returns True if the module was compiled with CUDA sparse/cuDSS "
         "support.");
+
+  py::class_<ReprojectionResidualBatch>(m, "ReprojectionResidualBatch")
+      .def_property_readonly("size", &ReprojectionResidualBatch::Size)
+      .def("remove", &ReprojectionResidualBatch::Remove,
+           "Remove the complete native residual batch in one GIL-free call.");
+
+  m.def("add_reprojection_residual_batch",
+        &AddReprojectionResidualBatch, py::arg("problem"),
+        py::arg("camera_model_id"), py::arg("point_addresses"),
+        py::arg("pose_addresses"), py::arg("camera_address"),
+        py::arg("observation_xy"), py::arg("loss_function"),
+        "Add one deterministic visual residual batch without per-row Python "
+        "calls.");
 
   m.def("evaluate_connected_crs", &EvaluateConnectedCRS,
         py::arg("problem"), py::arg("ordered_parameter_addresses"),

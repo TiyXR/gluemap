@@ -41,8 +41,6 @@ class _PoseBlock:
 class _ObservationBlock:
     frame_id: int
     xy: tuple[float, float]
-    residual_block: object
-    cost: object
 
 
 @dataclass
@@ -107,9 +105,10 @@ def _solver_configuration(
 class PersistentFixedLagBaProblem:
     """Keep Ceres parameter/residual objects alive across sliding windows.
 
-    Pixel measurements are immutable and keyed by observation UID.  Each
-    window only updates pose/point values and applies entering/leaving deltas;
-    the active factor set remains identical to a full rebuild.
+    Pixel measurements are immutable and keyed by observation UID. Pose and
+    point blocks apply entering/leaving deltas. Visual residuals are rebound
+    as one native batch per window so their deterministic ordering remains
+    identical to a full rebuild without per-row Python calls.
     """
 
     def __init__(self, *, camera_model_id: int, camera_params: Any) -> None:
@@ -129,32 +128,23 @@ class PersistentFixedLagBaProblem:
         self._next_point_id = 1
         self._prior_residual_block: object | None = None
         self._prior_cost: object | None = None
+        self._visual_batch: object | None = None
 
     def _remove_observation(self, track_uid: str, observation_uid: str) -> None:
         point = self.points[track_uid]
-        observation = point.observations.pop(observation_uid)
-        self.problem.remove_residual_block(observation.residual_block)
+        point.observations.pop(observation_uid)
 
     def _add_observation(self, track_uid: str, observation: Any) -> None:
         point = self.points[track_uid]
         frame_id = int(observation.geometry_ordinal)
-        pose = self.poses.get(frame_id)
-        if pose is None:
+        if frame_id not in self.poses:
             raise PersistentFixedLagBaError(
                 "persistent BA observation pose is absent"
             )
         xy = (float(observation.x), float(observation.y))
-        cost = pygluemap.ReprojErrorCost(self.camera_model_id, np.asarray(xy))
-        residual = self.problem.add_residual_block(
-            cost,
-            self.loss_function,
-            [point.values, pose.values, self.camera_params],
-        )
         point.observations[str(observation.observation_uid)] = _ObservationBlock(
             frame_id=frame_id,
             xy=xy,
-            residual_block=residual,
-            cost=cost,
         )
 
     def synchronize(
@@ -174,6 +164,9 @@ class PersistentFixedLagBaProblem:
             raise PersistentFixedLagBaError(
                 "persistent BA prior must be removed before synchronization"
             )
+        if self._visual_batch is not None:
+            self._visual_batch.remove()
+            self._visual_batch = None
         if int(camera_model_id) != self.camera_model_id:
             raise PersistentFixedLagBaError("persistent BA camera model changed")
         incoming_camera = np.asarray(camera_params, dtype=np.float64)
@@ -296,9 +289,50 @@ class PersistentFixedLagBaProblem:
             else:
                 reused_observations += 1
 
+        native_batch_started = time.perf_counter()
+        ordered_observations = tuple(target_observations.items())
+        point_addresses = np.fromiter(
+            (
+                self.points[track_uid].values.ctypes.data
+                for (track_uid, _), _ in ordered_observations
+            ),
+            dtype=np.uint64,
+            count=len(ordered_observations),
+        )
+        pose_addresses = np.fromiter(
+            (
+                self.poses[int(observation.geometry_ordinal)].values.ctypes.data
+                for _, observation in ordered_observations
+            ),
+            dtype=np.uint64,
+            count=len(ordered_observations),
+        )
+        observation_xy = np.asarray(
+            [
+                (float(observation.x), float(observation.y))
+                for _, observation in ordered_observations
+            ],
+            dtype=np.float64,
+        )
+        self._visual_batch = pygluemap.add_reprojection_residual_batch(
+            self.problem,
+            self.camera_model_id,
+            point_addresses,
+            pose_addresses,
+            int(self.camera_params.ctypes.data),
+            observation_xy,
+            self.loss_function,
+        )
+        if self._visual_batch.size != len(ordered_observations):
+            raise PersistentFixedLagBaError(
+                "persistent BA native visual batch size differs"
+            )
+        native_batch_wall_seconds = time.perf_counter() - native_batch_started
+
         return {
             "status": "passed",
             "mode": "persistent-delta",
+            "visualResidualBindingMode": "native-full-window-rebind",
             "createdPoseCount": created_poses,
             "removedPoseCount": removed_poses,
             "createdPointCount": created_points,
@@ -315,6 +349,7 @@ class PersistentFixedLagBaProblem:
             "problemParameterBlockCount": self.problem.num_parameter_blocks(),
             "problemResidualBlockCount": self.problem.num_residual_blocks(),
             "problemResidualCount": self.problem.num_residuals(),
+            "nativeVisualBatchWallSeconds": native_batch_wall_seconds,
             "wallSeconds": time.perf_counter() - started,
         }
 
