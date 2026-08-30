@@ -93,12 +93,28 @@ def _pyceres_loss_function(name: str) -> pyceres.LossFunction | None:
 _DEFAULT_LOSS = object()
 
 
+def _backend_enum_value(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolved_linear_algebra_backends(summary: object) -> tuple[str, str]:
+    """Normalize backend names across PyCeres enum-version skew."""
+    ceres_summary = getattr(summary, "ceres_summary", summary)
+    dense_library = str(ceres_summary.dense_linear_algebra_library_type)
+    sparse_library = str(ceres_summary.sparse_linear_algebra_library_type)
+    if _backend_enum_value(ceres_summary.sparse_linear_algebra_library_type) == 3:
+        sparse_library = "SparseLinearAlgebraLibraryType.CUDA_SPARSE"
+    return dense_library, sparse_library
+
+
 def _resolved_cuda_backend(summary: object) -> bool:
     """Return whether the linear solver that actually ran used CUDA."""
     ceres_summary = getattr(summary, "ceres_summary", summary)
     linear_solver = str(ceres_summary.linear_solver_type_used)
-    dense_library = str(ceres_summary.dense_linear_algebra_library_type)
-    sparse_library = str(ceres_summary.sparse_linear_algebra_library_type)
+    dense_library, sparse_library = _resolved_linear_algebra_backends(summary)
     if linear_solver.endswith(("SPARSE_SCHUR", "SPARSE_NORMAL_CHOLESKY")):
         return sparse_library.endswith("CUDA_SPARSE")
     if linear_solver.endswith(

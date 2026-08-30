@@ -52,6 +52,22 @@ def test_sparse_solver_reports_actual_cudss_backend():
     assert _resolved_cuda_backend(summary) is True
 
 
+def test_sparse_solver_recovers_cudss_from_newer_ceres_enum_value():
+    class NewerCeresSparseBackend:
+        def __str__(self):
+            return "SparseLinearAlgebraLibraryType.???"
+
+        def __int__(self):
+            return 3
+
+    summary = SimpleNamespace(
+        linear_solver_type_used="LinearSolverType.SPARSE_SCHUR",
+        dense_linear_algebra_library_type="DenseLinearAlgebraLibraryType.EIGEN",
+        sparse_linear_algebra_library_type=NewerCeresSparseBackend(),
+    )
+    assert _resolved_cuda_backend(summary) is True
+
+
 def test_ceres_concurrency_does_not_restore_the_small_problem_serial_gate(
     monkeypatch,
 ):

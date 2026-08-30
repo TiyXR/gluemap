@@ -11,6 +11,7 @@ import pycolmap
 
 from gluemap.estimators.augmented_bundle_adjustment import (
     _resolved_cuda_backend,
+    _resolved_linear_algebra_backends,
     bundle_adjustment,
 )
 from gluemap.estimators.fixed_anchor_approximation import (
@@ -59,8 +60,7 @@ def _shared_intrinsics_matrix(value: Any) -> np.ndarray:
 
 def _resolved_backend(summary: object) -> tuple[str, str, bool]:
     ceres = getattr(summary, "ceres_summary", summary)
-    dense = str(ceres.dense_linear_algebra_library_type)
-    sparse = str(ceres.sparse_linear_algebra_library_type)
+    dense, sparse = _resolved_linear_algebra_backends(ceres)
     return dense, sparse, _resolved_cuda_backend(ceres)
 
 
