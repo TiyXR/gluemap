@@ -142,6 +142,7 @@ def rotation_averaging(
     prediction_dict: dict,
     init_rotations: dict[int, np.ndarray] | None = None,
     fixed_rotation_ids: set[int] | None = None,
+    num_threads: int | None = None,
 ) -> dict[int, np.ndarray]:
     """
     Solve global rotations from ministar relative rotations using Ceres.
@@ -230,7 +231,9 @@ def rotation_averaging(
         )
         options.minimizer_progress_to_stdout = True
 
-    options.num_threads = resolve_native_thread_count()
+    options.num_threads = (
+        resolve_native_thread_count() if num_threads is None else num_threads
+    )
     options.max_num_iterations = 200
     summary = pyceres.SolverSummary()
     pyceres.solve(options, prob, summary)

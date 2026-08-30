@@ -56,7 +56,10 @@ def test_slice_remaps_one_window_without_mutating_source() -> None:
 
 def test_next_window_keeps_overlap_anchor_exact() -> None:
     predictions, frame_ids = _predictions()
-    solver = FixedAnchorApproximationSolver(sequential_neighbor_distance=7)
+    solver = FixedAnchorApproximationSolver(
+        sequential_neighbor_distance=7,
+        incremental_entering_pose=True,
+    )
     first = solver.solve(predictions, frame_ids[:7])
     fixed_ids = set(frame_ids[1:4])
     second = solver.solve(
@@ -70,6 +73,69 @@ def test_next_window_keeps_overlap_anchor_exact() -> None:
     assert second.report["fixedPoseCount"] == 3
     assert second.report["fixedAnchorMaximumRotationMatrixDelta"] < 1e-12
     assert second.report["fixedAnchorMaximumCenterDelta"] == 0
+
+
+def test_incremental_next_window_solves_only_entering_pose() -> None:
+    predictions, frame_ids = _predictions()
+    solver = FixedAnchorApproximationSolver(
+        sequential_neighbor_distance=7,
+        incremental_entering_pose=True,
+    )
+    first = solver.solve(predictions, frame_ids[:7])
+    second_ids = frame_ids[1:]
+    second = solver.solve(
+        predictions,
+        second_ids,
+        initial_rotations=first.rotations,
+        initial_centers=first.centers,
+        fixed_pose_ids=set(second_ids[:-1]),
+    )
+
+    assert second.report["status"] == "passed"
+    assert second.report["diagnosticMode"] == "incremental-entering-pose"
+    assert second.report["enteringFrameId"] == second_ids[-1]
+    assert second.report["incrementalEdgeCount"] >= 2
+    assert second.report["incrementalMetricScaleCandidateCount"] >= 1
+    assert second.report["maximumIncrementalRotationResidualDegrees"] < 0.02
+    assert second.report["solveWallSeconds"] >= 0
+    assert "incrementalFullSolveInterval" not in second.report
+    assert second.report["incrementalWindowsSinceFullSolve"] == 1
+    assert second.report["incrementalRotationRefinementWallSeconds"] >= 0
+    assert second.intrinsics
+    for frame_id in second_ids[:-1]:
+        np.testing.assert_array_equal(
+            second.rotations[frame_id], first.rotations[frame_id]
+        )
+        np.testing.assert_array_equal(second.centers[frame_id], first.centers[frame_id])
+
+
+def test_periodic_full_solve_refreshes_incremental_state() -> None:
+    predictions, frame_ids = _predictions()
+    solver = FixedAnchorApproximationSolver(
+        sequential_neighbor_distance=7,
+        incremental_entering_pose=True,
+        incremental_full_solve_interval=2,
+    )
+    first = solver.solve(predictions, frame_ids[:7])
+    second_ids = frame_ids[1:]
+    second = solver.solve(
+        predictions,
+        second_ids,
+        initial_rotations=first.rotations,
+        initial_centers=first.centers,
+        fixed_pose_ids=set(second_ids[:-1]),
+    )
+    refreshed = solver.solve(
+        predictions,
+        second_ids,
+        initial_rotations=second.rotations,
+        initial_centers=second.centers,
+        fixed_pose_ids=set(second_ids[:-1]),
+    )
+
+    assert second.report["diagnosticMode"] == "incremental-entering-pose"
+    assert refreshed.report["diagnosticMode"] == "fixed-anchor-approximation"
+    assert refreshed.report["fullSolveReason"] == "periodic-refresh"
 
 
 def test_solver_keeps_exact_declared_sequential_edges() -> None:
