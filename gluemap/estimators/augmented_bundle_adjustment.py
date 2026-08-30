@@ -1,4 +1,6 @@
 import logging
+import time
+from collections.abc import Callable
 
 import numpy as np
 import pyceres
@@ -271,6 +273,9 @@ def bundle_adjustment(
     ceres_cuda_available: bool | None = None,
     fej_prior: FejPriorState | None = None,
     fej_prior_image_ids: dict[int, int] | None = None,
+    post_solve_problem_callback: (
+        Callable[[pyceres.Problem, pycolmap.Reconstruction], None] | None
+    ) = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -308,6 +313,8 @@ def bundle_adjustment(
             evidence for CUDA BA.
         fej_prior: Optional persistent pose-only square-root prior.
         fej_prior_image_ids: Exact prior-camera to reconstruction-image map.
+        post_solve_problem_callback: Optional in-lifetime Ceres problem
+            consumer used to capture the solved local linearization once.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -434,6 +441,13 @@ def bundle_adjustment(
     logger.info(str(summary))
 
     _validate_resolved_ba_backend(summary, ba_options.ceres.use_gpu)
+    if post_solve_problem_callback is not None:
+        callback_started = time.perf_counter()
+        post_solve_problem_callback(problem, reconstruction)
+        logger.info(
+            "Post-solve Ceres problem callback: %.6fs",
+            time.perf_counter() - callback_started,
+        )
 
     # --- Sync poses/intrinsics into the virtual reconstruction -------------
     # Only the real reconstruction's numpy buffers flowed into the ceres

@@ -14,6 +14,9 @@ import torch
 
 from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
 from gluemap.estimators.fixed_lag_prior import FejPriorState
+from gluemap.estimators.fixed_lag_ceres_linearization import (
+    capture_ceres_problem_linearization,
+)
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
@@ -384,6 +387,50 @@ class TestBundleAdjustmentEndToEnd:
         )
         np.testing.assert_allclose(
             actual_added_cost, expected_added_cost, rtol=1e-10, atol=1e-10
+        )
+
+    def test_solved_ceres_problem_is_linearized_without_rebuild(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=5, num_points3D=40, seed=29
+        )
+        image_ids = sorted(reconstruction.reg_image_ids())
+        fixed_image_id = image_ids[0]
+        captured = []
+
+        bundle_adjustment(
+            reconstruction,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=5,
+            fixed_pose_ids={fixed_image_id},
+            fix_intrinsics=True,
+            device_policy="cpu",
+            post_solve_problem_callback=lambda problem, current: captured.append(
+                capture_ceres_problem_linearization(
+                    problem,
+                    current,
+                    {
+                        image_id - 1: image_id
+                        for image_id in image_ids
+                        if image_id != fixed_image_id
+                    },
+                )
+            ),
+        )
+
+        assert len(captured) == 1
+        linearization = captured[0]
+        assert linearization.camera_ids == tuple(
+            image_id - 1 for image_id in image_ids[1:]
+        )
+        assert linearization.pose_ambient_values.shape == (4, 7)
+        assert linearization.point_values.shape == (40, 3)
+        assert linearization.report["cameraCount"] == 4
+        assert linearization.report["pointCount"] == 40
+        assert linearization.report["residualCount"] > 0
+        assert linearization.report["jacobianNonzeroCount"] > 0
+        assert linearization.row_offsets[-1] == len(
+            linearization.jacobian_values
         )
 
     def test_ba_recovers_from_noise(self):
