@@ -141,6 +141,7 @@ def _mst_init_rotations(
 def rotation_averaging(
     prediction_dict: dict,
     init_rotations: dict[int, np.ndarray] | None = None,
+    fixed_rotation_ids: set[int] | None = None,
 ) -> dict[int, np.ndarray]:
     """
     Solve global rotations from ministar relative rotations using Ceres.
@@ -155,6 +156,8 @@ def rotation_averaging(
         init_rotations: Optional initial rotations as 3x3 matrices keyed by
             image id. Missing ids fall back to identity. When ``None``, MST
             initialization via :func:`_mst_init_rotations` is used.
+        fixed_rotation_ids: Image ids whose warm-start rotations define the
+            already frozen fixed-anchor gauge and must remain constant.
 
     Returns:
         Mapping ``image_id -> 3x3 rotation matrix`` (float64 numpy array).
@@ -214,6 +217,8 @@ def rotation_averaging(
     for idx in rotations:
         if prob.has_parameter_block(rotations[idx]):
             prob.set_manifold(rotations[idx], pyceres.QuaternionManifold())
+            if fixed_rotation_ids and idx in fixed_rotation_ids:
+                prob.set_parameter_block_constant(rotations[idx])
 
     options = pyceres.SolverOptions()
     if len(rotations) < 200:

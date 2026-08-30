@@ -55,6 +55,10 @@ class GlobalGluer:
         intrinsics_mapping: dict[int, int],
         camera_model: str,
         num_img: int,
+        *,
+        initial_rotations: dict[int, np.ndarray] | None = None,
+        initial_centers: dict[int, np.ndarray] | None = None,
+        fixed_pose_ids: set[int] | None = None,
     ) -> tuple[
         dict[int, np.ndarray],
         dict[int, np.ndarray],
@@ -73,7 +77,9 @@ class GlobalGluer:
         Returns:
             ``(global_rotations, global_centers, global_intrinsics, valid_edges,
             predictions_dict)``. The returned ``predictions_dict`` is the same
-            mutated object that was passed in.
+            mutated object that was passed in. ``initial_*`` and
+            ``fixed_pose_ids`` provide warm-start state in the canonical
+            fixed-anchor gauge.
         """
         self.N = num_img
         # Refine the graph structure
@@ -88,6 +94,9 @@ class GlobalGluer:
 
         global_rotations, global_centers = self._global_structure_estimation(
             predictions_dict,
+            initial_rotations=initial_rotations,
+            initial_centers=initial_centers,
+            fixed_pose_ids=fixed_pose_ids,
         )
 
         return (
@@ -279,6 +288,10 @@ class GlobalGluer:
     def _global_structure_estimation(
         self,
         predictions_dict: dict,
+        *,
+        initial_rotations: dict[int, np.ndarray] | None = None,
+        initial_centers: dict[int, np.ndarray] | None = None,
+        fixed_pose_ids: set[int] | None = None,
     ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
         """Estimate global rotations and camera centers from the refined graph.
 
@@ -295,12 +308,23 @@ class GlobalGluer:
         if self.boost_sequential:
             self._boost_sequential_edges(predictions_dict, boost_factor=2.0)
 
+        if (
+            initial_rotations is not None
+            or initial_centers is not None
+            or fixed_pose_ids
+        ) and not self.use_ceres_rotation_averaging:
+            raise ValueError(
+                "fixed-anchor warm start requires Ceres rotation averaging"
+            )
+
         if self.use_ceres_rotation_averaging:
             # Original two-pass: RA -> filter -> RA -> filter
-            global_rotations = rotation_averaging(predictions_dict)
+            global_rotations = rotation_averaging(
+                predictions_dict, initial_rotations, fixed_pose_ids
+            )
             self._filter_invalid_edges(predictions_dict, global_rotations)
             global_rotations = rotation_averaging(
-                predictions_dict, global_rotations
+                predictions_dict, global_rotations, fixed_pose_ids
             )
             self._filter_invalid_edges(predictions_dict, global_rotations)
         else:
@@ -315,6 +339,14 @@ class GlobalGluer:
         global_centers, global_scales = initialize_mst_structures(
             predictions_dict, global_rotations
         )
+        if initial_centers:
+            global_centers.update(
+                {
+                    image_id: value.copy()
+                    for image_id, value in initial_centers.items()
+                    if image_id in global_rotations
+                }
+            )
 
         global_centers = similarity_averaging(
             predictions_dict,
@@ -322,6 +354,7 @@ class GlobalGluer:
             global_centers=global_centers,
             global_scales=global_scales,
             max_num_iterations=200,
+            fixed_center_ids=fixed_pose_ids,
         )
 
         # Prune the edges by the global rotations

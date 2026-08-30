@@ -177,6 +177,41 @@ class TestSimilarityAveragingFreeScales:
         logger.info(f"Max center error: {max_err:.6e}")
         assert max_err < 1e-7, f"Max center error {max_err:.6e} >= 1e-7"
 
+    def test_fixed_anchor_centers_remain_exact(self):
+        """Warm-start anchors are constants while the active body is solved."""
+        gt_rec = create_synthetic_reconstruction(num_frames=8, seed=31)
+        image_ids, gt_rotations, gt_centers = extract_gt(gt_rec)
+        stars = build_star_topology_full(image_ids)
+        rng = np.random.default_rng(931)
+        predictions_dict = build_predictions_dict(
+            gt_rotations,
+            gt_centers,
+            stars,
+            np.ones(len(stars)),
+            translation_noise_std=0.01,
+            rng=rng,
+        )
+        fixed_ids = {image_ids[0], image_ids[1]}
+        initial = {
+            image_id: (
+                gt_centers[image_id].copy()
+                if image_id in fixed_ids
+                else gt_centers[image_id] + rng.normal(0, 0.25, size=3)
+            ).astype(np.float64)
+            for image_id in image_ids
+        }
+
+        recovered = similarity_averaging(
+            predictions_dict,
+            gt_rotations,
+            global_centers=initial,
+            max_num_iterations=200,
+            fixed_center_ids=fixed_ids,
+        )
+
+        for image_id in fixed_ids:
+            assert np.array_equal(recovered[image_id], gt_centers[image_id])
+
 
 class TestSimilarityAveragingRobustness:
     """Tests with noise and outliers."""

@@ -72,6 +72,7 @@ def _add_star_edge_error(
     num_ministar: int,
     costs: list,
     losses: list,
+    fixed_center_ids: set[int] | None = None,
 ) -> int:
     """
     Add pairwise direction residuals for every valid star edge.
@@ -93,6 +94,9 @@ def _add_star_edge_error(
         costs: Output list to which created cost objects are appended (kept
             alive by the caller).
         losses: Output list of created loss functions (kept alive too).
+        fixed_center_ids: Existing canonical centers to keep constant. Two or
+            more fixed centers also determine scale, so no arbitrary star
+            scale is pinned in that case.
 
     Returns:
         The image id whose center was fixed for gauge, or ``-1`` if no edge
@@ -143,9 +147,22 @@ def _add_star_edge_error(
             losses.append(loss_scaled)
 
             if center < 0:
-                prob.set_parameter_block_constant(global_centers[idx1])
-                prob.set_parameter_block_constant(global_scales[idx_star])
                 center = idx1
+                scale_anchor_star = idx_star
+
+    if center < 0:
+        return center
+
+    fixed_count = 0
+    for image_id in sorted(fixed_center_ids or set()):
+        parameter = global_centers.get(image_id)
+        if parameter is not None and prob.has_parameter_block(parameter):
+            prob.set_parameter_block_constant(parameter)
+            fixed_count += 1
+    if fixed_count == 0:
+        prob.set_parameter_block_constant(global_centers[center])
+    if fixed_count < 2:
+        prob.set_parameter_block_constant(global_scales[scale_anchor_star])
 
     return center
 
@@ -229,6 +246,7 @@ def similarity_averaging(
     global_scales: list[np.ndarray] | dict[int, float] | None = None,
     max_num_iterations: int = 50,
     fix_scales: bool = False,
+    fixed_center_ids: set[int] | None = None,
 ) -> dict[int, np.ndarray]:
     """
     Solve for global per-image translations and per-ministar scales.
@@ -248,6 +266,9 @@ def similarity_averaging(
         max_num_iterations: Max Ceres iterations.
         fix_scales: If True, freeze every ministar scale (useful when only
             translations should move).
+        fixed_center_ids: Image ids whose supplied ``global_centers`` are
+            canonical fixed anchors. With at least two, the fixed centers
+            replace the legacy arbitrary center-and-scale gauge.
 
     Returns:
         The updated ``global_centers`` mapping (also written in place).
@@ -274,6 +295,7 @@ def similarity_averaging(
         num_ministar,
         costs,
         losses,
+        fixed_center_ids,
     )
 
     for idx_star in range(num_ministar):
