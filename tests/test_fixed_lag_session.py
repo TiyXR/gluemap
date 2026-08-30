@@ -103,6 +103,34 @@ def test_checkpoint_restore_reconstructs_identical_state():
     assert second.role_state() == first.role_state()
 
 
+def test_group_commit_releases_only_after_one_accepted_batch_head():
+    values = frames(24)
+    value = FixedLagSession(
+        values,
+        [min(index + 2, len(values) - 1) for index in range(len(values))],
+        shards(24),
+        window_size_keyframes=8,
+        anchor_band_keyframes=2,
+        maximum_lookahead_keyframes=3,
+        required_lookahead_keyframes=2,
+        minimum_window_duration_seconds=0.5,
+        checkpoint_interval_advances=4,
+        durable_commit_batch_advances=4,
+    )
+    for _ in range(14):
+        value.ingest_next()
+    assert value.available_advance_count() == 4
+    proposal = value.propose_batch()
+    assert len(proposal["candidates"]) == 4
+    assert value.finalized_count == 0
+    assert value.released_cache_shards == set()
+    result = value.commit_batch(proposal["proposalUid"], "b" * 64)
+    assert result["logicalAdvanceCount"] == 4
+    assert result["checkpointDue"] is True
+    assert result["stateAfter"]["finalizedCount"] == 4
+    assert result["releasedCacheShardIndexes"] == [0]
+
+
 def test_checkpoint_from_other_frame_identity_is_rejected():
     first = session()
     first.ingest_next()

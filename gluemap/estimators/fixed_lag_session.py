@@ -65,6 +65,7 @@ class FixedLagSession:
         required_lookahead_keyframes: int,
         minimum_window_duration_seconds: float,
         checkpoint_interval_advances: int,
+        durable_commit_batch_advances: int = 1,
     ) -> None:
         self.frames = frames
         self.future_dependency_ordinals = future_dependency_ordinals
@@ -75,11 +76,13 @@ class FixedLagSession:
         self.required_lookahead_keyframes = required_lookahead_keyframes
         self.minimum_window_duration_seconds = minimum_window_duration_seconds
         self.checkpoint_interval_advances = checkpoint_interval_advances
+        self.durable_commit_batch_advances = durable_commit_batch_advances
         self.next_ingest_ordinal = 0
         self.finalized_count = 0
         self.last_accepted_index_head: str | None = None
         self.released_cache_shards: set[int] = set()
         self._pending_proposal_uid: str | None = None
+        self._pending_batch_count = 0
         self._validate_contract()
         self.session_identity_sha256 = _canonical_sha256(self._identity())
 
@@ -101,6 +104,17 @@ class FixedLagSession:
             )
         if self.checkpoint_interval_advances < 1:
             raise FixedLagSessionError("checkpoint interval must be positive")
+        if (
+            self.durable_commit_batch_advances < 1
+            or self.durable_commit_batch_advances
+            > self.checkpoint_interval_advances
+            or self.checkpoint_interval_advances
+            % self.durable_commit_batch_advances
+            != 0
+        ):
+            raise FixedLagSessionError(
+                "durable commit batch must divide the checkpoint interval"
+            )
         for ordinal, (frame, dependency) in enumerate(
             zip(self.frames, self.future_dependency_ordinals, strict=True)
         ):
@@ -152,6 +166,7 @@ class FixedLagSession:
                 self.minimum_window_duration_seconds
             ),
             "checkpointIntervalAdvances": self.checkpoint_interval_advances,
+            "durableCommitBatchAdvances": self.durable_commit_batch_advances,
         }
 
     @property
@@ -183,20 +198,113 @@ class FixedLagSession:
         return self.frames[end].seconds - self.frames[start].seconds
 
     def can_advance(self) -> bool:
+        return self._can_advance_offset(0)
+
+    def _can_advance_offset(self, offset: int) -> bool:
         if self._pending_proposal_uid is not None:
             return False
         minimum_resident = (
             self.window_size_keyframes + self.required_lookahead_keyframes
         )
-        if self.resident_count < minimum_resident:
+        if self.resident_count - offset < minimum_resident:
             return False
-        candidate = self.finalized_count
+        candidate = self.finalized_count + offset
+        end = candidate + self.window_size_keyframes - 1
+        duration = (
+            0.0
+            if end >= self.next_ingest_ordinal
+            else self.frames[end].seconds - self.frames[candidate].seconds
+        )
         return (
             self.future_dependency_ordinals[candidate]
             < self.next_ingest_ordinal
-            and self._window_duration_seconds()
-            >= self.minimum_window_duration_seconds
+            and duration >= self.minimum_window_duration_seconds
         )
+
+    def propose_batch(self, maximum_advances: int | None = None) -> dict[str, Any]:
+        if maximum_advances is None:
+            maximum_advances = self.durable_commit_batch_advances
+        if (
+            maximum_advances < 1
+            or maximum_advances > self.durable_commit_batch_advances
+        ):
+            raise FixedLagSessionError("fixed-lag batch size is invalid")
+        candidates = []
+        for offset in range(maximum_advances):
+            if not self._can_advance_offset(offset):
+                break
+            frame = self.frames[self.finalized_count + offset]
+            candidates.append(
+                {
+                    "logicalAdvanceOffset": offset,
+                    "geometryOrdinal": frame.geometry_ordinal,
+                    "frameUid": frame.frame_uid,
+                    "keyframeUid": frame.keyframe_uid,
+                }
+            )
+        if not candidates:
+            raise FixedLagSessionError("fixed-lag batch cannot currently advance")
+        payload = {
+            "sessionIdentitySha256": self.session_identity_sha256,
+            "finalizedCountBefore": self.finalized_count,
+            "nextIngestOrdinal": self.next_ingest_ordinal,
+            "previousAcceptedIndexHead": self.last_accepted_index_head,
+            "candidates": candidates,
+        }
+        proposal_uid = _canonical_sha256(payload)
+        self._pending_proposal_uid = proposal_uid
+        self._pending_batch_count = len(candidates)
+        return {**payload, "proposalUid": proposal_uid, "stateBefore": self.role_state()}
+
+    def available_advance_count(self, maximum_advances: int | None = None) -> int:
+        if maximum_advances is None:
+            maximum_advances = self.durable_commit_batch_advances
+        if maximum_advances < 1:
+            raise FixedLagSessionError("fixed-lag batch size is invalid")
+        count = 0
+        for offset in range(maximum_advances):
+            if not self._can_advance_offset(offset):
+                break
+            count += 1
+        return count
+
+    def commit_batch(
+        self, proposal_uid: str, accepted_index_head_sha256: str
+    ) -> dict[str, Any]:
+        if proposal_uid != self._pending_proposal_uid:
+            raise FixedLagSessionError("advance proposal identity differs")
+        if (
+            len(accepted_index_head_sha256) != 64
+            or any(
+                value not in "0123456789abcdef"
+                for value in accepted_index_head_sha256
+            )
+        ):
+            raise FixedLagSessionError("accepted index head token is invalid")
+        finalized_before = self.finalized_count
+        self.finalized_count += self._pending_batch_count
+        self.last_accepted_index_head = accepted_index_head_sha256
+        logical_advance_count = self._pending_batch_count
+        self._pending_proposal_uid = None
+        self._pending_batch_count = 0
+        released_now: list[int] = []
+        for shard in self.cache_shards:
+            if (
+                shard.shard_index not in self.released_cache_shards
+                and shard.last_star < self.finalized_count
+            ):
+                self.released_cache_shards.add(shard.shard_index)
+                released_now.append(shard.shard_index)
+        return {
+            "acceptedIndexHead": accepted_index_head_sha256,
+            "finalizedCountBefore": finalized_before,
+            "logicalAdvanceCount": logical_advance_count,
+            "releasedCacheShardIndexes": released_now,
+            "checkpointDue": (
+                self.finalized_count % self.checkpoint_interval_advances == 0
+            ),
+            "stateAfter": self.role_state(),
+        }
 
     def role_state(self) -> dict[str, Any]:
         resident = list(range(self.finalized_count, self.next_ingest_ordinal))
@@ -231,6 +339,7 @@ class FixedLagSession:
         }
         proposal_uid = _canonical_sha256(payload)
         self._pending_proposal_uid = proposal_uid
+        self._pending_batch_count = 1
         return {
             **payload,
             "proposalUid": proposal_uid,
@@ -251,24 +360,12 @@ class FixedLagSession:
             )
         ):
             raise FixedLagSessionError("accepted index head token is invalid")
-        self.finalized_count += 1
-        self.last_accepted_index_head = accepted_index_head_sha256
-        self._pending_proposal_uid = None
-        released_now: list[int] = []
-        for shard in self.cache_shards:
-            if (
-                shard.shard_index not in self.released_cache_shards
-                and shard.last_star < self.finalized_count
-            ):
-                self.released_cache_shards.add(shard.shard_index)
-                released_now.append(shard.shard_index)
+        value = self.commit_batch(proposal_uid, accepted_index_head_sha256)
         return {
-            "acceptedIndexHead": accepted_index_head_sha256,
-            "releasedCacheShardIndexes": released_now,
-            "checkpointDue": (
-                self.finalized_count % self.checkpoint_interval_advances == 0
-            ),
-            "stateAfter": self.role_state(),
+            "acceptedIndexHead": value["acceptedIndexHead"],
+            "releasedCacheShardIndexes": value["releasedCacheShardIndexes"],
+            "checkpointDue": value["checkpointDue"],
+            "stateAfter": value["stateAfter"],
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -319,3 +416,4 @@ class FixedLagSession:
         self.last_accepted_index_head = snapshot.get("lastAcceptedIndexHead")
         self.released_cache_shards = set(released)
         self._pending_proposal_uid = None
+        self._pending_batch_count = 0
