@@ -17,10 +17,15 @@ from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
 from gluemap.estimators.fixed_lag_ceres_linearization import (
     CeresProblemLinearization,
     capture_ceres_problem_linearization,
+    capture_explicit_ceres_problem_linearization,
 )
 from gluemap.estimators.fixed_lag_prior import (
     FejPriorState,
     marginalize_ceres_linearization,
+)
+from gluemap.estimators.persistent_fixed_lag_ba import (
+    PersistentFixedLagBaProblem,
+    PersistentFixedLagBaSession,
 )
 from gluemap.utils.colmap import camera_from_intrinsics_matrix
 from gluemap.utils.runtime_capacity import resolve_native_thread_count
@@ -99,6 +104,7 @@ def refine_fixed_anchor_window(
     prior_relative_rank_threshold: float = 1e-10,
     prior_maximum_condition_estimate: float | None = None,
     prior_expected_nullity: int | None = None,
+    persistent_ba_session: PersistentFixedLagBaSession | None = None,
 ) -> FixedAnchorLocalBaSolution:
     """Run local BA over one fixed-lag window with canonical overlap poses."""
     frame_ids = tuple(coarse.frame_ids)
@@ -230,6 +236,25 @@ def refine_fixed_anchor_window(
         if marginalization_residual_policy == "retiring-track-closure"
         else None
     )
+    reconstruction_build_wall = time.perf_counter() - build_started
+    persistent_problem = None
+    persistent_sync_report = None
+    if persistent_ba_session is not None:
+        if persistent_ba_session.problem is None:
+            persistent_ba_session.problem = PersistentFixedLagBaProblem(
+                camera_model_id=camera.model,
+                camera_params=camera.params,
+            )
+        persistent_problem = persistent_ba_session.problem
+        persistent_sync_report = persistent_problem.synchronize(
+            frame_ids=frame_ids,
+            rotations=coarse.rotations,
+            centers=coarse.centers,
+            fixed_pose_ids=fixed_pose_ids,
+            tracks=tracks,
+            camera_model_id=camera.model,
+            camera_params=camera.params,
+        )
     build_wall = time.perf_counter() - build_started
 
     before_fixed_rotations = {
@@ -242,6 +267,7 @@ def refine_fixed_anchor_window(
     }
     solve_started = time.perf_counter()
     summaries = []
+    persistent_solve_reports = []
     captured_linearization: list[CeresProblemLinearization] = []
     variable_image_ids = {
         frame_id: image_id_by_frame[frame_id]
@@ -249,43 +275,102 @@ def refine_fixed_anchor_window(
         if frame_id not in fixed_pose_ids
     }
     for pass_ordinal in range(refinement_passes):
-        reconstruction, _, summary = bundle_adjustment(
-            reconstruction,
-            virtual_reconstruction=None,
-            negative_depth_observations={},
-            max_num_iterations=max_num_iterations,
-            loss_type_normal="huber",
-            linear_solver_type=linear_solver_policy,
-            fixed_pose_ids={image_id_by_frame[value] for value in fixed_pose_ids},
-            fix_intrinsics=True,
-            device_policy=device_policy,
-            ceres_cuda_available=ceres_cuda_available,
-            fej_prior=previous_prior,
-            fej_prior_image_ids=(
-                {
-                    frame_id: image_id_by_frame[frame_id]
-                    for frame_id in previous_prior.camera_ids
-                }
-                if previous_prior is not None
-                else None
-            ),
-            post_solve_problem_callback=(
-                lambda problem, current: captured_linearization.append(
-                    capture_ceres_problem_linearization(
-                        problem,
-                        current,
-                        variable_image_ids,
-                        point3d_ids=capture_point3d_ids,
-                        residual_seed_point3d_ids=capture_point3d_ids,
+        if persistent_problem is None:
+            reconstruction, _, summary = bundle_adjustment(
+                reconstruction,
+                virtual_reconstruction=None,
+                negative_depth_observations={},
+                max_num_iterations=max_num_iterations,
+                loss_type_normal="huber",
+                linear_solver_type=linear_solver_policy,
+                fixed_pose_ids={
+                    image_id_by_frame[value] for value in fixed_pose_ids
+                },
+                fix_intrinsics=True,
+                device_policy=device_policy,
+                ceres_cuda_available=ceres_cuda_available,
+                fej_prior=previous_prior,
+                fej_prior_image_ids=(
+                    {
+                        frame_id: image_id_by_frame[frame_id]
+                        for frame_id in previous_prior.camera_ids
+                    }
+                    if previous_prior is not None
+                    else None
+                ),
+                post_solve_problem_callback=(
+                    lambda problem, current: captured_linearization.append(
+                        capture_ceres_problem_linearization(
+                            problem,
+                            current,
+                            variable_image_ids,
+                            point3d_ids=capture_point3d_ids,
+                            residual_seed_point3d_ids=capture_point3d_ids,
+                        )
+                    )
+                    if marginalize_pose_id is not None
+                    and pass_ordinal == refinement_passes - 1
+                    else None
+                ),
+            )
+        else:
+            persistent_problem.add_prior(previous_prior)
+            try:
+                summary, persistent_solve_report = persistent_problem.solve(
+                    max_num_iterations=max_num_iterations,
+                    linear_solver_policy=linear_solver_policy,
+                    device_policy=device_policy,
+                    ceres_cuda_available=ceres_cuda_available,
+                )
+            finally:
+                persistent_problem.remove_prior()
+            persistent_solve_reports.append(persistent_solve_report)
+            if (
+                marginalize_pose_id is not None
+                and pass_ordinal == refinement_passes - 1
+            ):
+                ordered_track_uids = tuple(
+                    value[0]
+                    for value in point_rows
+                    if capture_point3d_ids is None
+                    or value[0] in marginalize_track_uids
+                )
+                point_parameters = persistent_problem.point_parameter_blocks(
+                    ordered_track_uids
+                )
+                captured_linearization.append(
+                    capture_explicit_ceres_problem_linearization(
+                        persistent_problem.problem,
+                        camera_ids=tuple(variable_image_ids),
+                        image_ids=tuple(variable_image_ids.values()),
+                        point3d_ids=tuple(
+                            persistent_problem.point_id(value)
+                            for value in ordered_track_uids
+                        ),
+                        pose_parameters=(
+                            persistent_problem.pose_parameter_blocks(
+                                tuple(variable_image_ids)
+                            )
+                        ),
+                        point_parameters=point_parameters,
+                        residual_seed_parameters=(
+                            point_parameters
+                            if capture_point3d_ids is not None
+                            else None
+                        ),
                     )
                 )
-                if marginalize_pose_id is not None
-                and pass_ordinal == refinement_passes - 1
-                else None
-            ),
-        )
         summaries.append(summary)
     solve_wall = time.perf_counter() - solve_started
+    if persistent_problem is not None:
+        for frame_id, image_id in image_id_by_frame.items():
+            reconstruction.frames[image_id].rig_from_world.params[:] = (
+                persistent_problem.pose_values(frame_id)
+            )
+        for track_uid, point3d_id in track_point3d_ids.items():
+            reconstruction.points3D[point3d_id].xyz[:] = (
+                persistent_problem.point_values(track_uid)
+            )
     next_prior = None
     if marginalize_pose_id is not None:
         if len(captured_linearization) != 1:
@@ -358,11 +443,24 @@ def refine_fixed_anchor_window(
         "linearSolverPolicy": linear_solver_policy,
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,
+        "baProblemPolicy": (
+            "persistent-delta"
+            if persistent_problem is not None
+            else "rebuild-every-window"
+        ),
+        "persistentProblem": persistent_sync_report,
+        "persistentSolvePasses": persistent_solve_reports,
         "frameCount": len(frame_ids),
         "fixedPoseCount": len(fixed_pose_ids),
         "trackCount": len(point_rows),
         "observationCount": observation_count,
         "buildWallSeconds": build_wall,
+        "reconstructionBuildWallSeconds": reconstruction_build_wall,
+        "persistentProblemSyncWallSeconds": (
+            0.0
+            if persistent_sync_report is None
+            else float(persistent_sync_report["wallSeconds"])
+        ),
         "solveWallSeconds": solve_wall,
         "ceresSolveWallSeconds": ceres_solve_wall,
         "linearizationCaptureWallSeconds": linearization_capture_wall,

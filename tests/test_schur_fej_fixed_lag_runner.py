@@ -145,3 +145,106 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
         rtol=1e-9,
         atol=1e-9,
     )
+
+
+def test_two_advances_reuse_persistent_ceres_problem() -> None:
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+    runner = SchurFejFixedLagRunner(
+        fixed_gauge_frame_ids={0},
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+        ba_problem_policy="persistent-delta",
+    )
+
+    first = runner.advance(
+        first_coarse, first_tracks, marginalize_frame_id=1
+    )
+    second = runner.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+
+    assert first.refined is not None
+    assert second.refined is not None
+    assert first.refined.report["baProblemPolicy"] == "persistent-delta"
+    assert first.refined.report["persistentProblem"]["createdPointCount"] == 64
+    assert second.refined.report["persistentProblem"]["createdPointCount"] == 0
+    assert second.refined.report["persistentProblem"]["reusedPointCount"] == 64
+    assert second.refined.report["persistentProblem"]["createdPoseCount"] == 1
+    assert second.refined.report["persistentProblem"]["removedPoseCount"] == 1
+    assert first.prior.camera_ids == (2, 3, 4)
+    assert second.prior.camera_ids == (3, 4, 5)
+    assert second.prior.report["gpuUsed"] is True
+
+
+def test_persistent_problem_matches_rebuild_two_window_solution() -> None:
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+
+    def run(policy: str):
+        runner = SchurFejFixedLagRunner(
+            fixed_gauge_frame_ids={0},
+            camera_model="PINHOLE",
+            triangulation_device_policy="cuda-required",
+            ba_device_policy="cpu",
+            ceres_cuda_available=False,
+            prior_device_policy="cuda-required",
+            prior_expected_nullity=1,
+            ba_problem_policy=policy,
+        )
+        runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+        return runner.advance(
+            second_coarse, second_tracks, marginalize_frame_id=2
+        )
+
+    rebuilt = run("rebuild-every-window")
+    persistent = run("persistent-delta")
+
+    np.testing.assert_allclose(
+        persistent.finalized_rotation,
+        rebuilt.finalized_rotation,
+        rtol=1e-8,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        persistent.finalized_center,
+        rebuilt.finalized_center,
+        rtol=1e-8,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        persistent.prior.hessian.cpu(),
+        rebuilt.prior.hessian.cpu(),
+        rtol=1e-7,
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
+        persistent.prior.gradient.cpu(),
+        rebuilt.prior.gradient.cpu(),
+        rtol=1e-7,
+        atol=1e-7,
+    )

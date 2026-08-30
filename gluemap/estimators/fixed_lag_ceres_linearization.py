@@ -52,7 +52,6 @@ def capture_ceres_problem_linearization(
     apply_loss_function: bool = True,
 ) -> CeresProblemLinearization:
     """Evaluate residual/J once with deterministic local parameter ordering."""
-    started = time.perf_counter()
     camera_ids = tuple(int(value) for value in image_id_by_camera_id)
     image_ids = tuple(int(image_id_by_camera_id[value]) for value in camera_ids)
     if (
@@ -82,6 +81,58 @@ def capture_ceres_problem_linearization(
         reconstruction.points3D[point3d_id].xyz
         for point3d_id in resolved_point_ids
     ]
+    seed_parameters = None
+    if residual_seed_point3d_ids is not None:
+        seed_ids = tuple(int(value) for value in residual_seed_point3d_ids)
+        if (
+            not seed_ids
+            or len(set(seed_ids)) != len(seed_ids)
+            or any(value not in resolved_point_ids for value in seed_ids)
+        ):
+            raise FixedLagCeresLinearizationError(
+                "connected residual seed identity is invalid"
+            )
+        seed_parameters = [
+            reconstruction.points3D[point3d_id].xyz for point3d_id in seed_ids
+        ]
+    return capture_explicit_ceres_problem_linearization(
+        problem,
+        camera_ids=camera_ids,
+        image_ids=image_ids,
+        point3d_ids=resolved_point_ids,
+        pose_parameters=pose_parameters,
+        point_parameters=point_parameters,
+        residual_seed_parameters=seed_parameters,
+        apply_loss_function=apply_loss_function,
+    )
+
+
+def capture_explicit_ceres_problem_linearization(
+    problem: pyceres.Problem,
+    *,
+    camera_ids: tuple[int, ...],
+    image_ids: tuple[int, ...],
+    point3d_ids: tuple[int, ...],
+    pose_parameters: list[np.ndarray],
+    point_parameters: list[np.ndarray],
+    residual_seed_parameters: list[np.ndarray] | None = None,
+    apply_loss_function: bool = True,
+) -> CeresProblemLinearization:
+    """Capture CRS from explicit stable blocks owned by a persistent problem."""
+    started = time.perf_counter()
+    if (
+        not camera_ids
+        or len(camera_ids) != len(image_ids)
+        or len(camera_ids) != len(pose_parameters)
+        or len(set(camera_ids)) != len(camera_ids)
+        or len(set(image_ids)) != len(image_ids)
+        or not point3d_ids
+        or len(point3d_ids) != len(point_parameters)
+        or len(set(point3d_ids)) != len(point3d_ids)
+    ):
+        raise FixedLagCeresLinearizationError(
+            "explicit Ceres parameter identity is invalid"
+        )
     parameters = [*pose_parameters, *point_parameters]
     if any(not problem.has_parameter_block(value) for value in parameters):
         raise FixedLagCeresLinearizationError(
@@ -102,7 +153,7 @@ def capture_ceres_problem_linearization(
 
     native_thread_count = resolve_native_thread_count()
     connected_residual_block_count = None
-    if residual_seed_point3d_ids is None:
+    if residual_seed_parameters is None:
         options = pyceres.EvaluateOptions()
         options.apply_loss_function = apply_loss_function
         options.num_threads = native_thread_count
@@ -117,22 +168,21 @@ def capture_ceres_problem_linearization(
         jacobian_num_rows = jacobian.num_rows
         jacobian_num_cols = jacobian.num_cols
     else:
-        seed_ids = tuple(int(value) for value in residual_seed_point3d_ids)
-        if (
-            not seed_ids
-            or len(set(seed_ids)) != len(seed_ids)
-            or any(value not in resolved_point_ids for value in seed_ids)
+        if not residual_seed_parameters or any(
+            not problem.has_parameter_block(value)
+            or problem.is_parameter_block_constant(value)
+            for value in residual_seed_parameters
         ):
             raise FixedLagCeresLinearizationError(
-                "connected residual seed identity is invalid"
+                "connected residual seed parameter is invalid"
             )
-        seed_parameters = [
-            reconstruction.points3D[point3d_id].xyz for point3d_id in seed_ids
-        ]
         evaluated = pygluemap.evaluate_connected_crs(
             problem,
             [int(np.asarray(value).ctypes.data) for value in parameters],
-            [int(np.asarray(value).ctypes.data) for value in seed_parameters],
+            [
+                int(np.asarray(value).ctypes.data)
+                for value in residual_seed_parameters
+            ],
             apply_loss_function,
             native_thread_count,
         )
@@ -171,14 +221,14 @@ def capture_ceres_problem_linearization(
         "status": "passed",
         "applyLossFunction": apply_loss_function,
         "cameraCount": len(camera_ids),
-        "pointCount": len(resolved_point_ids),
+        "pointCount": len(point3d_ids),
         "residualCount": len(residuals),
         "columnCount": expected_columns,
         "jacobianNonzeroCount": len(jacobian_values),
         "nativeThreadCount": native_thread_count,
         "residualSelection": (
             "all-problem-residuals"
-            if residual_seed_point3d_ids is None
+            if residual_seed_parameters is None
             else "seed-point-connected-residuals"
         ),
         "connectedResidualBlockCount": connected_residual_block_count,
@@ -187,7 +237,7 @@ def capture_ceres_problem_linearization(
     return CeresProblemLinearization(
         camera_ids=camera_ids,
         image_ids=image_ids,
-        point3d_ids=resolved_point_ids,
+        point3d_ids=point3d_ids,
         pose_ambient_values=np.stack(
             [np.asarray(value, dtype=np.float64).copy() for value in pose_parameters]
         ),

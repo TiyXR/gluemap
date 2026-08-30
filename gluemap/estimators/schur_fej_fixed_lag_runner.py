@@ -24,6 +24,9 @@ from gluemap.estimators.fixed_lag_prior import (
     FejPriorState,
     marginalize_pose_prior,
 )
+from gluemap.estimators.persistent_fixed_lag_ba import (
+    PersistentFixedLagBaSession,
+)
 from gluemap.estimators.fixed_lag_triangulation import (
     TriangulatedTrackState,
     triangulate_selected_tracks,
@@ -90,6 +93,7 @@ class SchurFejFixedLagRunner:
         ceres_cuda_available: bool | None = None,
         prior_device_policy: str = "cuda-required",
         marginalization_residual_policy: str = "all-active",
+        ba_problem_policy: str = "rebuild-every-window",
         prior_relative_rank_threshold: float = 1e-10,
         prior_maximum_condition_estimate: float | None = None,
         prior_expected_nullity: int | None = 1,
@@ -103,6 +107,11 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "marginalization residual policy is invalid"
             )
+        if ba_problem_policy not in {
+            "rebuild-every-window",
+            "persistent-delta",
+        }:
+            raise SchurFejFixedLagRunnerError("BA problem policy is invalid")
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
@@ -114,6 +123,7 @@ class SchurFejFixedLagRunner:
         self.ceres_cuda_available = ceres_cuda_available
         self.prior_device_policy = prior_device_policy
         self.marginalization_residual_policy = marginalization_residual_policy
+        self.ba_problem_policy = ba_problem_policy
         self.prior_relative_rank_threshold = prior_relative_rank_threshold
         self.prior_maximum_condition_estimate = prior_maximum_condition_estimate
         self.prior_expected_nullity = prior_expected_nullity
@@ -122,6 +132,11 @@ class SchurFejFixedLagRunner:
         self._frozen_intrinsics: np.ndarray | None = None
         self._next_window_ordinal = 0
         self._terminal_finalized = False
+        self._persistent_ba_session = (
+            PersistentFixedLagBaSession()
+            if ba_problem_policy == "persistent-delta"
+            else None
+        )
 
     @property
     def prior(self) -> FejPriorState | None:
@@ -255,6 +270,7 @@ class SchurFejFixedLagRunner:
                 self.prior_maximum_condition_estimate
             ),
             prior_expected_nullity=self.prior_expected_nullity,
+            persistent_ba_session=self._persistent_ba_session,
         )
         solve_wall = time.perf_counter() - solve_started
         if refined.report["status"] != "passed" or refined.next_prior is None:
@@ -661,6 +677,8 @@ class SchurFejFixedLagRunner:
         )
         self._next_window_ordinal = next_ordinal
         self._terminal_finalized = False
+        if self._persistent_ba_session is not None:
+            self._persistent_ba_session.problem = None
 
     def _restore_terminal(
         self, checkpoint: dict[str, Any], state: dict[str, Any]
@@ -703,3 +721,5 @@ class SchurFejFixedLagRunner:
         self._prior = None
         self._next_window_ordinal = next_ordinal
         self._terminal_finalized = True
+        if self._persistent_ba_session is not None:
+            self._persistent_ba_session.problem = None
