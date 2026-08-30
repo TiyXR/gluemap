@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -139,6 +140,73 @@ def test_noncontiguous_fixed_lag_frame_set_excludes_marginalized_pose_on_gpu():
     )
 
 
+def test_gpu_observation_rows_upload_once_and_reuse_released_slots():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cuda-required"))
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+
+    first, _ = store.evaluate_frame_sets_materialized([((0, 1, 2, 3), 1)])
+
+    first_report = first[0]
+    assert first_report["persistentObservationTensorBackend"] == (
+        "cuda-reusable-row-table"
+    )
+    assert first_report["persistentObservationTensorResidentRows"] == 8
+    assert first_report["persistentObservationTensorPendingRows"] == 0
+    assert first_report["persistentObservationTensorUploadedRows"] == 8
+    assert first_report["persistentObservationTensorReusedRows"] == 0
+    capacity = first_report["persistentObservationTensorCapacity"]
+
+    proposal = store.propose_release_frame_ids([1])
+    store.commit_release(proposal["proposalUid"], "b" * 64)
+    add_track(store, 2, [0, 2, 3, 4])
+    second, tracks = store.evaluate_frame_sets_materialized(
+        [((0, 2, 3, 4), 2)]
+    )
+
+    second_report = second[0]
+    assert second_report["status"] == "passed"
+    assert second_report["persistentObservationTensorCapacity"] == capacity
+    assert second_report["persistentObservationTensorResidentRows"] == 10
+    assert second_report["persistentObservationTensorUploadedRows"] == 12
+    assert second_report["persistentObservationTensorReusedRows"] == 2
+    assert all(
+        all(value.geometry_ordinal in {0, 2, 3, 4} for value in track.observations)
+        for track in tracks[0]
+    )
+
+
+def test_column_intern_constructs_only_new_observation_rows(monkeypatch):
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    existing = observation(0, 0, x=10.0, y=10.0)
+    store.add_observations([existing])
+    inserted = []
+    original_insert = store._insert_observation
+
+    def counted_insert(value):
+        inserted.append(value.observation_uid)
+        original_insert(value)
+
+    monkeypatch.setattr(store, "_insert_observation", counted_insert)
+    resolved = store.intern_observation_columns(
+        ["nearby-reference", "new-reference"],
+        [0, 0],
+        ["frame-0", "frame-0"],
+        [0, 0],
+        [1, 1],
+        [10, 10],
+        [[10.5, 10.0], [100.0, 50.0]],
+        [1.0, 1.0],
+        image_width=200,
+        image_height=100,
+        assume_valid=True,
+    )
+
+    assert resolved == [existing.observation_uid, "new-reference"]
+    assert inserted == ["new-reference"]
+    assert store.observation_count == 2
+
+
 def test_fixed_gauge_is_not_a_visual_constraint_minimum():
     store = ActiveTrackStore(
         budget(parallax_backend_policy="cpu", minimum_constraints_per_keyframe=2)
@@ -251,11 +319,9 @@ def test_parallax_backend_and_microbatch_are_reported():
 def test_batch_metrics_count_one_constraint_per_track_and_frame():
     store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
     first = observation(0, 0, x=10, y=10)
-    duplicate_view = TrackObservation(
-        **{
-            **observation(0, 0, x=12, y=10).__dict__,
-            "observation_uid": "track-0-frame-0-duplicate",
-        }
+    duplicate_view = replace(
+        observation(0, 0, x=12, y=10),
+        observation_uid="track-0-frame-0-duplicate",
     )
     last = observation(0, 3, x=30, y=10)
     store.add_observations([first, duplicate_view, last])
@@ -281,20 +347,16 @@ def test_parallax_uses_one_observation_per_frame_in_duplicate_heavy_component():
     values = []
     for frame in (0, 3):
         values.append(
-            TrackObservation(
-                **{
-                    **observation(0, frame, x=10.0, y=10.0).__dict__,
-                    "observation_uid": f"000-first-frame-{frame}",
-                }
+            replace(
+                observation(0, frame, x=10.0, y=10.0),
+                observation_uid=f"000-first-frame-{frame}",
             )
         )
         for index in range(1, 65):
             values.append(
-                TrackObservation(
-                    **{
-                        **observation(index, frame, x=190.0, y=90.0).__dict__,
-                        "observation_uid": f"{index:03d}-duplicate-frame-{frame}",
-                    }
+                replace(
+                    observation(index, frame, x=190.0, y=90.0),
+                    observation_uid=f"{index:03d}-duplicate-frame-{frame}",
                 )
             )
     store.add_observations(values)
@@ -428,7 +490,7 @@ def test_per_frame_observation_bound_and_identity_reuse_are_rejected():
     store.add_observations([observation(0, 0), observation(1, 0)])
     with pytest.raises(ActiveTrackStoreError, match="bound"):
         store.add_observations([observation(2, 0)])
-    changed = TrackObservation(**{**observation(0, 0).__dict__, "x": 99.0})
+    changed = replace(observation(0, 0), x=99.0)
     with pytest.raises(ActiveTrackStoreError, match="reused"):
         store.add_observations([changed])
 
@@ -436,11 +498,9 @@ def test_per_frame_observation_bound_and_identity_reuse_are_rejected():
 def test_overlapping_stars_merge_nearby_observations_without_new_files():
     store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
     first = observation(0, 0, x=50.0, y=20.0)
-    nearby = TrackObservation(
-        **{
-            **observation(1, 0, x=51.5, y=21.0).__dict__,
-            "observation_uid": "second-star-candidate",
-        }
+    nearby = replace(
+        observation(1, 0, x=51.5, y=21.0),
+        observation_uid="second-star-candidate",
     )
     first_uid = store.intern_observation(first)
     second_uid = store.intern_observation(nearby)
@@ -451,11 +511,9 @@ def test_overlapping_stars_merge_nearby_observations_without_new_files():
 def test_star_batch_keeps_nearby_query_tracks_distinct_within_the_batch():
     store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
     first = observation(0, 0, x=50.0, y=20.0)
-    nearby = TrackObservation(
-        **{
-            **observation(1, 0, x=51.5, y=21.0).__dict__,
-            "observation_uid": "same-star-nearby",
-        }
+    nearby = replace(
+        observation(1, 0, x=51.5, y=21.0),
+        observation_uid="same-star-nearby",
     )
     distant = observation(2, 0, x=150.0, y=20.0)
     resolved = store.intern_observations([first, nearby, distant])
@@ -472,17 +530,13 @@ def test_star_batch_matches_existing_observations_one_to_one():
     existing_first = observation(0, 0, x=50.0, y=20.0)
     existing_second = observation(1, 0, x=54.0, y=20.0)
     store.intern_observations([existing_first, existing_second])
-    incoming_first = TrackObservation(
-        **{
-            **observation(2, 0, x=51.0, y=20.0).__dict__,
-            "observation_uid": "incoming-first",
-        }
+    incoming_first = replace(
+        observation(2, 0, x=51.0, y=20.0),
+        observation_uid="incoming-first",
     )
-    incoming_second = TrackObservation(
-        **{
-            **observation(3, 0, x=53.0, y=20.0).__dict__,
-            "observation_uid": "incoming-second",
-        }
+    incoming_second = replace(
+        observation(3, 0, x=53.0, y=20.0),
+        observation_uid="incoming-second",
     )
     assert store.intern_observations([incoming_first, incoming_second]) == [
         existing_first.observation_uid,

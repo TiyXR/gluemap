@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections import Counter, defaultdict, deque
 from dataclasses import asdict, dataclass
 from math import floor, hypot, isfinite
@@ -66,7 +67,7 @@ class TrackBudget:
         return self.window_size_keyframes * self.active_track_budget_per_keyframe
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TrackObservation:
     observation_uid: str
     geometry_ordinal: int
@@ -85,18 +86,150 @@ class TrackObservation:
         return self.pts_value * self.time_base_numerator / self.time_base_denominator
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TrackCorrespondence:
     first_observation_uid: str
     second_observation_uid: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SelectedTrackState:
     """One in-memory BA track selected by the existing GPU gate."""
 
     track_uid: str
     observations: tuple[TrackObservation, ...]
+
+
+class _PersistentObservationTensorTable:
+    """GPU-resident observation columns with reusable released rows.
+
+    Component membership changes as new Star edges arrive, but the numeric
+    observation columns are immutable.  Keeping those columns resident avoids
+    rebuilding and uploading five dense tensors for every fixed-lag advance.
+    Windows upload only a compact padded row-index view; durable release makes
+    the corresponding rows available to later observations, so capacity is
+    bounded by the retained lag rather than video duration.
+    """
+
+    _INITIAL_CAPACITY = 4096
+
+    def __init__(self, device: str) -> None:
+        import torch
+
+        self.device = torch.device(device)
+        self.capacity = 0
+        self._next_row = 0
+        self._free_rows: deque[int] = deque()
+        self._row_by_uid: dict[str, int] = {}
+        self._pending: list[tuple[int, str, TrackObservation]] = []
+        self.uploaded_row_count = 0
+        self.reused_row_count = 0
+        self.coordinates = torch.empty((0, 2), dtype=torch.float32, device=device)
+        self.ordinals = torch.empty((0,), dtype=torch.int64, device=device)
+        self.dimensions = torch.empty((0, 2), dtype=torch.float32, device=device)
+        self.scores = torch.empty((0,), dtype=torch.float64, device=device)
+        self.seconds = torch.empty((0,), dtype=torch.float64, device=device)
+
+    @property
+    def resident_row_count(self) -> int:
+        return len(self._row_by_uid)
+
+    @property
+    def pending_row_count(self) -> int:
+        return len(self._pending)
+
+    def queue(self, value: TrackObservation) -> None:
+        if value.observation_uid in self._row_by_uid:
+            return
+        if self._free_rows:
+            row = self._free_rows.popleft()
+            self.reused_row_count += 1
+        else:
+            row = self._next_row
+            self._next_row += 1
+        self._row_by_uid[value.observation_uid] = row
+        self._pending.append((row, value.observation_uid, value))
+
+    def row(self, observation_uid: str) -> int:
+        return self._row_by_uid[observation_uid]
+
+    def _grow(self, required: int) -> None:
+        import torch
+
+        if required <= self.capacity:
+            return
+        capacity = max(self._INITIAL_CAPACITY, self.capacity)
+        while capacity < required:
+            capacity *= 2
+
+        def resized(value: Any, shape: tuple[int, ...], fill: float | int) -> Any:
+            result = torch.full(
+                shape,
+                fill,
+                dtype=value.dtype,
+                device=self.device,
+            )
+            if self.capacity:
+                result[: self.capacity].copy_(value)
+            return result
+
+        self.coordinates = resized(self.coordinates, (capacity, 2), 0.0)
+        self.ordinals = resized(self.ordinals, (capacity,), -1)
+        self.dimensions = resized(self.dimensions, (capacity, 2), 1.0)
+        self.scores = resized(self.scores, (capacity,), 0.0)
+        self.seconds = resized(self.seconds, (capacity,), 0.0)
+        self.capacity = capacity
+
+    def flush(self) -> None:
+        import torch
+
+        pending = [
+            (row, uid, value)
+            for row, uid, value in self._pending
+            if self._row_by_uid.get(uid) == row
+        ]
+        self._pending.clear()
+        if not pending:
+            return
+        self._grow(max(row for row, _, _ in pending) + 1)
+        indexes = torch.tensor(
+            [row for row, _, _ in pending],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        values = [value for _, _, value in pending]
+        self.coordinates[indexes] = torch.tensor(
+            [(value.x, value.y) for value in values],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.ordinals[indexes] = torch.tensor(
+            [value.geometry_ordinal for value in values],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.dimensions[indexes] = torch.tensor(
+            [(value.image_width, value.image_height) for value in values],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.scores[indexes] = torch.tensor(
+            [value.score for value in values],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        self.seconds[indexes] = torch.tensor(
+            [value.seconds for value in values],
+            dtype=torch.float64,
+            device=self.device,
+        )
+        self.uploaded_row_count += len(pending)
+
+    def discard(self, observation_uids: Iterable[str]) -> None:
+        for uid in observation_uids:
+            row = self._row_by_uid.pop(uid, None)
+            if row is not None:
+                self._free_rows.append(row)
 
 
 class ActiveTrackStore:
@@ -117,12 +250,21 @@ class ActiveTrackStore:
         self._spatial_buckets_by_frame: dict[
             int, dict[tuple[int, int], set[str]]
         ] = defaultdict(lambda: defaultdict(set))
+        self._native_spatial_uids_by_frame: dict[int, list[str]] = defaultdict(list)
+        self._native_spatial_x_by_frame: dict[int, list[float]] = defaultdict(list)
+        self._native_spatial_y_by_frame: dict[int, list[float]] = defaultdict(list)
+        self._last_column_intern_phase_wall: dict[str, float] = {}
         self._edges: set[tuple[str, str]] = set()
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
         self._parallax_backend = self._resolve_parallax_backend()
+        self._gpu_observation_table = (
+            _PersistentObservationTensorTable(self._parallax_backend)
+            if self._parallax_backend == "cuda"
+            else None
+        )
         self._component_rebuild_backend = self._resolve_component_rebuild_backend()
         self._spatial_intern_backend = self._resolve_spatial_intern_backend()
         self._last_gate_tensor_report: dict[str, int] = {}
@@ -242,6 +384,30 @@ class ActiveTrackStore:
     def gpu_used(self) -> bool:
         return self._parallax_backend == "cuda"
 
+    @property
+    def last_column_intern_phase_wall(self) -> dict[str, float]:
+        return dict(self._last_column_intern_phase_wall)
+
+    def _persistent_tensor_report(self) -> dict[str, Any]:
+        table = self._gpu_observation_table
+        if table is None:
+            return {
+                "persistentObservationTensorBackend": "disabled",
+                "persistentObservationTensorCapacity": 0,
+                "persistentObservationTensorResidentRows": 0,
+                "persistentObservationTensorPendingRows": 0,
+                "persistentObservationTensorUploadedRows": 0,
+                "persistentObservationTensorReusedRows": 0,
+            }
+        return {
+            "persistentObservationTensorBackend": "cuda-reusable-row-table",
+            "persistentObservationTensorCapacity": table.capacity,
+            "persistentObservationTensorResidentRows": table.resident_row_count,
+            "persistentObservationTensorPendingRows": table.pending_row_count,
+            "persistentObservationTensorUploadedRows": table.uploaded_row_count,
+            "persistentObservationTensorReusedRows": table.reused_row_count,
+        }
+
     def add_observations(self, values: Iterable[TrackObservation]) -> None:
         if self._pending_release is not None:
             raise ActiveTrackStoreError("cannot ingest while release is pending")
@@ -265,8 +431,15 @@ class ActiveTrackStore:
         self._observations[value.observation_uid] = value
         frame_values.add(value.observation_uid)
         self._add_spatial_observation(value)
+        self._native_spatial_uids_by_frame[value.geometry_ordinal].append(
+            value.observation_uid
+        )
+        self._native_spatial_x_by_frame[value.geometry_ordinal].append(value.x)
+        self._native_spatial_y_by_frame[value.geometry_ordinal].append(value.y)
         root = self._union_find.find(value.observation_uid)
         self._component_uid_by_root[root] = value.observation_uid
+        if self._gpu_observation_table is not None:
+            self._gpu_observation_table.queue(value)
 
     def intern_observations(
         self,
@@ -380,6 +553,160 @@ class ActiveTrackStore:
             resolved_uids.append(value.observation_uid)
         return resolved_uids
 
+    def intern_observation_columns(
+        self,
+        observation_uids: list[str],
+        geometry_ordinals: Any,
+        frame_uids: list[str],
+        pts_values: Any,
+        time_base_numerators: Any,
+        time_base_denominators: Any,
+        coordinates: Any,
+        scores: Any,
+        *,
+        image_width: int,
+        image_height: int,
+        assume_valid: bool = False,
+    ) -> list[str]:
+        """Intern continuous Star columns before creating persistent objects.
+
+        Overlapping Stars reference many observations that already exist in
+        the lag.  The old path allocated a frozen dataclass for every incoming
+        reference and discarded it immediately after spatial interning.  This
+        entry keeps the columns continuous through the native OpenMP matcher
+        and constructs ``TrackObservation`` only for genuinely new rows.
+        """
+        import numpy as np
+
+        geometry_ordinals = np.asarray(geometry_ordinals, dtype=np.int64)
+        pts_values = np.asarray(pts_values, dtype=np.int64)
+        time_base_numerators = np.asarray(
+            time_base_numerators, dtype=np.int64
+        )
+        time_base_denominators = np.asarray(
+            time_base_denominators, dtype=np.int64
+        )
+        coordinates = np.asarray(coordinates, dtype=np.float64)
+        scores = np.asarray(scores, dtype=np.float64)
+        count = len(observation_uids)
+        if (
+            self._pending_release is not None
+            or geometry_ordinals.shape != (count,)
+            or len(frame_uids) != count
+            or pts_values.shape != (count,)
+            or time_base_numerators.shape != (count,)
+            or time_base_denominators.shape != (count,)
+            or coordinates.shape != (count, 2)
+            or scores.shape != (count,)
+            or image_width <= 0
+            or image_height <= 0
+        ):
+            raise ActiveTrackStoreError("observation columns are invalid")
+        if not count:
+            return []
+
+        phase_started = time.perf_counter()
+        relevant_frames = sorted(set(geometry_ordinals.tolist()))
+        existing_uids: list[str] = []
+        existing_x: list[float] = []
+        existing_y: list[float] = []
+        for frame in relevant_frames:
+            existing_uids.extend(self._native_spatial_uids_by_frame.get(frame, ()))
+            existing_x.extend(self._native_spatial_x_by_frame.get(frame, ()))
+            existing_y.extend(self._native_spatial_y_by_frame.get(frame, ()))
+        existing_frames = np.repeat(
+            np.asarray(relevant_frames, dtype=np.int64),
+            [
+                len(self._native_spatial_uids_by_frame.get(frame, ()))
+                for frame in relevant_frames
+            ],
+        )
+        existing_x_array = np.asarray(existing_x, dtype=np.float64)
+        existing_y_array = np.asarray(existing_y, dtype=np.float64)
+        self._last_column_intern_phase_wall = {
+            "existingSpatialColumnBuild": time.perf_counter() - phase_started
+        }
+        if self._spatial_intern_backend == "native-openmp":
+            native = _load_track_native_module()
+            phase_started = time.perf_counter()
+            representatives = native.batch_spatial_intern(
+                existing_frames,
+                existing_x_array,
+                existing_y_array,
+                existing_uids,
+                geometry_ordinals,
+                coordinates[:, 0],
+                coordinates[:, 1],
+                observation_uids,
+                self.budget.intra_image_merge_radius_pixels,
+            )
+            self._last_column_intern_phase_wall["nativeSpatialMatch"] = (
+                time.perf_counter() - phase_started
+            )
+        else:
+            phase_started = time.perf_counter()
+            values = [
+                TrackObservation(
+                    observation_uid=observation_uids[index],
+                    geometry_ordinal=int(geometry_ordinals[index]),
+                    frame_uid=frame_uids[index],
+                    pts_value=int(pts_values[index]),
+                    time_base_numerator=int(time_base_numerators[index]),
+                    time_base_denominator=int(time_base_denominators[index]),
+                    x=float(coordinates[index, 0]),
+                    y=float(coordinates[index, 1]),
+                    image_width=image_width,
+                    image_height=image_height,
+                    score=float(scores[index]),
+                )
+                for index in range(count)
+            ]
+            resolved = self.intern_observations(
+                values, assume_valid=assume_valid
+            )
+            self._last_column_intern_phase_wall["newObservationInsert"] = (
+                time.perf_counter() - phase_started
+            )
+            return resolved
+
+        phase_started = time.perf_counter()
+        existing_count = len(existing_uids)
+        resolved_uids: list[str] = []
+        for index, representative in enumerate(representatives.tolist()):
+            if representative < existing_count:
+                resolved_uids.append(existing_uids[representative])
+                continue
+            if representative - existing_count != index:
+                raise ActiveTrackStoreError(
+                    "native spatial intern merged incoming observation columns"
+                )
+            value = TrackObservation(
+                observation_uid=observation_uids[index],
+                geometry_ordinal=int(geometry_ordinals[index]),
+                frame_uid=frame_uids[index],
+                pts_value=int(pts_values[index]),
+                time_base_numerator=int(time_base_numerators[index]),
+                time_base_denominator=int(time_base_denominators[index]),
+                x=float(coordinates[index, 0]),
+                y=float(coordinates[index, 1]),
+                image_width=image_width,
+                image_height=image_height,
+                score=float(scores[index]),
+            )
+            if not assume_valid:
+                self._validate_observation(value)
+            existing = self._observations.get(value.observation_uid)
+            if existing is not None:
+                if existing != value:
+                    raise ActiveTrackStoreError("observation identity was reused")
+            else:
+                self._insert_observation(value)
+            resolved_uids.append(value.observation_uid)
+        self._last_column_intern_phase_wall["newObservationInsert"] = (
+            time.perf_counter() - phase_started
+        )
+        return resolved_uids
+
     def _spatial_bucket(self, value: TrackObservation) -> tuple[int, int]:
         radius = self.budget.intra_image_merge_radius_pixels
         return floor(value.x / radius), floor(value.y / radius)
@@ -447,8 +774,15 @@ class ActiveTrackStore:
                 self._component_uid_by_root[first_root],
                 self._component_uid_by_root[second_root],
             )
-            self._union_find.union(first_root, second_root)
-            new_root = self._union_find.find(first)
+            if first_root == second_root:
+                new_root = first_root
+            else:
+                # ``UnionFind.union(first_root, second_root)`` assigns the
+                # first root directly to the second.  Both inputs are already
+                # compressed roots here, so calling union and then find again
+                # only repeats three hash-table walks per edge.
+                self._union_find.parent[first_root] = second_root
+                new_root = second_root
             self._component_uid_by_root.pop(first_root, None)
             self._component_uid_by_root.pop(second_root, None)
             self._component_uid_by_root[new_root] = component_uid
@@ -811,31 +1145,6 @@ class ActiveTrackStore:
         maximum_observations = max(
             len(observations) for _, observations in component_values
         )
-        padded_coordinates = []
-        padded_ordinals = []
-        padded_dimensions = []
-        padded_scores = []
-        padded_seconds = []
-        for _, observations in component_values:
-            padding = maximum_observations - len(observations)
-            padded_coordinates.append(
-                [(value.x, value.y) for value in observations]
-                + [(0.0, 0.0)] * padding
-            )
-            padded_ordinals.append(
-                [value.geometry_ordinal for value in observations] + [-1] * padding
-            )
-            padded_dimensions.append(
-                [(value.image_width, value.image_height) for value in observations]
-                + [(1, 1)] * padding
-            )
-            padded_scores.append(
-                [value.score for value in observations] + [0.0] * padding
-            )
-            padded_seconds.append(
-                [value.seconds for value in observations] + [0.0] * padding
-            )
-
         device = self._parallax_backend
         self._last_gate_tensor_report = {
             "activeTensorComponentCount": len(component_values),
@@ -845,15 +1154,80 @@ class ActiveTrackStore:
                 len(observations) for observations in components.values()
             ),
         }
-        coordinates = torch.tensor(
-            padded_coordinates, dtype=torch.float32, device=device
-        )
-        ordinals = torch.tensor(padded_ordinals, dtype=torch.int64, device=device)
-        dimensions = torch.tensor(
-            padded_dimensions, dtype=torch.float32, device=device
-        )
-        scores = torch.tensor(padded_scores, dtype=torch.float64, device=device)
-        seconds = torch.tensor(padded_seconds, dtype=torch.float64, device=device)
+        if self._gpu_observation_table is not None:
+            table = self._gpu_observation_table
+            table.flush()
+            padded_rows = []
+            for _, observations in component_values:
+                padding = maximum_observations - len(observations)
+                padded_rows.append(
+                    [table.row(value.observation_uid) for value in observations]
+                    + [-1] * padding
+                )
+            row_indexes = torch.tensor(
+                padded_rows, dtype=torch.int64, device=device
+            )
+            valid_rows = row_indexes >= 0
+            safe_rows = row_indexes.clamp_min(0)
+            coordinates = table.coordinates[safe_rows]
+            ordinals = torch.where(
+                valid_rows, table.ordinals[safe_rows], -1
+            )
+            dimensions = torch.where(
+                valid_rows[:, :, None],
+                table.dimensions[safe_rows],
+                torch.ones_like(table.dimensions[safe_rows]),
+            )
+            scores = torch.where(
+                valid_rows, table.scores[safe_rows], 0.0
+            )
+            seconds = torch.where(
+                valid_rows, table.seconds[safe_rows], 0.0
+            )
+        else:
+            padded_coordinates = []
+            padded_ordinals = []
+            padded_dimensions = []
+            padded_scores = []
+            padded_seconds = []
+            for _, observations in component_values:
+                padding = maximum_observations - len(observations)
+                padded_coordinates.append(
+                    [(value.x, value.y) for value in observations]
+                    + [(0.0, 0.0)] * padding
+                )
+                padded_ordinals.append(
+                    [value.geometry_ordinal for value in observations]
+                    + [-1] * padding
+                )
+                padded_dimensions.append(
+                    [
+                        (value.image_width, value.image_height)
+                        for value in observations
+                    ]
+                    + [(1, 1)] * padding
+                )
+                padded_scores.append(
+                    [value.score for value in observations] + [0.0] * padding
+                )
+                padded_seconds.append(
+                    [value.seconds for value in observations] + [0.0] * padding
+                )
+            coordinates = torch.tensor(
+                padded_coordinates, dtype=torch.float32, device=device
+            )
+            ordinals = torch.tensor(
+                padded_ordinals, dtype=torch.int64, device=device
+            )
+            dimensions = torch.tensor(
+                padded_dimensions, dtype=torch.float32, device=device
+            )
+            scores = torch.tensor(
+                padded_scores, dtype=torch.float64, device=device
+            )
+            seconds = torch.tensor(
+                padded_seconds, dtype=torch.float64, device=device
+            )
         minimum_frame = min(value[0] for value in frame_sets)
         maximum_frame = max(value[-1] for value in frame_sets)
         membership = torch.zeros(
@@ -1197,6 +1571,7 @@ class ActiveTrackStore:
             "gateMetricsBackend": self.parallax_backend,
             "componentRebuildBackend": self._component_rebuild_backend,
             "spatialInternBackend": self._spatial_intern_backend,
+            **self._persistent_tensor_report(),
             **self._last_gate_tensor_report,
             "parallaxMicrobatchComponents": (
                 self.budget.parallax_microbatch_components
@@ -1222,7 +1597,16 @@ class ActiveTrackStore:
         if not contiguous:
             report["activeFrameIds"] = list(active_frame_ids)
             report["activeFrameCount"] = len(active_frame_ids)
-        report["reportSha256"] = _canonical_sha256(report)
+        # Persistent tensor counters describe the execution history (for example,
+        # whether a released row was reused after resume), not the semantic gate
+        # decision.  Excluding them keeps durable gate identity deterministic while
+        # still exposing the counters to runtime telemetry.
+        identity_report = {
+            key: value
+            for key, value in report.items()
+            if not key.startswith("persistentObservationTensor")
+        }
+        report["reportSha256"] = _canonical_sha256(identity_report)
         return report
 
     def propose_release(self, finalized_through_ordinal: int) -> dict[str, Any]:
@@ -1301,6 +1685,9 @@ class ActiveTrackStore:
             raise ActiveTrackStoreError("release proposal identity differs")
         _require_sha256(accepted_journal_head, "accepted journal head")
         release_uids = set(self._pending_release["uids"])
+        released_frame_ids = {
+            self._observations[uid].geometry_ordinal for uid in release_uids
+        }
         for uid in release_uids:
             observation = self._observations.pop(uid)
             frame_values = self._observations_by_frame[observation.geometry_ordinal]
@@ -1318,11 +1705,29 @@ class ActiveTrackStore:
                 ][bucket]
             if not self._spatial_buckets_by_frame[observation.geometry_ordinal]:
                 del self._spatial_buckets_by_frame[observation.geometry_ordinal]
+        for frame_id in released_frame_ids:
+            remaining_uids = sorted(
+                self._observations_by_frame.get(frame_id, ())
+            )
+            if not remaining_uids:
+                self._native_spatial_uids_by_frame.pop(frame_id, None)
+                self._native_spatial_x_by_frame.pop(frame_id, None)
+                self._native_spatial_y_by_frame.pop(frame_id, None)
+                continue
+            self._native_spatial_uids_by_frame[frame_id] = remaining_uids
+            self._native_spatial_x_by_frame[frame_id] = [
+                self._observations[uid].x for uid in remaining_uids
+            ]
+            self._native_spatial_y_by_frame[frame_id] = [
+                self._observations[uid].y for uid in remaining_uids
+            ]
         self._edges = {
             key
             for key in self._edges
             if key[0] not in release_uids and key[1] not in release_uids
         }
+        if self._gpu_observation_table is not None:
+            self._gpu_observation_table.discard(release_uids)
         self._rebuild_components()
         result = {
             "contractId": "jarailsense.gluemap-active-track-release/v1",
