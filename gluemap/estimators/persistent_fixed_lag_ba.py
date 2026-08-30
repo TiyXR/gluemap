@@ -326,7 +326,20 @@ class PersistentFixedLagBaProblem:
         created_observations = 0
         reused_observations = 0
         entering_observations: list[tuple[str, str, Any]] = []
-        if native_rebuild:
+        native_csr_rebuild = native_rebuild and hasattr(
+            pygluemap,
+            "add_reprojection_residual_csr_implicit_parameters",
+        )
+        if native_csr_rebuild:
+            observation_count = sum(
+                len(track.observations) for track in track_by_uid.values()
+            )
+            if observation_count < 1:
+                raise PersistentFixedLagBaError(
+                    "persistent BA active observations are empty"
+                )
+            created_observations = observation_count
+        elif native_rebuild:
             frame_order = {
                 int(frame_id): ordinal
                 for ordinal, frame_id in enumerate(frame_ids)
@@ -339,7 +352,10 @@ class PersistentFixedLagBaProblem:
                 for observation in track.observations:
                     observation_uid = str(observation.observation_uid)
                     frame_id = int(observation.geometry_ordinal)
-                    if observation_uid in seen_uids or frame_id not in frame_order:
+                    if (
+                        observation_uid in seen_uids
+                        or frame_id not in frame_order
+                    ):
                         raise PersistentFixedLagBaError(
                             "persistent BA observation identity is invalid"
                         )
@@ -380,24 +396,99 @@ class PersistentFixedLagBaProblem:
         )
 
         phase_started = time.perf_counter()
-        observation_count = len(entering_observations)
-        point_addresses = np.empty((observation_count,), dtype=np.uint64)
-        pose_addresses = np.empty((observation_count,), dtype=np.uint64)
-        observation_xy = np.empty((observation_count, 2), dtype=np.float64)
-        fixed_pose_flags = np.empty((observation_count,), dtype=np.uint8)
-        for index, (track_uid, _, observation) in enumerate(
-            entering_observations
-        ):
-            frame_id = int(observation.geometry_ordinal)
-            point_addresses[index] = self.points[track_uid].values.ctypes.data
-            pose_addresses[index] = self.poses[frame_id].values.ctypes.data
-            observation_xy[index, 0] = float(observation.x)
-            observation_xy[index, 1] = float(observation.y)
-            fixed_pose_flags[index] = frame_id in fixed_pose_ids
+        if native_csr_rebuild:
+            frame_order = {
+                int(frame_id): ordinal
+                for ordinal, frame_id in enumerate(frame_ids)
+            }
+            point_addresses = np.fromiter(
+                (
+                    self.points[track_uid].values.ctypes.data
+                    for track_uid in track_by_uid
+                ),
+                dtype=np.uint64,
+                count=len(track_by_uid),
+            )
+            pose_addresses = np.fromiter(
+                (
+                    self.poses[int(frame_id)].values.ctypes.data
+                    for frame_id in frame_ids
+                ),
+                dtype=np.uint64,
+                count=len(frame_ids),
+            )
+            fixed_pose_flags = np.fromiter(
+                (int(frame_id) in fixed_pose_ids for frame_id in frame_ids),
+                dtype=np.uint8,
+                count=len(frame_ids),
+            )
+            track_offsets = np.empty((len(track_by_uid) + 1,), dtype=np.uint64)
+            observation_frame_indices = np.empty(
+                (observation_count,), dtype=np.int64
+            )
+            observation_xy = np.empty(
+                (observation_count, 2), dtype=np.float64
+            )
+            observation_index = 0
+            for track_index, track in enumerate(track_by_uid.values()):
+                track_offsets[track_index] = observation_index
+                seen_uids: set[str] = set()
+                for observation in track.observations:
+                    observation_uid = str(observation.observation_uid)
+                    frame_id = int(observation.geometry_ordinal)
+                    if observation_uid in seen_uids or frame_id not in frame_order:
+                        raise PersistentFixedLagBaError(
+                            "persistent BA observation identity is invalid"
+                        )
+                    seen_uids.add(observation_uid)
+                    self._validate_observation(observation)
+                    observation_frame_indices[observation_index] = frame_order[
+                        frame_id
+                    ]
+                    observation_xy[observation_index, 0] = float(observation.x)
+                    observation_xy[observation_index, 1] = float(observation.y)
+                    observation_index += 1
+            track_offsets[len(track_by_uid)] = observation_index
+            if observation_index != observation_count:
+                raise PersistentFixedLagBaError(
+                    "persistent BA CSR observation count changed"
+                )
+        else:
+            observation_count = len(entering_observations)
+            point_addresses = np.empty((observation_count,), dtype=np.uint64)
+            pose_addresses = np.empty((observation_count,), dtype=np.uint64)
+            observation_xy = np.empty((observation_count, 2), dtype=np.float64)
+            fixed_pose_flags = np.empty((observation_count,), dtype=np.uint8)
+            for index, (track_uid, _, observation) in enumerate(
+                entering_observations
+            ):
+                frame_id = int(observation.geometry_ordinal)
+                point_addresses[index] = self.points[
+                    track_uid
+                ].values.ctypes.data
+                pose_addresses[index] = self.poses[frame_id].values.ctypes.data
+                observation_xy[index, 0] = float(observation.x)
+                observation_xy[index, 1] = float(observation.y)
+                fixed_pose_flags[index] = frame_id in fixed_pose_ids
         phase_wall_seconds["nativeArrayBuild"] = time.perf_counter() - phase_started
-        if entering_observations:
+        if observation_count:
             phase_started = time.perf_counter()
-            if self.policy == "native-rebuild-every-window":
+            if native_csr_rebuild:
+                native_batch = (
+                    pygluemap.add_reprojection_residual_csr_implicit_parameters(
+                        self.problem,
+                        self.camera_model_id,
+                        point_addresses,
+                        pose_addresses,
+                        fixed_pose_flags,
+                        track_offsets,
+                        observation_frame_indices,
+                        int(self.camera_params.ctypes.data),
+                        observation_xy,
+                        self.loss_function,
+                    )
+                )
+            elif self.policy == "native-rebuild-every-window":
                 native_batch = (
                     pygluemap.add_reprojection_residual_batch_implicit_parameters(
                         self.problem,
@@ -420,7 +511,7 @@ class PersistentFixedLagBaProblem:
                     observation_xy,
                     self.loss_function,
                 )
-            if native_batch.size != len(entering_observations):
+            if native_batch.size != observation_count:
                 raise PersistentFixedLagBaError(
                     "persistent BA native visual batch size differs"
                 )
@@ -480,9 +571,13 @@ class PersistentFixedLagBaProblem:
             "status": "passed",
             "mode": self.policy,
             "visualResidualBindingMode": (
-                "native-image-major-implicit-parameters"
-                if self.policy == "native-rebuild-every-window"
-                else "native-enter-leave-delta"
+                "native-image-major-csr-implicit-parameters"
+                if native_csr_rebuild
+                else (
+                    "native-image-major-implicit-parameters"
+                    if native_rebuild
+                    else "native-enter-leave-delta"
+                )
             ),
             "createdPoseCount": created_poses,
             "removedPoseCount": removed_poses,

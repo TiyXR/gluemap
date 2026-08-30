@@ -367,6 +367,121 @@ AddReprojectionResidualBatchImplicitParameters(
                                                       std::move(residuals));
 }
 
+std::unique_ptr<ReprojectionResidualBatch>
+AddReprojectionResidualCSRImplicitParameters(
+    ceres::Problem *problem, int camera_model_id,
+    py::array_t<uint64_t, py::array::c_style> point_addresses,
+    py::array_t<uint64_t, py::array::c_style> pose_addresses,
+    py::array_t<uint8_t, py::array::c_style> fixed_pose_flags,
+    py::array_t<uint64_t, py::array::c_style> track_offsets,
+    py::array_t<int64_t, py::array::c_style> observation_frame_indices,
+    uint64_t camera_address,
+    py::array_t<double, py::array::c_style> observation_xy,
+    ceres::LossFunction *loss_function) {
+  if (problem == nullptr || camera_address == 0) {
+    throw std::invalid_argument("CSR reprojection batch problem is invalid");
+  }
+  const py::buffer_info points = point_addresses.request();
+  const py::buffer_info poses = pose_addresses.request();
+  const py::buffer_info fixed = fixed_pose_flags.request();
+  const py::buffer_info offsets = track_offsets.request();
+  const py::buffer_info frames = observation_frame_indices.request();
+  const py::buffer_info xy = observation_xy.request();
+  if (points.ndim != 1 || poses.ndim != 1 || fixed.ndim != 1 ||
+      offsets.ndim != 1 || frames.ndim != 1 || xy.ndim != 2 ||
+      xy.shape[1] != 2 || points.shape[0] < 1 || poses.shape[0] < 1 ||
+      fixed.shape[0] != poses.shape[0] ||
+      offsets.shape[0] != points.shape[0] + 1 ||
+      frames.shape[0] != xy.shape[0] || frames.shape[0] < 1) {
+    throw std::invalid_argument("CSR reprojection batch dimensions differ");
+  }
+
+  auto *point_values = static_cast<const uint64_t *>(points.ptr);
+  auto *pose_values = static_cast<const uint64_t *>(poses.ptr);
+  auto *fixed_values = static_cast<const uint8_t *>(fixed.ptr);
+  auto *offset_values = static_cast<const uint64_t *>(offsets.ptr);
+  auto *frame_values = static_cast<const int64_t *>(frames.ptr);
+  auto *measurements = static_cast<const double *>(xy.ptr);
+  auto *camera = reinterpret_cast<double *>(
+      static_cast<uintptr_t>(camera_address));
+  const size_t point_count = static_cast<size_t>(points.shape[0]);
+  const size_t pose_count = static_cast<size_t>(poses.shape[0]);
+  const size_t observation_count = static_cast<size_t>(frames.shape[0]);
+
+  std::vector<ceres::ResidualBlockId> residuals;
+  residuals.reserve(observation_count);
+  {
+    py::gil_scoped_release release;
+    if (offset_values[0] != 0 ||
+        offset_values[point_count] != observation_count) {
+      throw std::invalid_argument("CSR reprojection offsets are invalid");
+    }
+
+    // Stable counting sort converts compact track-major CSR input into the
+    // image-major residual insertion order used by COLMAP. This preserves
+    // Ceres parameter ordering without Python tuple materialization/sorting.
+    std::vector<size_t> frame_counts(pose_count, 0);
+    std::vector<size_t> observation_tracks(observation_count, 0);
+    for (size_t track = 0; track < point_count; ++track) {
+      const uint64_t begin = offset_values[track];
+      const uint64_t end = offset_values[track + 1];
+      if (begin > end || end > observation_count) {
+        throw std::invalid_argument("CSR reprojection offsets are not monotonic");
+      }
+      for (uint64_t observation = begin; observation < end; ++observation) {
+        const int64_t frame = frame_values[observation];
+        if (frame < 0 || static_cast<size_t>(frame) >= pose_count) {
+          throw std::invalid_argument("CSR reprojection frame is invalid");
+        }
+        ++frame_counts[static_cast<size_t>(frame)];
+        observation_tracks[static_cast<size_t>(observation)] = track;
+      }
+    }
+
+    std::vector<size_t> frame_cursor(pose_count, 0);
+    size_t offset = 0;
+    for (size_t frame = 0; frame < pose_count; ++frame) {
+      frame_cursor[frame] = offset;
+      offset += frame_counts[frame];
+    }
+    std::vector<size_t> image_major_observations(observation_count, 0);
+    for (size_t observation = 0; observation < observation_count;
+         ++observation) {
+      const size_t frame = static_cast<size_t>(frame_values[observation]);
+      image_major_observations[frame_cursor[frame]++] = observation;
+    }
+
+    for (const size_t observation : image_major_observations) {
+      const size_t track = observation_tracks[observation];
+      const size_t frame = static_cast<size_t>(frame_values[observation]);
+      auto *point = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(point_values[track]));
+      auto *pose = reinterpret_cast<double *>(
+          static_cast<uintptr_t>(pose_values[frame]));
+      const Eigen::Vector2d point2d(measurements[observation * 2],
+                                    measurements[observation * 2 + 1]);
+      if (fixed_values[frame] != 0) {
+        colmap::Rigid3d cam_from_world;
+        cam_from_world.params = Eigen::Map<const Eigen::Vector7d>(pose);
+        ceres::CostFunction *cost = colmap::CreateCameraCostFunction<
+            colmap::ReprojErrorConstantPoseCostFunctor>(
+            static_cast<colmap::CameraModelId>(camera_model_id), point2d,
+            cam_from_world);
+        residuals.push_back(
+            problem->AddResidualBlock(cost, loss_function, point, camera));
+      } else {
+        ceres::CostFunction *cost =
+            colmap::CreateCameraCostFunction<colmap::ReprojErrorCostFunctor>(
+                static_cast<colmap::CameraModelId>(camera_model_id), point2d);
+        residuals.push_back(problem->AddResidualBlock(
+            cost, loss_function, point, pose, camera));
+      }
+    }
+  }
+  return std::make_unique<ReprojectionResidualBatch>(problem,
+                                                      std::move(residuals));
+}
+
 py::dict EvaluateConnectedCRS(
     ceres::Problem *problem,
     const std::vector<uintptr_t> &ordered_parameter_addresses,
@@ -524,6 +639,16 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("loss_function"),
         "Add image-major reprojection residuals while letting Ceres create "
         "parameter blocks in COLMAP order.");
+
+  m.def("add_reprojection_residual_csr_implicit_parameters",
+        &AddReprojectionResidualCSRImplicitParameters,
+        py::arg("problem"), py::arg("camera_model_id"),
+        py::arg("point_addresses"), py::arg("pose_addresses"),
+        py::arg("fixed_pose_flags"), py::arg("track_offsets"),
+        py::arg("observation_frame_indices"), py::arg("camera_address"),
+        py::arg("observation_xy"), py::arg("loss_function"),
+        "Add compact track-major CSR observations in deterministic "
+        "image-major COLMAP parameter order.");
 
   m.def("is_cuda_available", &IsCUDAAvailable,
         "Returns True if the module was compiled with CUDA support.");
