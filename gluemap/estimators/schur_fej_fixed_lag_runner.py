@@ -116,6 +116,7 @@ class SchurFejFixedLagRunner:
         triangulation_device_policy: str = "cuda-required",
         triangulation_microbatch_tracks: int = 4096,
         triangulation_initialization_policy: str = "full-dlt",
+        triangulation_solver_policy: str = "homogeneous-svd",
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
         ba_linear_solver_ordering_policy: str = "auto",
@@ -155,6 +156,13 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "triangulation initialization policy is invalid"
             )
+        if triangulation_solver_policy not in {
+            "homogeneous-svd",
+            "homogeneous-gram-eigh",
+        }:
+            raise SchurFejFixedLagRunnerError(
+                "triangulation solver policy is invalid"
+            )
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
@@ -162,6 +170,7 @@ class SchurFejFixedLagRunner:
         self.triangulation_initialization_policy = (
             triangulation_initialization_policy
         )
+        self.triangulation_solver_policy = triangulation_solver_policy
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_linear_solver_ordering_policy = (
@@ -367,6 +376,7 @@ class SchurFejFixedLagRunner:
                 matrix_k,
                 device_policy=self.triangulation_device_policy,
                 microbatch_tracks=self.triangulation_microbatch_tracks,
+                solver_policy=self.triangulation_solver_policy,
             )
             dlt_by_uid = {value.track_uid: value for value in dlt_results}
         triangulated_by_uid = {**cached_by_uid, **dlt_by_uid}
@@ -395,6 +405,7 @@ class SchurFejFixedLagRunner:
                 ),
                 "microbatchTracks": self.triangulation_microbatch_tracks,
                 "microbatchCount": 0,
+                "solverPolicy": self.triangulation_solver_policy,
                 "tensorLayout": "not-run-cache-hit",
                 "reprojectionErrorP50Pixels": None,
                 "reprojectionErrorP95Pixels": None,
@@ -712,6 +723,7 @@ class SchurFejFixedLagRunner:
             "triangulationInitializationPolicy": (
                 self.triangulation_initialization_policy
             ),
+            "triangulationSolverPolicy": self.triangulation_solver_policy,
             "previousPriorCameraCount": len(previous_prior.camera_ids),
             "nextPriorCameraCount": (
                 0 if next_prior is None else len(next_prior.camera_ids)
@@ -769,6 +781,7 @@ class SchurFejFixedLagRunner:
             "triangulationInitializationPolicy": (
                 self.triangulation_initialization_policy
             ),
+            "triangulationSolverPolicy": self.triangulation_solver_policy,
             "activeBodyFrameIds": [],
             "rotations": {
                 str(key): value.tolist()
@@ -823,6 +836,7 @@ class SchurFejFixedLagRunner:
             "triangulationInitializationPolicy": (
                 self.triangulation_initialization_policy
             ),
+            "triangulationSolverPolicy": self.triangulation_solver_policy,
             "trackPointCache": [
                 [
                     track_uid,
@@ -875,6 +889,9 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_policy = checkpoint.get(
             "triangulationInitializationPolicy", "full-dlt"
         )
+        checkpoint_triangulation_solver_policy = checkpoint.get(
+            "triangulationSolverPolicy", "homogeneous-svd"
+        )
         cache_rows = checkpoint.get("trackPointCache", [])
         if (
             len(frame_ids) < 3
@@ -890,6 +907,8 @@ class SchurFejFixedLagRunner:
             or not isinstance(prior_value, dict)
             or checkpoint_triangulation_policy
             != self.triangulation_initialization_policy
+            or checkpoint_triangulation_solver_policy
+            != self.triangulation_solver_policy
             or not isinstance(cache_rows, list)
         ):
             raise SchurFejFixedLagRunnerError(
@@ -1008,6 +1027,9 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_policy = checkpoint.get(
             "triangulationInitializationPolicy", "full-dlt"
         )
+        checkpoint_triangulation_solver_policy = checkpoint.get(
+            "triangulationSolverPolicy", "homogeneous-svd"
+        )
         if (
             checkpoint.get("status") != "passed"
             or checkpoint.get("publishable") is not False
@@ -1018,6 +1040,8 @@ class SchurFejFixedLagRunner:
             or fixed_gauge != self.fixed_gauge_frame_ids
             or checkpoint_triangulation_policy
             != self.triangulation_initialization_policy
+            or checkpoint_triangulation_solver_policy
+            != self.triangulation_solver_policy
             or set(rotations) != fixed_gauge
             or set(centers) != fixed_gauge
             or any(value.shape != (3, 3) for value in rotations.values())

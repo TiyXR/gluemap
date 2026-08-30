@@ -41,12 +41,18 @@ def triangulate_selected_tracks(
     *,
     device_policy: str = "cuda-preferred",
     microbatch_tracks: int = 4096,
+    solver_policy: str = "homogeneous-svd",
 ) -> tuple[list[TriangulatedTrackState], dict[str, Any]]:
     """Triangulate selected tracks without a COLMAP database or image IO."""
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
         raise FixedLagTriangulationError("triangulation device policy is invalid")
     if microbatch_tracks < 1:
         raise FixedLagTriangulationError("triangulation microbatch is invalid")
+    if solver_policy not in {
+        "homogeneous-svd",
+        "homogeneous-gram-eigh",
+    }:
+        raise FixedLagTriangulationError("triangulation solver policy is invalid")
     if device_policy == "cuda-required" and not torch.cuda.is_available():
         raise FixedLagTriangulationError("CUDA triangulation is unavailable")
     device = (
@@ -138,8 +144,13 @@ def triangulate_selected_tracks(
         design = torch.stack((row_x, row_y), dim=2)
         design = design.masked_fill(~mask_tensor[..., None, None], 0.0)
         design = design.reshape(len(batch), batch_maximum_views * 2, 4)
-        _, _, right = torch.linalg.svd(design, full_matrices=False)
-        homogeneous = right[:, -1, :]
+        if solver_policy == "homogeneous-svd":
+            _, _, right = torch.linalg.svd(design, full_matrices=False)
+            homogeneous = right[:, -1, :]
+        else:
+            gram = design.transpose(1, 2) @ design
+            _, eigenvectors = torch.linalg.eigh(gram)
+            homogeneous = eigenvectors[:, :, 0]
         valid_w = homogeneous[:, 3].abs() > 1e-12
         denominator = torch.where(
             valid_w[:, None],
@@ -222,6 +233,7 @@ def triangulate_selected_tracks(
         "maximumViewsPerTrack": maximum_views,
         "microbatchTracks": microbatch_tracks,
         "microbatchCount": microbatch_count,
+        "solverPolicy": solver_policy,
         "tensorLayout": "padded-contiguous-batch",
         "reprojectionErrorP50Pixels": float(quantiles[0]),
         "reprojectionErrorP95Pixels": float(quantiles[1]),

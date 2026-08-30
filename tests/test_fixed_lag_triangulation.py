@@ -66,3 +66,64 @@ def test_gpu_style_batch_dlt_recovers_known_points() -> None:
     for actual, expected in zip(triangulated, points, strict=True):
         assert np.allclose(actual.xyz, expected, atol=1e-9)
         assert actual.positive_depth_fraction == 1.0
+
+
+def test_gram_eigh_matches_homogeneous_svd() -> None:
+    rotations = {frame: np.eye(3) for frame in range(6)}
+    centers = {
+        frame: np.array((float(frame) * 0.3, 0.02 * frame, 0.0))
+        for frame in rotations
+    }
+    intrinsics = np.array(
+        ((900.0, 0.0, 640.0), (0.0, 900.0, 360.0), (0.0, 0.0, 1.0))
+    )
+    tracks = []
+    for track_index in range(32):
+        point = np.array(
+            (
+                0.1 + 0.07 * track_index,
+                -0.3 + 0.02 * track_index,
+                8.0 + 0.15 * track_index,
+            )
+        )
+        observations = []
+        for frame, center in centers.items():
+            camera = point - center
+            x = intrinsics[0, 0] * camera[0] / camera[2] + intrinsics[0, 2]
+            y = intrinsics[1, 1] * camera[1] / camera[2] + intrinsics[1, 2]
+            observations.append(_observation(track_index, frame, x, y))
+        tracks.append(
+            SelectedTrackState(
+                track_uid=f"track-{track_index}",
+                observations=tuple(observations),
+            )
+        )
+
+    svd, svd_report = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+        microbatch_tracks=7,
+        solver_policy="homogeneous-svd",
+    )
+    gram, gram_report = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+        microbatch_tracks=7,
+        solver_policy="homogeneous-gram-eigh",
+    )
+
+    assert svd_report["solverPolicy"] == "homogeneous-svd"
+    assert gram_report["solverPolicy"] == "homogeneous-gram-eigh"
+    assert [value.track_uid for value in gram] == [value.track_uid for value in svd]
+    assert np.allclose(
+        np.asarray([value.xyz for value in gram]),
+        np.asarray([value.xyz for value in svd]),
+        rtol=1e-8,
+        atol=1e-8,
+    )

@@ -81,6 +81,7 @@ class FixedAnchorDiagnosticRunner:
         camera_model: str = "SIMPLE_PINHOLE",
         triangulation_device_policy: str = "cuda-required",
         triangulation_microbatch_tracks: int = 4096,
+        triangulation_solver_policy: str = "homogeneous-svd",
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
         ba_max_iterations: int = 20,
@@ -96,6 +97,7 @@ class FixedAnchorDiagnosticRunner:
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
         self.triangulation_microbatch_tracks = triangulation_microbatch_tracks
+        self.triangulation_solver_policy = triangulation_solver_policy
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_max_iterations = ba_max_iterations
@@ -162,6 +164,7 @@ class FixedAnchorDiagnosticRunner:
             matrix_k,
             device_policy=self.triangulation_device_policy,
             microbatch_tracks=self.triangulation_microbatch_tracks,
+            solver_policy=self.triangulation_solver_policy,
         )
         triangulation_wall = time.perf_counter() - triangulation_started
 
