@@ -125,6 +125,19 @@ class BaseInferencePipeline(abc.ABC):
 
     def _make_dataloader(self, dataset) -> torch.utils.data.DataLoader:
         """Build a (distributed when applicable) DataLoader."""
+        if getattr(dataset, "gpu_resident_stream", False):
+            if self.args.distributed:
+                raise ValueError(
+                    "GPU-resident streaming datasets do not support "
+                    "DistributedSampler"
+                )
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=self._batch_size(),
+                num_workers=0,
+                pin_memory=False,
+                drop_last=False,
+            )
         if self.args.distributed:
             sampler = DistributedSampler(
                 dataset,
