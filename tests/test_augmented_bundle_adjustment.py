@@ -267,6 +267,52 @@ class TestBundleAdjustmentEndToEnd:
         # After BA, virtual must have the same cameras and poses as normal.
         self._assert_same_cameras_and_poses(rec_virtual, rec_normal)
 
+    def test_fixed_anchor_pose_and_intrinsics_remain_exact(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=6, num_points3D=80, seed=14
+        )
+        anchor_id = sorted(reconstruction.reg_image_ids())[0]
+        anchor_pose = copy.deepcopy(
+            reconstruction.image(anchor_id).cam_from_world()
+        )
+        camera_parameters = {
+            camera_id: camera.params.copy()
+            for camera_id, camera in reconstruction.cameras.items()
+        }
+        rng = np.random.default_rng(14)
+        perturb_points3D(
+            reconstruction, fraction=1.0, noise_std=0.02, rng=rng
+        )
+        self._perturb_poses(
+            reconstruction,
+            translation_std=0.01,
+            rotation_std_deg=0.5,
+            rng=rng,
+        )
+        reconstruction.image(anchor_id).frame.set_cam_from_world(
+            reconstruction.image(anchor_id).camera_id, anchor_pose
+        )
+        anchor_parameters = (
+            reconstruction.image(anchor_id).cam_from_world().params.copy()
+        )
+
+        result, _, _ = bundle_adjustment(
+            reconstruction,
+            None,
+            negative_depth_observations={},
+            max_num_iterations=20,
+            fixed_pose_ids={anchor_id},
+            fix_intrinsics=True,
+            device_policy="cpu",
+        )
+
+        solved_anchor = result.image(anchor_id).cam_from_world()
+        np.testing.assert_allclose(
+            solved_anchor.params, anchor_parameters, rtol=0, atol=1e-15
+        )
+        for camera_id, parameters in camera_parameters.items():
+            assert np.array_equal(result.cameras[camera_id].params, parameters)
+
     def test_ba_recovers_from_noise(self):
         """After adding small noise to 3D points and poses, BA should
         recover a reconstruction close to the original."""

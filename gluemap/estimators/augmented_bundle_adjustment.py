@@ -5,6 +5,8 @@ import pyceres
 import pycolmap
 import pygluemap
 
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
+
 logger = logging.getLogger(__name__)
 
 
@@ -218,6 +220,9 @@ def bundle_adjustment(
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
     linear_solver_type: str = "auto",
+    fixed_pose_ids: set[int] | None = None,
+    fix_intrinsics: bool = False,
+    device_policy: str = "cuda-preferred",
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -246,6 +251,10 @@ def bundle_adjustment(
             ``"trivial"``, ``"huber"``, ``"cauchy"``.
         loss_type_virtual: Loss function for virtual tracks. One of
             ``"trivial"``, ``"huber"``, ``"arctan"``, ``"cauchy"``.
+        fixed_pose_ids: Existing canonical window poses to keep constant.
+        fix_intrinsics: Keep all current camera intrinsics constant after the
+            initial-anchor calibration has been frozen.
+        device_policy: ``cuda-required``, ``cuda-preferred`` or ``cpu``.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -275,6 +284,7 @@ def bundle_adjustment(
     # Restore stock Ceres convergence tolerances.
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
+    ba_options.ceres.solver_options.num_threads = resolve_native_thread_count()
     ba_options.ceres.auto_select_solver_type = True
     if linear_solver_type == "dense-schur":
         ba_options.ceres.auto_select_solver_type = False
@@ -283,7 +293,15 @@ def bundle_adjustment(
         )
     elif linear_solver_type != "auto":
         raise ValueError(f"Unsupported BA solver: {linear_solver_type}")
-    ba_options.ceres.use_gpu = False
+    if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
+        raise ValueError("Unsupported BA device policy")
+    cuda_available = bool(
+        getattr(pygluemap, "is_cuda_available", lambda: False)()
+        and getattr(pygluemap, "is_cuda_sparse_available", lambda: False)()
+    )
+    if device_policy == "cuda-required" and not cuda_available:
+        raise RuntimeError("CUDA/cuDSS bundle adjustment is unavailable")
+    ba_options.ceres.use_gpu = device_policy != "cpu" and cuda_available
     ba_options.ceres.loss_function_type = _pycolmap_loss_type(loss_type_normal)
 
     ba_config = pycolmap.BundleAdjustmentConfig()
@@ -291,7 +309,18 @@ def bundle_adjustment(
         ba_config.add_image(image_id)
     for point3D_id in reconstruction.points3D:
         ba_config.add_variable_point(point3D_id)
-    ba_config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
+    fixed_poses = set(fixed_pose_ids or set())
+    unknown_fixed = fixed_poses - set(reconstruction.images)
+    if unknown_fixed:
+        raise ValueError("Fixed BA pose is absent from the reconstruction")
+    if fixed_poses:
+        for image_id in sorted(fixed_poses):
+            ba_config.set_constant_rig_from_world_pose(image_id)
+    else:
+        ba_config.fix_gauge(pycolmap.BundleAdjustmentGauge.TWO_CAMS_FROM_WORLD)
+    if fix_intrinsics:
+        for camera_id in reconstruction.cameras:
+            ba_config.set_constant_cam_intrinsics(camera_id)
 
     bundle_adjuster = pycolmap.create_default_ceres_bundle_adjuster(
         ba_options, ba_config, reconstruction
