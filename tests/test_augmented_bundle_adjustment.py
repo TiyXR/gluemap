@@ -458,7 +458,31 @@ class TestBundleAdjustmentEndToEnd:
         )
         image_ids = sorted(reconstruction.reg_image_ids())
         fixed_image_id = image_ids[0]
+        selected_point_ids = tuple(sorted(reconstruction.point3D_ids())[:10])
         captured = []
+
+        def capture(problem, current):
+            image_mapping = {
+                image_id - 1: image_id
+                for image_id in image_ids
+                if image_id != fixed_image_id
+            }
+            captured.append(
+                capture_ceres_problem_linearization(
+                    problem,
+                    current,
+                    image_mapping,
+                )
+            )
+            captured.append(
+                capture_ceres_problem_linearization(
+                    problem,
+                    current,
+                    image_mapping,
+                    point3d_ids=selected_point_ids,
+                    residual_seed_point3d_ids=selected_point_ids,
+                )
+            )
 
         bundle_adjustment(
             reconstruction,
@@ -468,20 +492,10 @@ class TestBundleAdjustmentEndToEnd:
             fixed_pose_ids={fixed_image_id},
             fix_intrinsics=True,
             device_policy="cpu",
-            post_solve_problem_callback=lambda problem, current: captured.append(
-                capture_ceres_problem_linearization(
-                    problem,
-                    current,
-                    {
-                        image_id - 1: image_id
-                        for image_id in image_ids
-                        if image_id != fixed_image_id
-                    },
-                )
-            ),
+            post_solve_problem_callback=capture,
         )
 
-        assert len(captured) == 1
+        assert len(captured) == 2
         linearization = captured[0]
         assert linearization.camera_ids == tuple(
             image_id - 1 for image_id in image_ids[1:]
@@ -495,6 +509,17 @@ class TestBundleAdjustmentEndToEnd:
         assert linearization.row_offsets[-1] == len(
             linearization.jacobian_values
         )
+        connected = captured[1]
+        assert connected.point3d_ids == selected_point_ids
+        assert connected.report["pointCount"] == 10
+        assert connected.report["residualSelection"] == (
+            "seed-point-connected-residuals"
+        )
+        assert connected.report["connectedResidualBlockCount"] == 50
+        assert connected.report["residualCount"] == 100
+        assert connected.report["residualCount"] < linearization.report[
+            "residualCount"
+        ]
         prior = marginalize_ceres_linearization(
             linearization,
             eliminate_camera_id=linearization.camera_ids[0],

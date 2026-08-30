@@ -5,7 +5,9 @@
 
 #include "cost_functions.h"
 
+#include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <ceres/ceres.h>
@@ -121,6 +123,99 @@ bool IsCUDSSAvailable() {
 #endif
 }
 
+py::dict EvaluateConnectedCRS(
+    ceres::Problem *problem,
+    const std::vector<uintptr_t> &ordered_parameter_addresses,
+    const std::vector<uintptr_t> &seed_parameter_addresses,
+    bool apply_loss_function, int num_threads) {
+  if (problem == nullptr || ordered_parameter_addresses.empty() ||
+      seed_parameter_addresses.empty()) {
+    throw std::invalid_argument(
+        "connected CRS evaluation requires problem, parameters and seeds");
+  }
+  if (num_threads < 1) {
+    throw std::invalid_argument("connected CRS thread count must be positive");
+  }
+
+  ceres::Problem::EvaluateOptions options;
+  options.apply_loss_function = apply_loss_function;
+  options.num_threads = num_threads;
+  options.parameter_blocks.reserve(ordered_parameter_addresses.size());
+  for (const uintptr_t address : ordered_parameter_addresses) {
+    auto *parameter = reinterpret_cast<double *>(address);
+    if (!problem->HasParameterBlock(parameter)) {
+      throw std::invalid_argument(
+          "ordered parameter address is absent from Ceres problem");
+    }
+    options.parameter_blocks.push_back(parameter);
+  }
+
+  std::unordered_set<double *> seed_parameters;
+  for (const uintptr_t address : seed_parameter_addresses) {
+    auto *parameter = reinterpret_cast<double *>(address);
+    if (!problem->HasParameterBlock(parameter)) {
+      throw std::invalid_argument(
+          "seed parameter address is absent from Ceres problem");
+    }
+    seed_parameters.insert(parameter);
+  }
+
+  std::vector<ceres::ResidualBlockId> all_residuals;
+  problem->GetResidualBlocks(&all_residuals);
+  options.residual_blocks.reserve(all_residuals.size());
+  std::vector<double *> residual_parameters;
+  for (const ceres::ResidualBlockId residual : all_residuals) {
+    residual_parameters.clear();
+    problem->GetParameterBlocksForResidualBlock(residual,
+                                                &residual_parameters);
+    if (std::any_of(residual_parameters.begin(), residual_parameters.end(),
+                    [&seed_parameters](double *parameter) {
+                      return seed_parameters.count(parameter) != 0;
+                    })) {
+      options.residual_blocks.push_back(residual);
+    }
+  }
+  if (options.residual_blocks.empty()) {
+    throw std::invalid_argument("seed parameters have no connected residuals");
+  }
+
+  double cost = 0.0;
+  std::vector<double> residuals;
+  ceres::CRSMatrix jacobian;
+  bool evaluated = false;
+  {
+    py::gil_scoped_release release;
+    evaluated = problem->Evaluate(options, &cost, &residuals, nullptr,
+                                  &jacobian);
+  }
+  if (!evaluated) {
+    throw std::runtime_error("connected Ceres CRS evaluation failed");
+  }
+
+  auto residual_array = py::array_t<double>(residuals.size());
+  std::copy(residuals.begin(), residuals.end(), residual_array.mutable_data());
+  auto row_array = py::array_t<int64_t>(jacobian.rows.size());
+  std::copy(jacobian.rows.begin(), jacobian.rows.end(),
+            row_array.mutable_data());
+  auto column_array = py::array_t<int64_t>(jacobian.cols.size());
+  std::copy(jacobian.cols.begin(), jacobian.cols.end(),
+            column_array.mutable_data());
+  auto value_array = py::array_t<double>(jacobian.values.size());
+  std::copy(jacobian.values.begin(), jacobian.values.end(),
+            value_array.mutable_data());
+
+  py::dict result;
+  result["cost"] = cost;
+  result["residuals"] = std::move(residual_array);
+  result["rowOffsets"] = std::move(row_array);
+  result["columnIndices"] = std::move(column_array);
+  result["jacobianValues"] = std::move(value_array);
+  result["residualBlockCount"] = options.residual_blocks.size();
+  result["residualCount"] = residuals.size();
+  result["columnCount"] = jacobian.num_cols;
+  return result;
+}
+
 PYBIND11_MODULE(pygluemap, m) {
   py::module_::import("pyceres");
 
@@ -176,6 +271,13 @@ PYBIND11_MODULE(pygluemap, m) {
   m.def("is_cuda_sparse_available", &IsCUDSSAvailable,
         "Returns True if the module was compiled with CUDA sparse/cuDSS "
         "support.");
+
+  m.def("evaluate_connected_crs", &EvaluateConnectedCRS,
+        py::arg("problem"), py::arg("ordered_parameter_addresses"),
+        py::arg("seed_parameter_addresses"),
+        py::arg("apply_loss_function") = true, py::arg("num_threads") = 1,
+        "Evaluate only residual blocks connected to seed parameter blocks, "
+        "while preserving the requested tangent-column ordering.");
 
   // Numpy-based track selection: returns point3D IDs to delete.
   // Python then calls reconstruction.delete_point3d(id) for each.

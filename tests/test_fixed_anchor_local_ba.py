@@ -124,6 +124,7 @@ def test_local_ba_keeps_fixed_overlap_poses() -> None:
     )
 
     assert solution.report["status"] == "passed"
+    assert solution.report["marginalizationResidualPolicy"] == "all-active"
     assert solution.report["gpuUsed"] is False
     assert solution.report["trackCount"] == 32
     assert solution.report["observationCount"] == 96
@@ -201,6 +202,7 @@ def test_local_ba_emits_gpu_schur_fej_prior() -> None:
         device_policy="cpu",
         ceres_cuda_available=False,
         marginalize_pose_id=1,
+        marginalization_residual_policy="retiring-track-closure",
         prior_device_policy="cuda-required",
     )
 
@@ -211,3 +213,6 @@ def test_local_ba_emits_gpu_schur_fej_prior() -> None:
     assert solution.next_prior.report["gpuUsed"] is True
     assert solution.next_prior.report["eliminatedCameraId"] == 1
     assert solution.next_prior.report["pointCount"] == 64
+    assert solution.report["marginalizationResidualPolicy"] == (
+        "retiring-track-closure"
+    )

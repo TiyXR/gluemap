@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pyceres
 import pycolmap
+import pygluemap
 
 from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
@@ -47,6 +48,7 @@ def capture_ceres_problem_linearization(
     image_id_by_camera_id: dict[int, int],
     *,
     point3d_ids: list[int] | tuple[int, ...] | None = None,
+    residual_seed_point3d_ids: list[int] | tuple[int, ...] | None = None,
     apply_loss_function: bool = True,
 ) -> CeresProblemLinearization:
     """Evaluate residual/J once with deterministic local parameter ordering."""
@@ -98,26 +100,64 @@ def capture_ceres_problem_linearization(
             "Ceres tangent parameter layout differs"
         )
 
-    options = pyceres.EvaluateOptions()
-    options.apply_loss_function = apply_loss_function
-    options.num_threads = resolve_native_thread_count()
-    options.set_parameter_blocks(parameters)
-    residuals = np.asarray(
-        problem.evaluate_residuals(options), dtype=np.float64
-    )
-    jacobian = problem.evaluate_jacobian(options)
+    native_thread_count = resolve_native_thread_count()
+    connected_residual_block_count = None
+    if residual_seed_point3d_ids is None:
+        options = pyceres.EvaluateOptions()
+        options.apply_loss_function = apply_loss_function
+        options.num_threads = native_thread_count
+        options.set_parameter_blocks(parameters)
+        residuals = np.asarray(
+            problem.evaluate_residuals(options), dtype=np.float64
+        )
+        jacobian = problem.evaluate_jacobian(options)
+        row_offsets = np.asarray(jacobian.rows, dtype=np.int64)
+        column_indices = np.asarray(jacobian.cols, dtype=np.int64)
+        jacobian_values = np.asarray(jacobian.values, dtype=np.float64)
+        jacobian_num_rows = jacobian.num_rows
+        jacobian_num_cols = jacobian.num_cols
+    else:
+        seed_ids = tuple(int(value) for value in residual_seed_point3d_ids)
+        if (
+            not seed_ids
+            or len(set(seed_ids)) != len(seed_ids)
+            or any(value not in resolved_point_ids for value in seed_ids)
+        ):
+            raise FixedLagCeresLinearizationError(
+                "connected residual seed identity is invalid"
+            )
+        seed_parameters = [
+            reconstruction.points3D[point3d_id].xyz for point3d_id in seed_ids
+        ]
+        evaluated = pygluemap.evaluate_connected_crs(
+            problem,
+            [int(np.asarray(value).ctypes.data) for value in parameters],
+            [int(np.asarray(value).ctypes.data) for value in seed_parameters],
+            apply_loss_function,
+            native_thread_count,
+        )
+        residuals = np.asarray(evaluated["residuals"], dtype=np.float64)
+        row_offsets = np.asarray(evaluated["rowOffsets"], dtype=np.int64)
+        column_indices = np.asarray(
+            evaluated["columnIndices"], dtype=np.int64
+        )
+        jacobian_values = np.asarray(
+            evaluated["jacobianValues"], dtype=np.float64
+        )
+        jacobian_num_rows = int(evaluated["residualCount"])
+        jacobian_num_cols = int(evaluated["columnCount"])
+        connected_residual_block_count = int(
+            evaluated["residualBlockCount"]
+        )
     expected_columns = len(pose_parameters) * 6 + len(point_parameters) * 3
-    if jacobian.num_cols != expected_columns:
+    if jacobian_num_cols != expected_columns:
         raise FixedLagCeresLinearizationError(
             "Ceres Jacobian column ordering differs"
         )
-    if jacobian.num_rows != len(residuals):
+    if jacobian_num_rows != len(residuals):
         raise FixedLagCeresLinearizationError(
             "Ceres residual/Jacobian row count differs"
         )
-    row_offsets = np.asarray(jacobian.rows, dtype=np.int64)
-    column_indices = np.asarray(jacobian.cols, dtype=np.int64)
-    jacobian_values = np.asarray(jacobian.values, dtype=np.float64)
     if (
         row_offsets.shape != (len(residuals) + 1,)
         or row_offsets[0] != 0
@@ -135,7 +175,13 @@ def capture_ceres_problem_linearization(
         "residualCount": len(residuals),
         "columnCount": expected_columns,
         "jacobianNonzeroCount": len(jacobian_values),
-        "nativeThreadCount": options.num_threads,
+        "nativeThreadCount": native_thread_count,
+        "residualSelection": (
+            "all-problem-residuals"
+            if residual_seed_point3d_ids is None
+            else "seed-point-connected-residuals"
+        ),
+        "connectedResidualBlockCount": connected_residual_block_count,
         "captureWallSeconds": wall,
     }
     return CeresProblemLinearization(

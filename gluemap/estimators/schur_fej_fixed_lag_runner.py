@@ -89,12 +89,20 @@ class SchurFejFixedLagRunner:
         ba_refinement_passes: int = 1,
         ceres_cuda_available: bool | None = None,
         prior_device_policy: str = "cuda-required",
+        marginalization_residual_policy: str = "all-active",
         prior_relative_rank_threshold: float = 1e-10,
         prior_maximum_condition_estimate: float | None = None,
         prior_expected_nullity: int | None = 1,
     ) -> None:
         if not fixed_gauge_frame_ids:
             raise SchurFejFixedLagRunnerError("fixed gauge pose set is empty")
+        if marginalization_residual_policy not in {
+            "all-active",
+            "retiring-track-closure",
+        }:
+            raise SchurFejFixedLagRunnerError(
+                "marginalization residual policy is invalid"
+            )
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
@@ -105,6 +113,7 @@ class SchurFejFixedLagRunner:
         self.ba_refinement_passes = ba_refinement_passes
         self.ceres_cuda_available = ceres_cuda_available
         self.prior_device_policy = prior_device_policy
+        self.marginalization_residual_policy = marginalization_residual_policy
         self.prior_relative_rank_threshold = prior_relative_rank_threshold
         self.prior_maximum_condition_estimate = prior_maximum_condition_estimate
         self.prior_expected_nullity = prior_expected_nullity
@@ -237,6 +246,9 @@ class SchurFejFixedLagRunner:
             ceres_cuda_available=self.ceres_cuda_available,
             previous_prior=self._prior,
             marginalize_pose_id=marginalize_frame_id,
+            marginalization_residual_policy=(
+                self.marginalization_residual_policy
+            ),
             prior_device_policy=self.prior_device_policy,
             prior_relative_rank_threshold=self.prior_relative_rank_threshold,
             prior_maximum_condition_estimate=(

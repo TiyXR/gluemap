@@ -94,6 +94,7 @@ def refine_fixed_anchor_window(
     ceres_cuda_available: bool | None = None,
     previous_prior: FejPriorState | None = None,
     marginalize_pose_id: int | None = None,
+    marginalization_residual_policy: str = "all-active",
     prior_device_policy: str = "cuda-preferred",
     prior_relative_rank_threshold: float = 1e-10,
     prior_maximum_condition_estimate: float | None = None,
@@ -123,6 +124,13 @@ def refine_fixed_anchor_window(
         or marginalize_pose_id in fixed_pose_ids
     ):
         raise FixedAnchorLocalBaError("marginalized pose identity is invalid")
+    if marginalization_residual_policy not in {
+        "all-active",
+        "retiring-track-closure",
+    }:
+        raise FixedAnchorLocalBaError(
+            "marginalization residual policy is invalid"
+        )
 
     matrix_k = _shared_intrinsics_matrix(intrinsics)
     frame_uid_by_id: dict[int, str] = {}
@@ -167,6 +175,7 @@ def refine_fixed_anchor_window(
         images[frame_id] = image
 
     point_rows: list[tuple[str, np.ndarray, pycolmap.Track]] = []
+    marginalize_track_uids: set[str] = set()
     observation_count = 0
     for track in tracks:
         colmap_track = pycolmap.Track()
@@ -189,6 +198,8 @@ def refine_fixed_anchor_window(
             observation_count += 1
         if len(seen_frames) < 2:
             continue
+        if marginalize_pose_id is not None and marginalize_pose_id in seen_frames:
+            marginalize_track_uids.add(track.track_uid)
         point_rows.append(
             (
                 track.track_uid,
@@ -211,6 +222,14 @@ def refine_fixed_anchor_window(
     for track_uid, xyz, colmap_track in point_rows:
         point3d_id = reconstruction.add_point3D(xyz, colmap_track)
         track_point3d_ids[track_uid] = int(point3d_id)
+    marginalize_point3d_ids = tuple(
+        sorted(track_point3d_ids[value] for value in marginalize_track_uids)
+    )
+    capture_point3d_ids = (
+        marginalize_point3d_ids
+        if marginalization_residual_policy == "retiring-track-closure"
+        else None
+    )
     build_wall = time.perf_counter() - build_started
 
     before_fixed_rotations = {
@@ -256,6 +275,8 @@ def refine_fixed_anchor_window(
                         problem,
                         current,
                         variable_image_ids,
+                        point3d_ids=capture_point3d_ids,
+                        residual_seed_point3d_ids=capture_point3d_ids,
                     )
                 )
                 if marginalize_pose_id is not None
@@ -336,6 +357,7 @@ def refine_fixed_anchor_window(
         "ceresThreadsUsed": int(ceres.num_threads_used),
         "linearSolverPolicy": linear_solver_policy,
         "refinementPassCount": refinement_passes,
+        "marginalizationResidualPolicy": marginalization_residual_policy,
         "frameCount": len(frame_ids),
         "fixedPoseCount": len(fixed_pose_ids),
         "trackCount": len(point_rows),
