@@ -912,43 +912,25 @@ class ActiveTrackStore:
         ``_observations_by_frame`` instead of walking every retained history
         observation and discarding almost all of them afterwards.
         """
-        selected_by_component_frame: dict[
-            tuple[str, int], TrackObservation
-        ] = {}
-        source_observation_count = 0
-        observations = self._observations
-        parent_find = self._union_find.find
-        component_uid_by_root = self._component_uid_by_root
-        for frame_id in sorted(set(int(value) for value in frame_ids)):
-            for observation_uid in self._observations_by_frame.get(frame_id, ()):
-                source_observation_count += 1
-                root = parent_find(observation_uid)
-                component_uid = component_uid_by_root[root]
-                key = (component_uid, frame_id)
-                previous = selected_by_component_frame.get(key)
-                if (
-                    previous is None
-                    or observation_uid < previous.observation_uid
-                ):
-                    selected_by_component_frame[key] = observations[
-                        observation_uid
-                    ]
         values: dict[str, list[TrackObservation]] = defaultdict(list)
-        for (component_uid, _), observation in selected_by_component_frame.items():
-            values[component_uid].append(observation)
-        return (
-            {
-                component_uid: sorted(
-                    values[component_uid],
-                    key=lambda value: (
-                        value.geometry_ordinal,
-                        value.observation_uid,
-                    ),
+        source_observation_count = 0
+        for frame_id in sorted(set(int(value) for value in frame_ids)):
+            for observation_uid in sorted(
+                self._observations_by_frame.get(frame_id, ())
+            ):
+                source_observation_count += 1
+                root = self._union_find.find(observation_uid)
+                values[self._component_uid_by_root[root]].append(
+                    self._observations[observation_uid]
                 )
-                for component_uid in sorted(values)
-            },
-            source_observation_count,
-        )
+        for observations in values.values():
+            observations.sort(
+                key=lambda value: (
+                    value.geometry_ordinal,
+                    value.observation_uid,
+                )
+            )
+        return dict(values), source_observation_count
 
     def _grid_cell(self, observation: TrackObservation) -> tuple[int, int]:
         column = min(
