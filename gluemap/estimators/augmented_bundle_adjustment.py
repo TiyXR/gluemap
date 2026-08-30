@@ -89,6 +89,19 @@ def _pyceres_loss_function(name: str) -> pyceres.LossFunction | None:
 _DEFAULT_LOSS = object()
 
 
+def _validate_resolved_ba_backend(summary: object, gpu_requested: bool) -> None:
+    if not gpu_requested:
+        return
+    ceres_summary = getattr(summary, "ceres_summary", summary)
+    dense_library = str(ceres_summary.dense_linear_algebra_library_type)
+    sparse_library = str(ceres_summary.sparse_linear_algebra_library_type)
+    actual_cuda = dense_library.endswith("CUDA") or sparse_library.endswith(
+        "CUDA_SPARSE"
+    )
+    if not actual_cuda:
+        raise RuntimeError("Ceres CUDA BA request resolved to a CPU solver")
+
+
 def _add_virtual_track_residuals(
     problem: pyceres.Problem,
     virtual_reconstruction: pycolmap.Reconstruction | None,
@@ -223,6 +236,7 @@ def bundle_adjustment(
     fixed_pose_ids: set[int] | None = None,
     fix_intrinsics: bool = False,
     device_policy: str = "cuda-preferred",
+    ceres_cuda_available: bool | None = None,
 ) -> tuple[
     pycolmap.Reconstruction,
     pycolmap.Reconstruction | None,
@@ -255,6 +269,9 @@ def bundle_adjustment(
         fix_intrinsics: Keep all current camera intrinsics constant after the
             initial-anchor calibration has been frozen.
         device_policy: ``cuda-required``, ``cuda-preferred`` or ``cpu``.
+        ceres_cuda_available: Passed Ceres solver-probe result. PyTorch,
+            PyCOLMAP SIFT or pygluemap CUDA capability is not sufficient
+            evidence for CUDA BA.
 
     Returns:
         (reconstruction, virtual_reconstruction, summary) with parameters
@@ -295,10 +312,7 @@ def bundle_adjustment(
         raise ValueError(f"Unsupported BA solver: {linear_solver_type}")
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
         raise ValueError("Unsupported BA device policy")
-    cuda_available = bool(
-        getattr(pygluemap, "is_cuda_available", lambda: False)()
-        and getattr(pygluemap, "is_cuda_sparse_available", lambda: False)()
-    )
+    cuda_available = ceres_cuda_available is True
     if device_policy == "cuda-required" and not cuda_available:
         raise RuntimeError("CUDA/cuDSS bundle adjustment is unavailable")
     ba_options.ceres.use_gpu = device_policy != "cpu" and cuda_available
@@ -333,6 +347,7 @@ def bundle_adjustment(
         )
         summary = bundle_adjuster.solve()
         logger.info(str(summary))
+        _validate_resolved_ba_backend(summary, ba_options.ceres.use_gpu)
         return reconstruction, virtual_reconstruction, summary
 
     problem = bundle_adjuster.problem
@@ -364,6 +379,8 @@ def bundle_adjustment(
     # --- Solve -------------------------------------------------------------
     summary = bundle_adjuster.solve()
     logger.info(str(summary))
+
+    _validate_resolved_ba_backend(summary, ba_options.ceres.use_gpu)
 
     # --- Sync poses/intrinsics into the virtual reconstruction -------------
     # Only the real reconstruction's numpy buffers flowed into the ceres

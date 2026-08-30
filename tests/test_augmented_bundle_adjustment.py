@@ -271,6 +271,22 @@ class TestBundleAdjustmentEndToEnd:
         reconstruction = create_synthetic_reconstruction(
             num_frames=6, num_points3D=80, seed=14
         )
+
+    def test_cuda_required_needs_ceres_solver_probe(self):
+        reconstruction = create_synthetic_reconstruction(
+            num_frames=4, num_points3D=20, seed=17
+        )
+        with np.testing.assert_raises_regex(
+            RuntimeError, "CUDA/cuDSS bundle adjustment is unavailable"
+        ):
+            bundle_adjustment(
+                reconstruction,
+                None,
+                negative_depth_observations={},
+                max_num_iterations=0,
+                device_policy="cuda-required",
+                ceres_cuda_available=None,
+            )
         anchor_id = sorted(reconstruction.reg_image_ids())[0]
         anchor_pose = copy.deepcopy(
             reconstruction.image(anchor_id).cam_from_world()
