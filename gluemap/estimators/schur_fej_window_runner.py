@@ -133,7 +133,7 @@ class SchurFejWindowRunner:
         zero_constraint_frames = [
             frame_id
             for frame_id, count in constraint_counts.items()
-            if count == 0
+            if frame_id != self.fixed_gauge_frame_id and count == 0
         ]
         if zero_constraint_frames:
             raise SchurFejWindowRunnerError(
@@ -155,7 +155,12 @@ class SchurFejWindowRunner:
             "actualBaCameraFrameUidsSha256": _canonical_sha256(frame_uids),
             "nonKeyframeBaCameraCount": 0,
             "zeroConstraintFrameIds": zero_constraint_frames,
-            "minimumConstraintCount": min(constraint_counts.values()),
+            "constraintExemptFrameIds": [self.fixed_gauge_frame_id],
+            "minimumConstraintCount": min(
+                count
+                for frame_id, count in constraint_counts.items()
+                if frame_id != self.fixed_gauge_frame_id
+            ),
             "coarseWallSeconds": coarse_wall,
             "coarse": coarse.report,
             "totalWallSeconds": time.perf_counter() - started,

@@ -82,7 +82,7 @@ def _tracks(frame_ids, centers, intrinsics):
 
 def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     centers = {
-        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(7)
     }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
@@ -100,10 +100,14 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     )
     first_ids = [0, 1, 2, 3, 4]
     second_ids = [0, 2, 3, 4, 5]
+    third_ids = [0, 3, 4, 5, 6]
 
     first = runner.advance({}, first_ids, _tracks(first_ids, centers, intrinsics))
     second = runner.advance(
         {}, second_ids, _tracks(second_ids, centers, intrinsics)
+    )
+    third = runner.advance(
+        {}, third_ids, _tracks(third_ids[1:], centers, intrinsics)
     )
 
     assert first.solved.finalized_frame_id == 1
@@ -111,10 +115,14 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     assert coarse.calls == [
         ((0, 1, 2, 3, 4), set()),
         ((0, 2, 3, 4, 5), {0, 2, 3, 4}),
+        ((0, 3, 4, 5, 6), {0, 3, 4, 5}),
     ]
     assert second.report["coarseFixedWarmStartCount"] == 4
     assert second.report["localBa"]["fixedPoseCount"] == 1
     assert second.report["prior"]["priorNullity"] == 1
+    assert third.report["constraintExemptFrameIds"] == [0]
+    assert third.report["zeroConstraintFrameIds"] == []
+    assert third.report["minimumConstraintCount"] == 64
 
 
 def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():

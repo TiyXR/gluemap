@@ -139,6 +139,41 @@ def test_noncontiguous_fixed_lag_frame_set_excludes_marginalized_pose_on_gpu():
     )
 
 
+def test_fixed_gauge_is_not_a_visual_constraint_minimum():
+    store = ActiveTrackStore(
+        budget(parallax_backend_policy="cpu", minimum_constraints_per_keyframe=2)
+    )
+    add_track(store, 0, [0, 2, 3])
+    add_track(store, 1, [2, 3])
+
+    reports, _ = store.evaluate_frame_sets_materialized(
+        [((0, 2, 3), 2)], constraint_exempt_frame_ids={0}
+    )
+
+    report = reports[0]
+    assert report["status"] == "passed"
+    assert report["constraintsPerFrame"] == {"0": 1, "2": 2, "3": 2}
+    assert report["constraintExemptFrameIds"] == [0]
+    assert report["underConstraintOrdinals"] == []
+
+
+def test_gate_tensor_only_contains_current_frame_union():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, list(range(50)))
+    add_track(store, 1, list(range(50)))
+    frame_ids = (0, *range(40, 50))
+
+    reports, tracks = store.evaluate_frame_sets_materialized(
+        [(frame_ids, 40)], constraint_exempt_frame_ids={0}
+    )
+
+    report = reports[0]
+    assert report["status"] == "passed"
+    assert report["activeTensorFrameUnionCount"] == 11
+    assert report["activeTensorMaximumObservations"] == 11
+    assert all(len(track.observations) == 11 for track in tracks[0])
+
+
 def test_exact_frame_release_keeps_older_canonical_gauge_observations():
     store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
     add_track(store, 0, [0, 1, 2, 3])

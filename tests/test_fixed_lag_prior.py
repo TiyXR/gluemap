@@ -355,13 +355,6 @@ def test_ceres_crs_path_matches_direct_dense_elimination():
             residual[row : row + 2] = residuals[point, view]
             row += 2
     previous = values["previous_prior"]
-    prior_rows = previous.factor.shape[0]
-    prior_jacobian = torch.zeros(
-        prior_rows, camera_dimension + point_dimension, dtype=torch.float64
-    )
-    prior_jacobian[:, :camera_dimension] = previous.factor
-    jacobian = torch.cat((jacobian, prior_jacobian), dim=0)
-    residual = torch.cat((residual, previous.factor_residual), dim=0)
     sparse = jacobian.to_sparse_csr()
     linearization = CeresProblemLinearization(
         camera_ids=values["camera_ids"],

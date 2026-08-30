@@ -851,6 +851,55 @@ def marginalize_ceres_linearization(
     )
     hessian = (hessian + hessian.T) * 0.5
 
+    if previous_prior is not None:
+        index_by_camera_id = {
+            camera_id: index for index, camera_id in enumerate(camera_ids)
+        }
+        if any(
+            camera_id not in index_by_camera_id
+            for camera_id in previous_prior.camera_ids
+        ):
+            raise FixedLagPriorError("previous FEJ prior camera identity is absent")
+        prior_hessian = previous_prior.hessian.to(device=device, dtype=dtype)
+        prior_gradient = previous_prior.gradient.to(device=device, dtype=dtype)
+        prior_count = len(previous_prior.camera_ids)
+        if (
+            prior_hessian.shape != (prior_count * 6, prior_count * 6)
+            or prior_gradient.shape != (prior_count * 6,)
+            or previous_prior.linearization_points.shape != (prior_count, 7)
+        ):
+            raise FixedLagPriorError("previous FEJ prior shape is invalid")
+        prior_targets = previous_prior.linearization_points.detach().cpu().numpy()
+        prior_delta = []
+        for camera_id, target in zip(
+            previous_prior.camera_ids, prior_targets, strict=True
+        ):
+            current = linearization.pose_ambient_values[
+                index_by_camera_id[camera_id]
+            ]
+            prior_delta.extend(
+                _eigen_quaternion_minus(current[:4], target[:4]).tolist()
+            )
+            prior_delta.extend((current[4:] - target[4:]).tolist())
+        prior_gradient_current = prior_gradient + prior_hessian @ _as_tensor(
+            prior_delta, dtype=dtype, device=device
+        )
+        for row, camera_id_row in enumerate(previous_prior.camera_ids):
+            source_row = slice(row * 6, (row + 1) * 6)
+            target_row_index = index_by_camera_id[camera_id_row]
+            target_row = slice(target_row_index * 6, (target_row_index + 1) * 6)
+            gradient[target_row] += prior_gradient_current[source_row]
+            for column, camera_id_column in enumerate(previous_prior.camera_ids):
+                source_column = slice(column * 6, (column + 1) * 6)
+                target_column_index = index_by_camera_id[camera_id_column]
+                target_column = slice(
+                    target_column_index * 6, (target_column_index + 1) * 6
+                )
+                hessian[target_row, target_column] += prior_hessian[
+                    source_row, source_column
+                ]
+        hessian = (hessian + hessian.T) * 0.5
+
     eliminate_index = camera_ids.index(eliminate_camera_id)
     eliminate_columns = torch.arange(
         eliminate_index * 6,
@@ -971,6 +1020,7 @@ def marginalize_ceres_linearization(
         "resolvedSchurWallSeconds": schur_wall,
         "pointSchurMicrobatchPoints": schur_microbatch_points,
         "pointSchurMicrobatchCount": schur_microbatch_count,
+        "previousPriorMerged": previous_prior is not None,
         "reasonCodes": reasons,
     }
     return FejPriorState(

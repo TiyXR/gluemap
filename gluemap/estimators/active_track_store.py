@@ -125,6 +125,7 @@ class ActiveTrackStore:
         self._parallax_backend = self._resolve_parallax_backend()
         self._component_rebuild_backend = self._resolve_component_rebuild_backend()
         self._spatial_intern_backend = self._resolve_spatial_intern_backend()
+        self._last_gate_tensor_report: dict[str, int] = {}
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
 
     @staticmethod
@@ -565,6 +566,7 @@ class ActiveTrackStore:
         windows: Iterable[tuple[Iterable[int], int]],
         *,
         terminal: bool = False,
+        constraint_exempt_frame_ids: Iterable[int] = (),
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         """Evaluate arbitrary fixed-lag frame sets in one GPU membership batch."""
         values: list[tuple[int, ...]] = []
@@ -587,6 +589,9 @@ class ActiveTrackStore:
             materialize_tracks=True,
             active_frame_sets=values,
             allow_terminal_freeze=terminal,
+            constraint_exempt_frame_ids={
+                int(value) for value in constraint_exempt_frame_ids
+            },
         )
 
     def _evaluate_batch_impl(
@@ -596,6 +601,7 @@ class ActiveTrackStore:
         materialize_tracks: bool,
         active_frame_sets: list[tuple[int, ...]] | None = None,
         allow_terminal_freeze: bool = False,
+        constraint_exempt_frame_ids: set[int] | None = None,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         values = list(intervals)
         for active_first, active_last, freeze_through in values:
@@ -609,6 +615,11 @@ class ActiveTrackStore:
         if not values:
             return [], []
         if not components:
+            self._last_gate_tensor_report = {
+                "activeTensorComponentCount": 0,
+                "activeTensorMaximumObservations": 0,
+                "activeTensorFrameUnionCount": 0,
+            }
             return (
                 [
                     self._build_report(
@@ -618,6 +629,7 @@ class ActiveTrackStore:
                         bucket_counts=Counter(),
                         rejected=Counter({"active-budget-or-cell-cap": 0}),
                         constraints_per_frame=Counter(),
+                        constraint_exempt_frame_ids=constraint_exempt_frame_ids,
                     )
                     for value in values
                 ],
@@ -634,6 +646,7 @@ class ActiveTrackStore:
             rejected_by_interval,
             ordinals,
             unique_active_observations,
+            component_values,
         ) = self._batch_component_metrics(components, values, frame_sets)
         selected_by_interval: list[list[dict[str, Any]]] = []
         bucket_counts_by_interval: list[Counter[tuple[int, int, int]]] = []
@@ -656,7 +669,6 @@ class ActiveTrackStore:
         )
         reports = []
         materialized_by_interval: list[list[SelectedTrackState]] = []
-        component_values = list(components.items())
         for index, interval in enumerate(values):
             selected = selected_by_interval[index]
             materialized = []
@@ -691,6 +703,7 @@ class ActiveTrackStore:
                     constraints_per_frame=constraints_by_interval[index],
                     frame_ids=frame_sets[index],
                     terminal_freeze=allow_terminal_freeze,
+                    constraint_exempt_frame_ids=constraint_exempt_frame_ids,
                 )
             )
         return reports, materialized_by_interval
@@ -725,11 +738,40 @@ class ActiveTrackStore:
         list[Counter[str]],
         Any,
         Any,
+        list[tuple[str, list[TrackObservation]]],
     ]:
         """Compute every read-only component/window metric as one tensor batch."""
         import torch
 
-        component_values = list(components.items())
+        active_frame_union = set().union(*(set(value) for value in frame_sets))
+        component_values: list[tuple[str, list[TrackObservation]]] = []
+        for component_uid, observations in components.items():
+            observation_by_frame: dict[int, TrackObservation] = {}
+            for observation in observations:
+                if observation.geometry_ordinal in active_frame_union:
+                    observation_by_frame.setdefault(
+                        observation.geometry_ordinal, observation
+                    )
+            if observation_by_frame:
+                component_values.append(
+                    (component_uid, list(observation_by_frame.values()))
+                )
+        if not component_values:
+            device = self._parallax_backend
+            self._last_gate_tensor_report = {
+                "activeTensorComponentCount": 0,
+                "activeTensorMaximumObservations": 0,
+                "activeTensorFrameUnionCount": len(active_frame_union),
+            }
+            return (
+                [[] for _ in intervals],
+                [Counter() for _ in intervals],
+                torch.empty((0, 1), dtype=torch.int64, device=device),
+                torch.empty(
+                    (0, len(intervals), 1), dtype=torch.bool, device=device
+                ),
+                [],
+            )
         component_uids = [value[0] for value in component_values]
         maximum_observations = max(
             len(observations) for _, observations in component_values
@@ -760,6 +802,11 @@ class ActiveTrackStore:
             )
 
         device = self._parallax_backend
+        self._last_gate_tensor_report = {
+            "activeTensorComponentCount": len(component_values),
+            "activeTensorMaximumObservations": maximum_observations,
+            "activeTensorFrameUnionCount": len(active_frame_union),
+        }
         coordinates = torch.tensor(
             padded_coordinates, dtype=torch.float32, device=device
         )
@@ -946,6 +993,7 @@ class ActiveTrackStore:
             rejected_by_interval,
             ordinals,
             unique_active_observations,
+            component_values,
         )
 
     def _select_candidates(
@@ -1053,6 +1101,7 @@ class ActiveTrackStore:
         constraints_per_frame: Counter[int],
         frame_ids: tuple[int, ...] | None = None,
         terminal_freeze: bool = False,
+        constraint_exempt_frame_ids: set[int] | None = None,
     ) -> dict[str, Any]:
         active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
         active_frame_ids = frame_ids or tuple(
@@ -1062,15 +1111,20 @@ class ActiveTrackStore:
             str(ordinal): constraints_per_frame[ordinal]
             for ordinal in active_frame_ids
         }
+        exempt_frame_ids = sorted(
+            set(constraint_exempt_frame_ids or set()) & set(active_frame_ids)
+        )
         zero_constraint_ordinals = [
             ordinal
             for ordinal in active_frame_ids
-            if constraints_per_frame[ordinal] == 0
+            if ordinal not in exempt_frame_ids
+            and constraints_per_frame[ordinal] == 0
         ]
         under_constraint_ordinals = [
             ordinal
             for ordinal in active_frame_ids
-            if constraints_per_frame[ordinal]
+            if ordinal not in exempt_frame_ids
+            and constraints_per_frame[ordinal]
             < self.budget.minimum_constraints_per_keyframe
         ]
         bridge_tracks = [value for value in selected if value["bridge"]]
@@ -1105,6 +1159,7 @@ class ActiveTrackStore:
             "gateMetricsBackend": self.parallax_backend,
             "componentRebuildBackend": self._component_rebuild_backend,
             "spatialInternBackend": self._spatial_intern_backend,
+            **self._last_gate_tensor_report,
             "parallaxMicrobatchComponents": (
                 self.budget.parallax_microbatch_components
             ),
@@ -1113,6 +1168,7 @@ class ActiveTrackStore:
             "selectedTrackUidsSha256": _canonical_sha256(selected_track_uids),
             "bridgeTrackUidsSha256": _canonical_sha256(bridge_track_uids),
             "constraintsPerFrame": frame_constraints,
+            "constraintExemptFrameIds": exempt_frame_ids,
             "zeroConstraintOrdinals": zero_constraint_ordinals,
             "underConstraintOrdinals": under_constraint_ordinals,
             "timeGridBucketCounts": {
