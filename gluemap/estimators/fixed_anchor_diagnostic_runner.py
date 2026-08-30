@@ -82,6 +82,7 @@ class FixedAnchorDiagnosticRunner:
         triangulation_device_policy: str = "cuda-required",
         triangulation_microbatch_tracks: int = 4096,
         triangulation_solver_policy: str = "homogeneous-svd",
+        triangulation_solver_fallback_relative_eigenvalue: float = 1e-6,
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
         ba_max_iterations: int = 20,
@@ -98,6 +99,9 @@ class FixedAnchorDiagnosticRunner:
         self.triangulation_device_policy = triangulation_device_policy
         self.triangulation_microbatch_tracks = triangulation_microbatch_tracks
         self.triangulation_solver_policy = triangulation_solver_policy
+        self.triangulation_solver_fallback_relative_eigenvalue = (
+            triangulation_solver_fallback_relative_eigenvalue
+        )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_max_iterations = ba_max_iterations
@@ -165,6 +169,9 @@ class FixedAnchorDiagnosticRunner:
             device_policy=self.triangulation_device_policy,
             microbatch_tracks=self.triangulation_microbatch_tracks,
             solver_policy=self.triangulation_solver_policy,
+            solver_fallback_relative_eigenvalue=(
+                self.triangulation_solver_fallback_relative_eigenvalue
+            ),
         )
         triangulation_wall = time.perf_counter() - triangulation_started
 

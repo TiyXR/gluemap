@@ -117,6 +117,7 @@ class SchurFejFixedLagRunner:
         triangulation_microbatch_tracks: int = 4096,
         triangulation_initialization_policy: str = "full-dlt",
         triangulation_solver_policy: str = "homogeneous-svd",
+        triangulation_solver_fallback_relative_eigenvalue: float = 1e-6,
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
         ba_linear_solver_ordering_policy: str = "auto",
@@ -161,9 +162,14 @@ class SchurFejFixedLagRunner:
             "homogeneous-gram-eigh",
             "homogeneous-qr-svd",
             "inhomogeneous-lstsq",
+            "homogeneous-gram-eigh-fallback-svd",
         }:
             raise SchurFejFixedLagRunnerError(
                 "triangulation solver policy is invalid"
+            )
+        if not 0.0 < triangulation_solver_fallback_relative_eigenvalue <= 1.0:
+            raise SchurFejFixedLagRunnerError(
+                "triangulation solver fallback threshold is invalid"
             )
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
@@ -173,6 +179,9 @@ class SchurFejFixedLagRunner:
             triangulation_initialization_policy
         )
         self.triangulation_solver_policy = triangulation_solver_policy
+        self.triangulation_solver_fallback_relative_eigenvalue = (
+            triangulation_solver_fallback_relative_eigenvalue
+        )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_linear_solver_ordering_policy = (
@@ -379,6 +388,9 @@ class SchurFejFixedLagRunner:
                 device_policy=self.triangulation_device_policy,
                 microbatch_tracks=self.triangulation_microbatch_tracks,
                 solver_policy=self.triangulation_solver_policy,
+                solver_fallback_relative_eigenvalue=(
+                    self.triangulation_solver_fallback_relative_eigenvalue
+                ),
             )
             dlt_by_uid = {value.track_uid: value for value in dlt_results}
         triangulated_by_uid = {**cached_by_uid, **dlt_by_uid}
@@ -408,6 +420,14 @@ class SchurFejFixedLagRunner:
                 "microbatchTracks": self.triangulation_microbatch_tracks,
                 "microbatchCount": 0,
                 "solverPolicy": self.triangulation_solver_policy,
+                "solverFallbackRelativeEigenvalue": (
+                    self.triangulation_solver_fallback_relative_eigenvalue
+                ),
+                "solverFastTrackCount": 0,
+                "solverFallbackTrackCount": 0,
+                "relativeEigenvalueP50": None,
+                "relativeEigenvalueP95": None,
+                "relativeEigenvalueMaximum": None,
                 "tensorLayout": "not-run-cache-hit",
                 "reprojectionErrorP50Pixels": None,
                 "reprojectionErrorP95Pixels": None,
@@ -726,6 +746,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "triangulationSolverFallbackRelativeEigenvalue": (
+                self.triangulation_solver_fallback_relative_eigenvalue
+            ),
             "previousPriorCameraCount": len(previous_prior.camera_ids),
             "nextPriorCameraCount": (
                 0 if next_prior is None else len(next_prior.camera_ids)
@@ -784,6 +807,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "triangulationSolverFallbackRelativeEigenvalue": (
+                self.triangulation_solver_fallback_relative_eigenvalue
+            ),
             "activeBodyFrameIds": [],
             "rotations": {
                 str(key): value.tolist()
@@ -839,6 +865,9 @@ class SchurFejFixedLagRunner:
                 self.triangulation_initialization_policy
             ),
             "triangulationSolverPolicy": self.triangulation_solver_policy,
+            "triangulationSolverFallbackRelativeEigenvalue": (
+                self.triangulation_solver_fallback_relative_eigenvalue
+            ),
             "trackPointCache": [
                 [
                     track_uid,
@@ -894,6 +923,9 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_solver_policy = checkpoint.get(
             "triangulationSolverPolicy", "homogeneous-svd"
         )
+        checkpoint_triangulation_fallback_threshold = checkpoint.get(
+            "triangulationSolverFallbackRelativeEigenvalue", 1e-6
+        )
         cache_rows = checkpoint.get("trackPointCache", [])
         if (
             len(frame_ids) < 3
@@ -911,6 +943,8 @@ class SchurFejFixedLagRunner:
             != self.triangulation_initialization_policy
             or checkpoint_triangulation_solver_policy
             != self.triangulation_solver_policy
+            or checkpoint_triangulation_fallback_threshold
+            != self.triangulation_solver_fallback_relative_eigenvalue
             or not isinstance(cache_rows, list)
         ):
             raise SchurFejFixedLagRunnerError(
@@ -1032,6 +1066,9 @@ class SchurFejFixedLagRunner:
         checkpoint_triangulation_solver_policy = checkpoint.get(
             "triangulationSolverPolicy", "homogeneous-svd"
         )
+        checkpoint_triangulation_fallback_threshold = checkpoint.get(
+            "triangulationSolverFallbackRelativeEigenvalue", 1e-6
+        )
         if (
             checkpoint.get("status") != "passed"
             or checkpoint.get("publishable") is not False
@@ -1044,6 +1081,8 @@ class SchurFejFixedLagRunner:
             != self.triangulation_initialization_policy
             or checkpoint_triangulation_solver_policy
             != self.triangulation_solver_policy
+            or checkpoint_triangulation_fallback_threshold
+            != self.triangulation_solver_fallback_relative_eigenvalue
             or set(rotations) != fixed_gauge
             or set(centers) != fixed_gauge
             or any(value.shape != (3, 3) for value in rotations.values())

@@ -42,6 +42,7 @@ def triangulate_selected_tracks(
     device_policy: str = "cuda-preferred",
     microbatch_tracks: int = 4096,
     solver_policy: str = "homogeneous-svd",
+    solver_fallback_relative_eigenvalue: float = 1e-6,
 ) -> tuple[list[TriangulatedTrackState], dict[str, Any]]:
     """Triangulate selected tracks without a COLMAP database or image IO."""
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
@@ -53,8 +54,13 @@ def triangulate_selected_tracks(
         "homogeneous-gram-eigh",
         "homogeneous-qr-svd",
         "inhomogeneous-lstsq",
+        "homogeneous-gram-eigh-fallback-svd",
     }:
         raise FixedLagTriangulationError("triangulation solver policy is invalid")
+    if not 0.0 < solver_fallback_relative_eigenvalue <= 1.0:
+        raise FixedLagTriangulationError(
+            "triangulation solver fallback threshold is invalid"
+        )
     if device_policy == "cuda-required" and not torch.cuda.is_available():
         raise FixedLagTriangulationError("CUDA triangulation is unavailable")
     device = (
@@ -107,6 +113,9 @@ def triangulate_selected_tracks(
     all_reprojection_errors: list[torch.Tensor] = []
     invalid_count = 0
     microbatch_count = 0
+    solver_fast_track_count = 0
+    solver_fallback_track_count = 0
+    relative_eigenvalues: list[torch.Tensor] = []
     for start in range(0, len(usable), microbatch_tracks):
         batch = usable[start : start + microbatch_tracks]
         microbatch_count += 1
@@ -149,10 +158,33 @@ def triangulate_selected_tracks(
         if solver_policy == "homogeneous-svd":
             _, _, right = torch.linalg.svd(design, full_matrices=False)
             homogeneous = right[:, -1, :]
-        elif solver_policy == "homogeneous-gram-eigh":
+        elif solver_policy in {
+            "homogeneous-gram-eigh",
+            "homogeneous-gram-eigh-fallback-svd",
+        }:
             gram = design.transpose(1, 2) @ design
-            _, eigenvectors = torch.linalg.eigh(gram)
+            eigenvalues, eigenvectors = torch.linalg.eigh(gram)
             homogeneous = eigenvectors[:, :, 0]
+            relative_eigenvalue = eigenvalues[:, 0].abs() / torch.clamp(
+                eigenvalues[:, 1].abs(), min=torch.finfo(torch.float64).tiny
+            )
+            relative_eigenvalues.append(relative_eigenvalue)
+            if solver_policy == "homogeneous-gram-eigh-fallback-svd":
+                fallback = (
+                    ~torch.isfinite(relative_eigenvalue)
+                    | (
+                        relative_eigenvalue
+                        > solver_fallback_relative_eigenvalue
+                    )
+                )
+                fallback_count = int(fallback.sum().item())
+                solver_fallback_track_count += fallback_count
+                solver_fast_track_count += len(batch) - fallback_count
+                if fallback_count:
+                    _, _, fallback_right = torch.linalg.svd(
+                        design[fallback], full_matrices=False
+                    )
+                    homogeneous[fallback] = fallback_right[:, -1, :]
         elif solver_policy == "homogeneous-qr-svd":
             reduced = torch.linalg.qr(design, mode="reduced").R
             _, _, right = torch.linalg.svd(reduced, full_matrices=False)
@@ -234,6 +266,12 @@ def triangulate_selected_tracks(
         errors,
         torch.tensor((0.5, 0.95), dtype=torch.float64, device=device),
     ).cpu()
+    relative_eigenvalue_quantiles = None
+    if relative_eigenvalues:
+        relative_eigenvalue_quantiles = torch.quantile(
+            torch.cat(relative_eigenvalues),
+            torch.tensor((0.5, 0.95, 1.0), dtype=torch.float64, device=device),
+        ).cpu()
     report = {
         "contractId": "jarailsense.gluemap-fixed-lag-triangulation/v1",
         "status": "passed",
@@ -248,6 +286,26 @@ def triangulate_selected_tracks(
         "microbatchTracks": microbatch_tracks,
         "microbatchCount": microbatch_count,
         "solverPolicy": solver_policy,
+        "solverFallbackRelativeEigenvalue": (
+            solver_fallback_relative_eigenvalue
+        ),
+        "solverFastTrackCount": solver_fast_track_count,
+        "solverFallbackTrackCount": solver_fallback_track_count,
+        "relativeEigenvalueP50": (
+            None
+            if relative_eigenvalue_quantiles is None
+            else float(relative_eigenvalue_quantiles[0])
+        ),
+        "relativeEigenvalueP95": (
+            None
+            if relative_eigenvalue_quantiles is None
+            else float(relative_eigenvalue_quantiles[1])
+        ),
+        "relativeEigenvalueMaximum": (
+            None
+            if relative_eigenvalue_quantiles is None
+            else float(relative_eigenvalue_quantiles[2])
+        ),
         "tensorLayout": "padded-contiguous-batch",
         "reprojectionErrorP50Pixels": float(quantiles[0]),
         "reprojectionErrorP95Pixels": float(quantiles[1]),

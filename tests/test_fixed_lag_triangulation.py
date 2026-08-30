@@ -135,11 +135,29 @@ def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
         microbatch_tracks=7,
         solver_policy="inhomogeneous-lstsq",
     )
+    hybrid, hybrid_report = triangulate_selected_tracks(
+        tracks,
+        rotations,
+        centers,
+        intrinsics,
+        device_policy="cpu",
+        microbatch_tracks=7,
+        solver_policy="homogeneous-gram-eigh-fallback-svd",
+        solver_fallback_relative_eigenvalue=1e-30,
+    )
 
     assert svd_report["solverPolicy"] == "homogeneous-svd"
     assert gram_report["solverPolicy"] == "homogeneous-gram-eigh"
     assert qr_report["solverPolicy"] == "homogeneous-qr-svd"
     assert least_squares_report["solverPolicy"] == "inhomogeneous-lstsq"
+    assert hybrid_report["solverPolicy"] == (
+        "homogeneous-gram-eigh-fallback-svd"
+    )
+    assert (
+        hybrid_report["solverFastTrackCount"]
+        + hybrid_report["solverFallbackTrackCount"]
+        == len(tracks)
+    )
     assert [value.track_uid for value in gram] == [value.track_uid for value in svd]
     assert np.allclose(
         np.asarray([value.xyz for value in gram]),
@@ -155,6 +173,12 @@ def test_reduced_gpu_solver_candidates_match_homogeneous_svd() -> None:
     )
     assert np.allclose(
         np.asarray([value.xyz for value in least_squares]),
+        np.asarray([value.xyz for value in svd]),
+        rtol=1e-10,
+        atol=1e-10,
+    )
+    assert np.allclose(
+        np.asarray([value.xyz for value in hybrid]),
         np.asarray([value.xyz for value in svd]),
         rtol=1e-10,
         atol=1e-10,
