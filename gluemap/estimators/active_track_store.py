@@ -803,6 +803,7 @@ class ActiveTrackStore:
     ) -> None:
         if self._pending_release is not None:
             raise ActiveTrackStoreError("cannot ingest while release is pending")
+        candidate_edges: set[tuple[str, str]] = set()
         for first, second in values:
             if (
                 first == second
@@ -811,13 +812,27 @@ class ActiveTrackStore:
             ):
                 raise ActiveTrackStoreError("track correspondence is invalid")
             key = (first, second) if first < second else (second, first)
-            if key in self._edges:
-                continue
-            first_root = self._union_find.find(first)
-            second_root = self._union_find.find(second)
+            candidate_edges.add(key)
+        new_edges = sorted(candidate_edges.difference(self._edges))
+        parent = self._union_find.parent
+        component_uid_by_root = self._component_uid_by_root
+
+        def find(value: str) -> str:
+            root = value
+            while parent[root] != root:
+                root = parent[root]
+            while parent[value] != root:
+                next_value = parent[value]
+                parent[value] = root
+                value = next_value
+            return root
+
+        for first, second in new_edges:
+            first_root = find(first)
+            second_root = find(second)
             component_uid = min(
-                self._component_uid_by_root[first_root],
-                self._component_uid_by_root[second_root],
+                component_uid_by_root[first_root],
+                component_uid_by_root[second_root],
             )
             if first_root == second_root:
                 new_root = first_root
@@ -826,12 +841,12 @@ class ActiveTrackStore:
                 # first root directly to the second.  Both inputs are already
                 # compressed roots here, so calling union and then find again
                 # only repeats three hash-table walks per edge.
-                self._union_find.parent[first_root] = second_root
+                parent[first_root] = second_root
                 new_root = second_root
-            self._component_uid_by_root.pop(first_root, None)
-            self._component_uid_by_root.pop(second_root, None)
-            self._component_uid_by_root[new_root] = component_uid
-            self._edges.add(key)
+            component_uid_by_root.pop(first_root, None)
+            component_uid_by_root.pop(second_root, None)
+            component_uid_by_root[new_root] = component_uid
+        self._edges.update(new_edges)
 
     def _components(self) -> dict[str, list[TrackObservation]]:
         values: dict[str, list[TrackObservation]] = defaultdict(list)
