@@ -147,6 +147,78 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
     )
 
 
+def test_three_pose_batches_use_one_ba_and_resume_exactly():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(12)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4, 5, 6, 7, 8), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 4, 5, 6, 7, 8, 9, 10, 11), centers, intrinsics
+    )
+
+    def create_runner():
+        return SchurFejFixedLagRunner(
+            fixed_gauge_frame_ids={0},
+            camera_model="PINHOLE",
+            triangulation_device_policy="cuda-required",
+            ba_device_policy="cpu",
+            ceres_cuda_available=False,
+            prior_device_policy="cuda-required",
+            prior_expected_nullity=1,
+        )
+
+    runner = create_runner()
+    first = runner.advance_batch(
+        first_coarse,
+        first_tracks,
+        marginalize_frame_ids=(1, 2, 3),
+    )
+    checkpoint = runner.snapshot()
+    second = runner.advance_batch(
+        second_coarse,
+        second_tracks,
+        marginalize_frame_ids=(4, 5, 6),
+    )
+    resumed = create_runner()
+    resumed.restore(checkpoint)
+    resumed_second = resumed.advance_batch(
+        second_coarse,
+        second_tracks,
+        marginalize_frame_ids=(4, 5, 6),
+    )
+
+    assert first.finalized_frame_ids == (1, 2, 3)
+    assert set(first.finalized_rotations) == {1, 2, 3}
+    assert set(first.finalized_centers) == {1, 2, 3}
+    assert first.prior.camera_ids == (4, 5, 6, 7, 8)
+    assert first.report["advanceStepKeyframes"] == 3
+    assert first.report["marginalizedFrameIds"] == [1, 2, 3]
+    assert first.report["prior"]["terminalSolveMode"] == (
+        "prior-only-batch-schur"
+    )
+    assert runner.next_window_ordinal == 6
+    assert second.window_ordinal == 3
+    assert second.prior.camera_ids == (7, 8, 9, 10, 11)
+    assert resumed_second.prior.camera_ids == second.prior.camera_ids
+    np.testing.assert_allclose(
+        resumed_second.prior.hessian.cpu(),
+        second.prior.hessian.cpu(),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        resumed_second.prior.gradient.cpu(),
+        second.prior.gradient.cpu(),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+
 def test_two_advances_reuse_persistent_ceres_problem() -> None:
     centers = {
         frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)

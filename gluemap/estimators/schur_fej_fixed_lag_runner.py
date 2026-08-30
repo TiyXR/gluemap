@@ -23,6 +23,7 @@ from gluemap.estimators.fixed_anchor_local_ba import (
 from gluemap.estimators.fixed_lag_prior import (
     FejPriorState,
     marginalize_pose_prior,
+    marginalize_pose_prior_batch,
 )
 from gluemap.estimators.persistent_fixed_lag_ba import (
     PersistentFixedLagBaSession,
@@ -46,6 +47,19 @@ class SchurFejFixedLagStep:
     finalized_center: np.ndarray
     triangulated_tracks: tuple[TriangulatedTrackState, ...]
     refined: FixedAnchorLocalBaSolution | None
+    prior: FejPriorState
+    report: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SchurFejFixedLagBatch:
+    window_ordinal: int
+    frame_ids: tuple[int, ...]
+    finalized_frame_ids: tuple[int, ...]
+    finalized_rotations: dict[int, np.ndarray]
+    finalized_centers: dict[int, np.ndarray]
+    triangulated_tracks: tuple[TriangulatedTrackState, ...]
+    refined: FixedAnchorLocalBaSolution
     prior: FejPriorState
     report: dict[str, Any]
 
@@ -191,18 +205,54 @@ class SchurFejFixedLagRunner:
         *,
         marginalize_frame_id: int,
     ) -> SchurFejFixedLagStep:
+        """Advance one pose while preserving the original public contract."""
+        batch = self.advance_batch(
+            coarse,
+            selected_tracks,
+            marginalize_frame_ids=(marginalize_frame_id,),
+        )
+        return SchurFejFixedLagStep(
+            window_ordinal=batch.window_ordinal,
+            frame_ids=batch.frame_ids,
+            finalized_frame_id=marginalize_frame_id,
+            finalized_rotation=batch.finalized_rotations[
+                marginalize_frame_id
+            ].copy(),
+            finalized_center=batch.finalized_centers[
+                marginalize_frame_id
+            ].copy(),
+            triangulated_tracks=batch.triangulated_tracks,
+            refined=batch.refined,
+            prior=batch.prior,
+            report=batch.report,
+        )
+
+    def advance_batch(
+        self,
+        coarse: FixedAnchorWindowSolution,
+        selected_tracks: list[SelectedTrackState],
+        *,
+        marginalize_frame_ids: tuple[int, ...] | list[int],
+    ) -> SchurFejFixedLagBatch:
+        """Run one BA and finalize a bounded oldest-pose batch."""
         started = time.perf_counter()
         frame_ids = tuple(coarse.frame_ids)
         frame_id_set = set(frame_ids)
+        marginalize_ids = tuple(int(value) for value in marginalize_frame_ids)
         if (
             len(frame_ids) < 3
             or tuple(sorted(frame_id_set)) != frame_ids
             or self.fixed_gauge_frame_ids - frame_id_set
         ):
             raise SchurFejFixedLagRunnerError("fixed-lag frame identity is invalid")
+        body_frame_ids = tuple(
+            value for value in frame_ids if value not in self.fixed_gauge_frame_ids
+        )
         if (
-            marginalize_frame_id not in frame_id_set
-            or marginalize_frame_id in self.fixed_gauge_frame_ids
+            not marginalize_ids
+            or len(set(marginalize_ids)) != len(marginalize_ids)
+            or marginalize_ids != body_frame_ids[: len(marginalize_ids)]
+            or len(marginalize_ids) >= len(body_frame_ids)
         ):
             raise SchurFejFixedLagRunnerError(
                 "fixed-lag marginal pose identity is invalid"
@@ -278,7 +328,7 @@ class SchurFejFixedLagRunner:
             device_policy=self.ba_device_policy,
             ceres_cuda_available=self.ceres_cuda_available,
             previous_prior=self._prior,
-            marginalize_pose_id=marginalize_frame_id,
+            marginalize_pose_id=marginalize_ids[0],
             marginalization_residual_policy=(
                 self.marginalization_residual_policy
             ),
@@ -290,13 +340,28 @@ class SchurFejFixedLagRunner:
             prior_expected_nullity=self.prior_expected_nullity,
             persistent_ba_session=self._persistent_ba_session,
         )
-        solve_wall = time.perf_counter() - solve_started
         if refined.report["status"] != "passed" or refined.next_prior is None:
             raise SchurFejFixedLagRunnerError("fixed-lag BA/prior did not pass")
-        if refined.next_prior.report["status"] != "passed":
+        next_prior = refined.next_prior
+        batch_prior_wall = 0.0
+        if len(marginalize_ids) > 1:
+            batch_prior_started = time.perf_counter()
+            next_prior = marginalize_pose_prior_batch(
+                next_prior,
+                eliminate_camera_ids=marginalize_ids[1:],
+                device_policy=self.prior_device_policy,
+                relative_rank_threshold=self.prior_relative_rank_threshold,
+                maximum_condition_estimate=(
+                    self.prior_maximum_condition_estimate
+                ),
+                expected_nullity=self.prior_expected_nullity,
+            )
+            batch_prior_wall = time.perf_counter() - batch_prior_started
+        solve_wall = time.perf_counter() - solve_started
+        if next_prior.report["status"] != "passed":
             raise SchurFejFixedLagRunnerError(
                 "fixed-lag prior gate did not pass: "
-                f"{refined.next_prior.report}"
+                f"{next_prior.report}"
             )
 
         overlap_rotation_delta = 0.0
@@ -333,41 +398,50 @@ class SchurFejFixedLagRunner:
             "publishable": False,
             "marginalizationMode": "schur-fej",
             "windowOrdinal": self._next_window_ordinal,
+            "advanceStepKeyframes": len(marginalize_ids),
             "frameCount": len(frame_ids),
             "fixedGaugeFrameIds": sorted(self.fixed_gauge_frame_ids),
             "previousPriorCameraCount": (
                 0 if self._prior is None else len(self._prior.camera_ids)
             ),
-            "nextPriorCameraCount": len(refined.next_prior.camera_ids),
-            "marginalizedFrameId": marginalize_frame_id,
+            "nextPriorCameraCount": len(next_prior.camera_ids),
+            "marginalizedFrameId": marginalize_ids[0],
+            "marginalizedFrameIds": list(marginalize_ids),
             "overlapFrameCount": len(overlap_ids),
             "maximumOverlapRotationMatrixDelta": overlap_rotation_delta,
             "maximumOverlapCenterDelta": overlap_center_delta,
             "triangulationWallSeconds": triangulation_wall,
             "solveAndPriorWallSeconds": solve_wall,
+            "batchPriorWallSeconds": batch_prior_wall,
             "totalWallSeconds": time.perf_counter() - started,
             "triangulation": triangulation_report,
             "localBa": refined.report,
-            "prior": refined.next_prior.report,
+            "prior": next_prior.report,
         }
-        self._prior = refined.next_prior
+        self._prior = next_prior
         self._poses = _PoseState(
             rotations=refined.rotations,
             centers=refined.centers,
         )
-        step = SchurFejFixedLagStep(
+        batch = SchurFejFixedLagBatch(
             window_ordinal=self._next_window_ordinal,
             frame_ids=frame_ids,
-            finalized_frame_id=marginalize_frame_id,
-            finalized_rotation=refined.rotations[marginalize_frame_id].copy(),
-            finalized_center=refined.centers[marginalize_frame_id].copy(),
+            finalized_frame_ids=marginalize_ids,
+            finalized_rotations={
+                value: refined.rotations[value].copy()
+                for value in marginalize_ids
+            },
+            finalized_centers={
+                value: refined.centers[value].copy()
+                for value in marginalize_ids
+            },
             triangulated_tracks=tuple(triangulated),
             refined=refined,
-            prior=refined.next_prior,
+            prior=next_prior,
             report=report,
         )
-        self._next_window_ordinal += 1
-        return step
+        self._next_window_ordinal += len(marginalize_ids)
+        return batch
 
     def drain_prior_only(
         self,
