@@ -1,4 +1,5 @@
 import hashlib
+import json
 
 import pytest
 
@@ -95,6 +96,24 @@ def test_release_group_batch_matches_individual_gate_results():
         for active_first, active_last, freeze_through in intervals
     ]
     assert store.evaluate_batch(intervals) == expected
+
+
+def test_gate_report_is_canonical_across_decimal_key_width_boundary():
+    store = ActiveTrackStore(budget(window_size_keyframes=4))
+    add_track(store, 0, [8, 9, 10, 11])
+    report = store.evaluate(
+        active_first_ordinal=8,
+        active_last_ordinal=11,
+        freeze_through_ordinal=9,
+    )
+    encoded = json.dumps(
+        report, sort_keys=True, separators=(",", ":")
+    )
+    round_trip = json.dumps(
+        json.loads(encoded), sort_keys=True, separators=(",", ":")
+    )
+    assert list(report["constraintsPerFrame"]) == ["8", "9", "10", "11"]
+    assert encoded == round_trip
 
 
 def test_zero_constraint_and_bridge_failure_stop_instead_of_filling_pose():

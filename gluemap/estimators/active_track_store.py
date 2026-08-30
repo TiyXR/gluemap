@@ -478,16 +478,19 @@ class ActiveTrackStore:
         for track in selected:
             constraints_per_frame.update(track["geometryOrdinals"])
         frame_constraints = {
-            ordinal: constraints_per_frame[ordinal]
+            str(ordinal): constraints_per_frame[ordinal]
             for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
         }
         zero_constraint_ordinals = [
-            ordinal for ordinal, count in frame_constraints.items() if count == 0
+            ordinal
+            for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
+            if constraints_per_frame[ordinal] == 0
         ]
         under_constraint_ordinals = [
             ordinal
-            for ordinal, count in frame_constraints.items()
-            if count < self.budget.minimum_constraints_per_keyframe
+            for ordinal in range(active_first_ordinal, active_last_ordinal + 1)
+            if constraints_per_frame[ordinal]
+            < self.budget.minimum_constraints_per_keyframe
         ]
         bridge_tracks = [value for value in selected if value["bridge"]]
         selected_track_uids = [value["trackUid"] for value in selected]
