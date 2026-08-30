@@ -146,6 +146,12 @@ class BatchInferenceStar:
 
         result_dict = {
             "indexes": batch["indexes"][0].tolist(),
+            "working_image_shape": [
+                int(batch["images"].shape[-2]),
+                int(batch["images"].shape[-1]),
+            ],
+            "images_shape_ori": batch["images_shape_ori"][0].tolist(),
+            "images_change": batch["images_change"][0].tolist(),
             "extrinsics": extrinsics,
             "intrinsics": intrinsics,
             "pose_scores": scores,

@@ -8,6 +8,7 @@ from torch.nn.attention import SDPBackend
 from torch.utils.data import IterableDataset
 
 from gluemap.controllers.star_inference import (
+    BatchInferenceStar,
     pi3_sdpa_compatibility,
     resolve_pi3_sdpa_backend,
 )
@@ -73,6 +74,45 @@ def test_recursive_output_detach_keeps_structure():
     moved = move_output_to_cpu(value)
     assert moved["a"][0].device.type == "cpu"
     assert moved["a"][1][0].tolist() == [2]
+
+
+def test_star_output_binds_working_and_original_image_shapes():
+    pipeline = BatchInferenceStar.__new__(BatchInferenceStar)
+    predictions = {
+        "track": torch.zeros((1, 2, 3, 2)),
+        "vis": torch.ones((1, 2, 3)),
+        "conf": torch.ones((1, 2, 3)),
+    }
+    pipeline._predict_images = lambda *_args, **_kwargs: (
+        predictions,
+        0.1,
+        0.2,
+    )
+
+    class Covisibility:
+        def main(self, *_args):
+            return (
+                torch.zeros((1, 2, 4, 4)),
+                torch.zeros((1, 2, 3, 3)),
+                torch.ones((1, 2)),
+                torch.zeros((1, 2, 1, 2)),
+                torch.zeros((1, 1, 3)),
+                torch.ones((1, 2, 1)),
+            )
+
+    pipeline.covisibility_extraction = Covisibility()
+    batch = {
+        "indexes": torch.tensor([[4, 5]]),
+        "images": torch.zeros((1, 2, 3, 294, 518)),
+        "images_shape_ori": torch.tensor([[[1080, 1920], [1080, 1920]]]),
+        "images_change": torch.tensor(
+            [[[0.27, 0.27, 0.0, 0.0], [0.27, 0.27, 0.0, 0.0]]]
+        ),
+    }
+    result = BatchInferenceStar.main(pipeline, batch)
+    assert result["working_image_shape"] == [294, 518]
+    assert result["images_shape_ori"] == [[1080, 1920], [1080, 1920]]
+    assert len(result["images_change"]) == 2
 
 
 def test_pre_ampere_pi3_attention_replaces_flash_with_math(monkeypatch):
