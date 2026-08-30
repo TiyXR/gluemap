@@ -55,6 +55,7 @@ def triangulate_selected_tracks(
         "homogeneous-qr-svd",
         "inhomogeneous-lstsq",
         "homogeneous-gram-eigh-fallback-svd",
+        "homogeneous-svd-cpu-lapack",
     }:
         raise FixedLagTriangulationError("triangulation solver policy is invalid")
     if not 0.0 < solver_fallback_relative_eigenvalue <= 1.0:
@@ -158,6 +159,13 @@ def triangulate_selected_tracks(
         if solver_policy == "homogeneous-svd":
             _, _, right = torch.linalg.svd(design, full_matrices=False)
             homogeneous = right[:, -1, :]
+        elif solver_policy == "homogeneous-svd-cpu-lapack":
+            _, _, right_cpu = np.linalg.svd(
+                design.detach().cpu().numpy(), full_matrices=False
+            )
+            homogeneous = torch.as_tensor(
+                right_cpu[:, -1, :], dtype=torch.float64, device=device
+            )
         elif solver_policy in {
             "homogeneous-gram-eigh",
             "homogeneous-gram-eigh-fallback-svd",
@@ -286,6 +294,11 @@ def triangulate_selected_tracks(
         "microbatchTracks": microbatch_tracks,
         "microbatchCount": microbatch_count,
         "solverPolicy": solver_policy,
+        "solverComputeBackend": (
+            "cpu-lapack"
+            if solver_policy == "homogeneous-svd-cpu-lapack"
+            else device
+        ),
         "solverFallbackRelativeEigenvalue": (
             solver_fallback_relative_eigenvalue
         ),

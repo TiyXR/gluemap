@@ -163,6 +163,7 @@ class SchurFejFixedLagRunner:
             "homogeneous-qr-svd",
             "inhomogeneous-lstsq",
             "homogeneous-gram-eigh-fallback-svd",
+            "homogeneous-svd-cpu-lapack",
         }:
             raise SchurFejFixedLagRunnerError(
                 "triangulation solver policy is invalid"
@@ -420,6 +421,7 @@ class SchurFejFixedLagRunner:
                 "microbatchTracks": self.triangulation_microbatch_tracks,
                 "microbatchCount": 0,
                 "solverPolicy": self.triangulation_solver_policy,
+                "solverComputeBackend": "not-run-cache-hit",
                 "solverFallbackRelativeEigenvalue": (
                     self.triangulation_solver_fallback_relative_eigenvalue
                 ),
