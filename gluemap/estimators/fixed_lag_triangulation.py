@@ -52,6 +52,7 @@ def triangulate_selected_tracks(
         "homogeneous-svd",
         "homogeneous-gram-eigh",
         "homogeneous-qr-svd",
+        "inhomogeneous-lstsq",
     }:
         raise FixedLagTriangulationError("triangulation solver policy is invalid")
     if device_policy == "cuda-required" and not torch.cuda.is_available():
@@ -152,18 +153,26 @@ def triangulate_selected_tracks(
             gram = design.transpose(1, 2) @ design
             _, eigenvectors = torch.linalg.eigh(gram)
             homogeneous = eigenvectors[:, :, 0]
-        else:
+        elif solver_policy == "homogeneous-qr-svd":
             reduced = torch.linalg.qr(design, mode="reduced").R
             _, _, right = torch.linalg.svd(reduced, full_matrices=False)
             homogeneous = right[:, -1, :]
-        valid_w = homogeneous[:, 3].abs() > 1e-12
-        denominator = torch.where(
-            valid_w[:, None],
-            homogeneous[:, 3:4],
-            torch.ones_like(homogeneous[:, 3:4]),
-        )
-        points = homogeneous[:, :3] / denominator
-        valid_track = valid_w & torch.isfinite(points).all(dim=1)
+        else:
+            points = torch.linalg.lstsq(
+                design[:, :, :3], -design[:, :, 3:4]
+            ).solution.squeeze(2)
+            homogeneous = None
+        if homogeneous is None:
+            valid_track = torch.isfinite(points).all(dim=1)
+        else:
+            valid_w = homogeneous[:, 3].abs() > 1e-12
+            denominator = torch.where(
+                valid_w[:, None],
+                homogeneous[:, 3:4],
+                torch.ones_like(homogeneous[:, 3:4]),
+            )
+            points = homogeneous[:, :3] / denominator
+            valid_track = valid_w & torch.isfinite(points).all(dim=1)
 
         homogeneous_points = torch.cat(
             (

@@ -160,6 +160,7 @@ class SchurFejFixedLagRunner:
             "homogeneous-svd",
             "homogeneous-gram-eigh",
             "homogeneous-qr-svd",
+            "inhomogeneous-lstsq",
         }:
             raise SchurFejFixedLagRunnerError(
                 "triangulation solver policy is invalid"
