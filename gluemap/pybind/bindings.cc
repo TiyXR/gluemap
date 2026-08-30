@@ -30,6 +30,11 @@ py::tuple ComputeVirtualTracksToDeleteWrapper(
     const std::unordered_map<uint64_t, int> &pair_count_in,
     int min_num_support_abs);
 
+py::array_t<int64_t> ComputeConnectedComponentsWrapper(
+    int64_t node_count,
+    py::array_t<int64_t, py::array::c_style> edge_first,
+    py::array_t<int64_t, py::array::c_style> edge_second);
+
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
   return new ceres::ProductManifold<ceres::EigenQuaternionManifold,
@@ -170,4 +175,8 @@ PYBIND11_MODULE(pygluemap, m) {
         "Select virtual tracks given existing pair coverage. Returns "
         "(ids_to_delete, updated_pair_count). Tracks whose image pairs are "
         "all above min_num_support_abs are removed.");
+
+  m.def("compute_connected_components", &ComputeConnectedComponentsWrapper,
+        py::arg("node_count"), py::arg("edge_first"), py::arg("edge_second"),
+        "Compute integer graph component labels with GIL-free OpenMP workers.");
 }

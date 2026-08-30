@@ -104,7 +104,19 @@ class ActiveTrackStore:
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
         self._parallax_backend = self._resolve_parallax_backend()
+        self._component_rebuild_backend = self._resolve_component_rebuild_backend()
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
+
+    @staticmethod
+    def _resolve_component_rebuild_backend() -> str:
+        try:
+            import pygluemap
+
+            if hasattr(pygluemap, "compute_connected_components"):
+                return "native-openmp"
+        except (ImportError, OSError):
+            pass
+        return "python"
 
     def _resolve_parallax_backend(self) -> str:
         import torch
@@ -836,6 +848,7 @@ class ActiveTrackStore:
             "parallaxBackendPolicy": self.budget.parallax_backend_policy,
             "parallaxBackend": self.parallax_backend,
             "gateMetricsBackend": self.parallax_backend,
+            "componentRebuildBackend": self._component_rebuild_backend,
             "parallaxMicrobatchComponents": (
                 self.budget.parallax_microbatch_components
             ),
@@ -937,6 +950,9 @@ class ActiveTrackStore:
             uid: self._component_uid_by_root[self._union_find.find(uid)]
             for uid in self._observations
         }
+        if self._component_rebuild_backend == "native-openmp":
+            self._rebuild_components_native(previous_component)
+            return
         self._union_find = UnionFind()
         self._component_uid_by_root = {}
         grouped: dict[str, list[str]] = defaultdict(list)
@@ -949,3 +965,35 @@ class ActiveTrackStore:
                 self._union_find.union(first, uid)
             root = self._union_find.find(first)
             self._component_uid_by_root[root] = component_uid
+
+    def _rebuild_components_native(
+        self, previous_component: dict[str, str]
+    ) -> None:
+        import numpy as np
+        import pygluemap
+
+        uids = list(self._observations)
+        index_by_uid = {uid: index for index, uid in enumerate(uids)}
+        edge_first = np.fromiter(
+            (index_by_uid[key[0]] for key in self._edges), dtype=np.int64
+        )
+        edge_second = np.fromiter(
+            (index_by_uid[key[1]] for key in self._edges), dtype=np.int64
+        )
+        labels = pygluemap.compute_connected_components(
+            len(uids), edge_first, edge_second
+        )
+        grouped: dict[int, list[str]] = defaultdict(list)
+        for uid, label in zip(uids, labels.tolist(), strict=True):
+            grouped[label].append(uid)
+        parents: dict[str, str] = {}
+        component_uid_by_root: dict[str, str] = {}
+        for grouped_uids in grouped.values():
+            root = min(grouped_uids)
+            component_uid_by_root[root] = min(
+                previous_component[uid] for uid in grouped_uids
+            )
+            parents.update((uid, root) for uid in grouped_uids)
+        self._union_find = UnionFind()
+        self._union_find.parent = parents
+        self._component_uid_by_root = component_uid_by_root

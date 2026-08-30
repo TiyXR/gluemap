@@ -16,6 +16,15 @@ import numpy as np
 import pygluemap
 
 
+def test_connected_components_returns_minimum_integer_root():
+    labels = pygluemap.compute_connected_components(
+        7,
+        np.asarray([0, 1, 4], dtype=np.int64),
+        np.asarray([1, 2, 5], dtype=np.int64),
+    )
+    assert labels.tolist() == [0, 0, 0, 3, 4, 4, 6]
+
+
 def _pair_key(a, b):
     lo, hi = (a, b) if a < b else (b, a)
     return (np.uint64(lo) << np.uint64(32)) | np.uint64(hi)

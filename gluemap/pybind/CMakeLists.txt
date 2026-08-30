@@ -15,13 +15,23 @@ find_package(Ceres REQUIRED)
 find_package(Boost REQUIRED)
 find_package(OpenMP REQUIRED)
 
-pybind11_add_module(pygluemap MODULE "bindings.cc" "track_selection.cc")
+pybind11_add_module(
+  pygluemap MODULE
+  "active_track_components.cc"
+  "bindings.cc"
+  "track_selection.cc")
 
 target_include_directories(pygluemap PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
-target_link_libraries(pygluemap PRIVATE pybind11::module Eigen3::Eigen ${CERES_LIBRARIES} Boost::headers)
+target_link_libraries(
+  pygluemap PRIVATE
+  pybind11::module
+  Eigen3::Eigen
+  ${CERES_LIBRARIES}
+  Boost::headers
+  OpenMP::OpenMP_CXX)
 target_compile_definitions(pygluemap PRIVATE cxx_std_17)
 if (TARGET Ceres::ceres_cuda_kernels)
     set(CERES_HAS_CUDA TRUE)
