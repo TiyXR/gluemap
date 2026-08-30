@@ -28,7 +28,6 @@ def budget(**changes):
         "minimum_visibility": 0.5,
         "minimum_confidence": 0.5,
         "minimum_parallax_diagonals": 0.005,
-        "maximum_matching_uncertainty": 0.25,
     }
     values.update(changes)
     return TrackBudget(**values)
@@ -50,14 +49,13 @@ def observation(track, frame, *, x=None, y=None, score=1.0):
     )
 
 
-def add_track(store, track, frames, *, uncertainty=0.1):
+def add_track(store, track, frames):
     observations = [observation(track, frame) for frame in frames]
     store.add_observations(observations)
     store.add_correspondences(
         TrackCorrespondence(
             observations[index].observation_uid,
             observations[index + 1].observation_uid,
-            uncertainty,
         )
         for index in range(len(observations) - 1)
     )
@@ -111,7 +109,6 @@ def test_time_grid_round_robin_prevents_one_bucket_from_consuming_budget():
                 TrackCorrespondence(
                     observations[0].observation_uid,
                     observations[1].observation_uid,
-                    0.1,
                 )
             ]
         )
@@ -125,23 +122,21 @@ def test_time_grid_round_robin_prevents_one_bucket_from_consuming_budget():
     assert report["rejectedReasonHistogram"]["active-budget-or-cell-cap"] == 2
 
 
-def test_matching_uncertainty_and_parallax_rejections_are_reported():
+def test_low_parallax_rejection_is_reported():
     store = ActiveTrackStore(budget())
-    add_track(store, 0, [0, 1, 2], uncertainty=0.9)
     values = [
         observation(1, 0, x=10, y=10),
         observation(1, 2, x=10.1, y=10.1),
     ]
     store.add_observations(values)
     store.add_correspondences(
-        [TrackCorrespondence(values[0].observation_uid, values[1].observation_uid, 0.1)]
+        [TrackCorrespondence(values[0].observation_uid, values[1].observation_uid)]
     )
     report = store.evaluate(
         active_first_ordinal=0,
         active_last_ordinal=3,
         freeze_through_ordinal=1,
     )
-    assert report["rejectedReasonHistogram"]["matching-uncertainty"] == 1
     assert report["rejectedReasonHistogram"]["insufficient-parallax"] == 1
 
 

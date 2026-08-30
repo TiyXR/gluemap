@@ -47,7 +47,6 @@ class TrackBudget:
     minimum_visibility: float
     minimum_confidence: float
     minimum_parallax_diagonals: float
-    maximum_matching_uncertainty: float
 
     @property
     def maximum_active_tracks(self) -> int:
@@ -77,7 +76,6 @@ class TrackObservation:
 class TrackCorrespondence:
     first_observation_uid: str
     second_observation_uid: str
-    matching_uncertainty: float
 
 
 class ActiveTrackStore:
@@ -143,9 +141,7 @@ class ActiveTrackStore:
             or not isfinite(self.budget.minimum_visibility)
             or not 0 <= self.budget.minimum_visibility <= 1
             or not isfinite(self.budget.minimum_confidence)
-            or not 0 <= self.budget.minimum_confidence <= 1
-            or not isfinite(self.budget.maximum_matching_uncertainty)
-            or not 0 <= self.budget.maximum_matching_uncertainty <= 1
+            or self.budget.minimum_confidence < 0
         ):
             raise ActiveTrackStoreError("track metric thresholds are invalid")
         if (
@@ -262,15 +258,13 @@ class ActiveTrackStore:
                 first == second
                 or first not in self._observations
                 or second not in self._observations
-                or not isfinite(value.matching_uncertainty)
-                or not 0 <= value.matching_uncertainty <= 1
             ):
                 raise ActiveTrackStoreError("track correspondence is invalid")
             key = tuple(sorted((first, second)))
             existing = self._edges.get(key)
             if existing is not None:
                 if existing != value and existing != TrackCorrespondence(
-                    second, first, value.matching_uncertainty
+                    second, first
                 ):
                     raise ActiveTrackStoreError("correspondence identity was reused")
                 continue
@@ -299,13 +293,6 @@ class ActiveTrackStore:
                     value.observation_uid,
                 )
             )
-        return dict(values)
-
-    def _component_edges(self) -> dict[str, list[TrackCorrespondence]]:
-        values: dict[str, list[TrackCorrespondence]] = defaultdict(list)
-        for edge in self._edges.values():
-            root = self._union_find.find(edge.first_observation_uid)
-            values[self._component_uid_by_root[root]].append(edge)
         return dict(values)
 
     def _grid_cell(self, observation: TrackObservation) -> tuple[int, int]:
@@ -355,7 +342,6 @@ class ActiveTrackStore:
         ):
             raise ActiveTrackStoreError("active/freeze interval is invalid")
         components = self._components()
-        component_edges = self._component_edges()
         candidates: list[dict[str, Any]] = []
         rejected = Counter()
         for track_uid, all_observations in components.items():
@@ -371,12 +357,6 @@ class ActiveTrackStore:
             parallax = self._parallax(observations)
             if parallax < self.budget.minimum_parallax_diagonals:
                 reasons.append("insufficient-parallax")
-            edges = component_edges.get(track_uid, [])
-            maximum_uncertainty = max(
-                (value.matching_uncertainty for value in edges), default=0.0
-            )
-            if maximum_uncertainty > self.budget.maximum_matching_uncertainty:
-                reasons.append("matching-uncertainty")
             if reasons:
                 rejected.update(reasons)
                 continue
@@ -398,7 +378,6 @@ class ActiveTrackStore:
                     "viewCount": len(frame_ordinals),
                     "bridge": bridge,
                     "parallaxDiagonals": parallax,
-                    "maximumMatchingUncertainty": maximum_uncertainty,
                     "meanScore": sum(value.score for value in observations)
                     / len(observations),
                     "bucket": bucket,
@@ -413,7 +392,6 @@ class ActiveTrackStore:
             -value["viewCount"],
             -value["parallaxDiagonals"],
             -value["meanScore"],
-            value["maximumMatchingUncertainty"],
             value["trackUid"],
         )
         remaining.sort(key=quality)
