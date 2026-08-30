@@ -1,4 +1,5 @@
 import numpy as np
+import pygluemap
 
 from gluemap.estimators.active_track_store import TrackObservation
 from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
@@ -181,3 +182,93 @@ def test_native_rebuild_skips_discarded_observation_bookkeeping() -> None:
     assert all(not point.observations for point in problem.points.values())
     assert len(problem._native_batches) == 1
     assert summary.final_cost <= summary.initial_cost
+
+
+def test_native_csr_matches_image_major_residual_solution() -> None:
+    if not hasattr(
+        pygluemap,
+        "add_reprojection_residual_csr_implicit_parameters",
+    ):
+        return
+
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    true_centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(16)
+    }
+    initial_centers = {
+        frame: value
+        + np.array((0.0, 0.01 * ((frame % 3) - 1), 0.002 * (frame % 5)))
+        for frame, value in true_centers.items()
+    }
+    rotations = {frame: np.eye(3) for frame in true_centers}
+    camera = camera_from_intrinsics_matrix(
+        intrinsics,
+        camera_model="PINHOLE",
+        width=640,
+        height=480,
+        camera_id=1,
+    )
+    tracks = _tracks(tuple(true_centers), true_centers, intrinsics)
+    csr_binding = pygluemap.add_reprojection_residual_csr_implicit_parameters
+
+    def solve(use_csr: bool):
+        if not use_csr:
+            delattr(
+                pygluemap,
+                "add_reprojection_residual_csr_implicit_parameters",
+            )
+        try:
+            problem = PersistentFixedLagBaProblem(
+                camera_model_id=camera.model,
+                camera_params=camera.params,
+                policy="native-rebuild-every-window",
+            )
+            report = problem.synchronize(
+                frame_ids=tuple(true_centers),
+                rotations=rotations,
+                centers=initial_centers,
+                fixed_pose_ids={0},
+                tracks=tracks,
+                camera_model_id=camera.model,
+                camera_params=camera.params,
+            )
+            summary, _ = problem.solve(
+                max_num_iterations=20,
+                linear_solver_policy="auto",
+                linear_solver_ordering_policy="point-first",
+                device_policy="cpu",
+                ceres_cuda_available=False,
+            )
+            poses = np.stack(
+                [problem.pose_values(frame).copy() for frame in true_centers]
+            )
+            points = np.stack(
+                [problem.point_values(track.track_uid).copy() for track in tracks]
+            )
+            return report, summary, poses, points
+        finally:
+            if not hasattr(
+                pygluemap,
+                "add_reprojection_residual_csr_implicit_parameters",
+            ):
+                setattr(
+                    pygluemap,
+                    "add_reprojection_residual_csr_implicit_parameters",
+                    csr_binding,
+                )
+
+    old_report, old_summary, old_poses, old_points = solve(False)
+    csr_report, csr_summary, csr_poses, csr_points = solve(True)
+
+    assert old_report["visualResidualBindingMode"] == (
+        "native-image-major-implicit-parameters"
+    )
+    assert csr_report["visualResidualBindingMode"] == (
+        "native-image-major-csr-implicit-parameters"
+    )
+    assert np.isclose(old_summary.initial_cost, csr_summary.initial_cost, atol=1e-12)
+    assert np.isclose(old_summary.final_cost, csr_summary.final_cost, atol=1e-12)
+    assert np.allclose(old_poses, csr_poses, rtol=0.0, atol=1e-12)
+    assert np.allclose(old_points, csr_points, rtol=0.0, atol=1e-12)
