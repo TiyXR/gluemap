@@ -1140,6 +1140,42 @@ class ActiveTrackStore:
             if key != "uids"
         }
 
+    def propose_release_frame_ids(
+        self, finalized_frame_ids: Iterable[int]
+    ) -> dict[str, Any]:
+        """Propose exact non-contiguous pose release while retaining the gauge."""
+        if self._pending_release is not None:
+            raise ActiveTrackStoreError("a release proposal is already pending")
+        frame_ids = tuple(sorted(set(int(value) for value in finalized_frame_ids)))
+        if not frame_ids or frame_ids[0] < 0:
+            raise ActiveTrackStoreError("release frame identity is invalid")
+        release_uids = sorted(
+            uid
+            for uid, value in self._observations.items()
+            if value.geometry_ordinal in frame_ids
+        )
+        payload = {
+            "contractId": (
+                "jarailsense.gluemap-active-track-frame-release-proposal/v1"
+            ),
+            "storeIdentitySha256": self.store_identity_sha256,
+            "previousAcceptedJournalHead": self._last_accepted_journal_head,
+            "finalizedFrameIds": list(frame_ids),
+            "releasedObservationUidsSha256": _canonical_sha256(release_uids),
+            "releasedObservationCount": len(release_uids),
+        }
+        proposal_uid = _canonical_sha256(payload)
+        self._pending_release = {
+            **payload,
+            "proposalUid": proposal_uid,
+            "uids": release_uids,
+        }
+        return {
+            key: value
+            for key, value in self._pending_release.items()
+            if key != "uids"
+        }
+
     def commit_release(
         self, proposal_uid: str, accepted_journal_head: str
     ) -> dict[str, Any]:

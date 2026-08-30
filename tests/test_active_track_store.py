@@ -139,6 +139,27 @@ def test_noncontiguous_fixed_lag_frame_set_excludes_marginalized_pose_on_gpu():
     )
 
 
+def test_exact_frame_release_keeps_older_canonical_gauge_observations():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+    before = store.observation_count
+
+    proposal = store.propose_release_frame_ids([1])
+    committed = store.commit_release(proposal["proposalUid"], "a" * 64)
+
+    assert committed["releasedObservationCount"] == 2
+    assert store.observation_count == before - 2
+    report, tracks = store.evaluate_frame_sets_materialized(
+        [((0, 2, 3), 2)]
+    )
+    assert report[0]["status"] == "passed"
+    assert all(
+        [value.geometry_ordinal for value in track.observations] == [0, 2, 3]
+        for track in tracks[0]
+    )
+
+
 def test_parallax_backend_and_microbatch_are_reported():
     store = ActiveTrackStore(
         budget(
