@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
+import pyceres
 import torch
 
 
@@ -35,6 +37,102 @@ class FejPriorState:
             factor_residual=self.factor_residual.detach().cpu(),
             report=dict(self.report),
         )
+
+
+def _quaternion_product_xyzw(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    left_xyz = left[:3]
+    right_xyz = right[:3]
+    return np.concatenate(
+        (
+            left[3] * right_xyz
+            + right[3] * left_xyz
+            + np.cross(left_xyz, right_xyz),
+            np.asarray(
+                [left[3] * right[3] - np.dot(left_xyz, right_xyz)],
+                dtype=np.float64,
+            ),
+        )
+    )
+
+
+def _eigen_quaternion_minus(current: np.ndarray, origin: np.ndarray) -> np.ndarray:
+    origin_conjugate = origin.copy()
+    origin_conjugate[:3] *= -1.0
+    difference = _quaternion_product_xyzw(current, origin_conjugate)
+    norm = float(np.linalg.norm(difference[:3]))
+    if norm == 0.0:
+        return np.zeros(3, dtype=np.float64)
+    theta = np.arctan2(norm, float(difference[3]))
+    return difference[:3] * (theta / norm)
+
+
+def _eigen_quaternion_plus_jacobian(quaternion: np.ndarray) -> np.ndarray:
+    x, y, z, w = quaternion
+    return np.asarray(
+        (
+            (w, z, -y),
+            (-z, w, x),
+            (y, -x, w),
+            (-x, -y, -z),
+        ),
+        dtype=np.float64,
+    )
+
+
+class FejPosePriorCostFunction(pyceres.CostFunction):
+    """One dense pose-only square-root prior over Ceres pose manifolds."""
+
+    def __init__(self, prior: FejPriorState) -> None:
+        super().__init__()
+        factor = prior.factor.detach().cpu().numpy().astype(np.float64)
+        factor_residual = (
+            prior.factor_residual.detach().cpu().numpy().astype(np.float64)
+        )
+        linearization = (
+            prior.linearization_points.detach().cpu().numpy().astype(np.float64)
+        )
+        if factor.ndim != 2 or factor.shape[1] != len(prior.camera_ids) * 6:
+            raise FixedLagPriorError("FEJ factor shape is invalid")
+        if factor_residual.shape != (factor.shape[0],):
+            raise FixedLagPriorError("FEJ factor residual shape is invalid")
+        if linearization.shape != (len(prior.camera_ids), 7):
+            raise FixedLagPriorError("FEJ ambient linearization shape is invalid")
+        self.factor = factor
+        self.factor_residual = factor_residual
+        self.linearization = linearization
+        self.set_num_residuals(factor.shape[0])
+        self.set_parameter_block_sizes([7] * len(prior.camera_ids))
+
+    def Evaluate(self, parameters, residuals, jacobians):  # noqa: N802
+        deltas = []
+        for current_value, origin in zip(
+            parameters, self.linearization, strict=True
+        ):
+            current = np.asarray(current_value, dtype=np.float64)
+            if current.shape != (7,):
+                return False
+            deltas.append(
+                np.concatenate(
+                    (
+                        _eigen_quaternion_minus(current[:4], origin[:4]),
+                        current[4:] - origin[4:],
+                    )
+                )
+            )
+        residuals[:] = self.factor @ np.concatenate(deltas) + self.factor_residual
+        if jacobians is not None:
+            for index, current_value in enumerate(parameters):
+                if jacobians[index] is None:
+                    continue
+                current = np.asarray(current_value, dtype=np.float64)
+                plus = np.zeros((7, 6), dtype=np.float64)
+                plus[:4, :3] = _eigen_quaternion_plus_jacobian(current[:4])
+                plus[4:, 3:] = np.eye(3, dtype=np.float64)
+                tangent = self.factor[:, index * 6 : (index + 1) * 6]
+                np.asarray(jacobians[index]).reshape(self.factor.shape[0], 7)[:] = (
+                    tangent @ plus.T
+                )
+        return True
 
 
 def _resolve_device(policy: str) -> torch.device:
@@ -173,8 +271,18 @@ def marginalize_linearized_tracks(
         point_jacobians, dtype=dtype, device=device
     )
     point_count, maximum_views = camera_indexes.shape
-    if points.shape != (len(ordered_camera_ids), 6):
+    if points.shape != (len(ordered_camera_ids), 7):
         raise FixedLagPriorError("FEJ pose linearization shape is invalid")
+    quaternion_norms = torch.linalg.vector_norm(points[:, :4], dim=1)
+    if not bool(
+        torch.allclose(
+            quaternion_norms,
+            torch.ones_like(quaternion_norms),
+            rtol=1e-10,
+            atol=1e-10,
+        )
+    ):
+        raise FixedLagPriorError("FEJ quaternion linearization is not normalized")
     if residual.shape != (point_count, maximum_views, 2):
         raise FixedLagPriorError("linearized residual shape is invalid")
     if camera_jacobian.shape != (point_count, maximum_views, 2, 6):

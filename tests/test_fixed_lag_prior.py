@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from gluemap.estimators.fixed_lag_prior import (
+    FejPosePriorCostFunction,
     FejPriorState,
     FixedLagPriorError,
     marginalize_linearized_tracks,
@@ -30,7 +31,10 @@ def _fixture(dtype=torch.float64):
     residuals[~mask] = 0
     camera_jacobians[~mask] = 0
     point_jacobians[~mask] = 0
-    linearization = torch.randn(3, 6, generator=generator, dtype=dtype)
+    linearization = torch.randn(3, 7, generator=generator, dtype=dtype)
+    linearization[:, :4] /= torch.linalg.vector_norm(
+        linearization[:, :4], dim=1, keepdim=True
+    )
     initial_hessian = torch.eye(18, dtype=dtype) * 0.25
     initial_gradient = torch.randn(18, generator=generator, dtype=dtype) * 0.01
     eigenvalues, eigenvectors = torch.linalg.eigh(initial_hessian)
@@ -174,3 +178,44 @@ def test_track_requires_two_real_views():
 
     with pytest.raises(FixedLagPriorError, match="fewer than two views"):
         marginalize_linearized_tracks(**values, device_policy="cpu")
+
+
+def test_dense_fej_cost_moves_one_pose_on_ceres_manifold():
+    import numpy as np
+    import pyceres
+    import pygluemap
+
+    linearization = torch.tensor(
+        [[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]],
+        dtype=torch.float64,
+    )
+    target = torch.tensor(
+        [0.02, -0.01, 0.03, 1.0, -2.0, 0.5], dtype=torch.float64
+    )
+    prior = FejPriorState(
+        camera_ids=(7,),
+        linearization_points=linearization,
+        hessian=torch.eye(6, dtype=torch.float64),
+        gradient=-target,
+        factor=torch.eye(6, dtype=torch.float64),
+        factor_residual=-target,
+        report={},
+    )
+    pose = linearization[0].numpy().copy()
+    problem = pyceres.Problem()
+    problem.add_parameter_block(pose, 7, pygluemap.CreatePoseManifold())
+    cost = FejPosePriorCostFunction(prior)
+    problem.add_residual_block(cost, None, [pose])
+    options = pyceres.SolverOptions()
+    options.max_num_iterations = 20
+    summary = pyceres.SolverSummary()
+
+    pyceres.solve(options, problem, summary)
+
+    quaternion = pose[:4]
+    recovered_rotation = quaternion[:3] / np.linalg.norm(quaternion[:3])
+    recovered_rotation *= np.arctan2(
+        np.linalg.norm(quaternion[:3]), quaternion[3]
+    )
+    np.testing.assert_allclose(recovered_rotation, target[:3].numpy(), atol=1e-9)
+    np.testing.assert_allclose(pose[4:], target[3:].numpy(), atol=1e-9)
