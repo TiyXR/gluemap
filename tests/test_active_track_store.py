@@ -160,6 +160,21 @@ def test_exact_frame_release_keeps_older_canonical_gauge_observations():
     )
 
 
+def test_terminal_frame_set_does_not_require_a_future_bridge():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, [0, 1])
+    add_track(store, 1, [0, 1])
+
+    reports, tracks = store.evaluate_frame_sets_materialized(
+        [([0, 1], 1)], terminal=True
+    )
+
+    assert reports[0]["status"] == "passed"
+    assert reports[0]["terminalFreeze"] is True
+    assert "BRIDGE_TRACKS_BELOW_MINIMUM" not in reports[0]["reasonCodes"]
+    assert tracks[0]
+
+
 def test_parallax_backend_and_microbatch_are_reported():
     store = ActiveTrackStore(
         budget(

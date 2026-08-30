@@ -563,6 +563,8 @@ class ActiveTrackStore:
     def evaluate_frame_sets_materialized(
         self,
         windows: Iterable[tuple[Iterable[int], int]],
+        *,
+        terminal: bool = False,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         """Evaluate arbitrary fixed-lag frame sets in one GPU membership batch."""
         values: list[tuple[int, ...]] = []
@@ -573,7 +575,7 @@ class ActiveTrackStore:
                 len(ordered) < 2
                 or ordered[0] < 0
                 or freeze_through not in ordered
-                or freeze_through == ordered[-1]
+                or (not terminal and freeze_through == ordered[-1])
             ):
                 raise ActiveTrackStoreError(
                     "active frame-set/freeze identity is invalid"
@@ -584,6 +586,7 @@ class ActiveTrackStore:
             intervals,
             materialize_tracks=True,
             active_frame_sets=values,
+            allow_terminal_freeze=terminal,
         )
 
     def _evaluate_batch_impl(
@@ -592,10 +595,16 @@ class ActiveTrackStore:
         *,
         materialize_tracks: bool,
         active_frame_sets: list[tuple[int, ...]] | None = None,
+        allow_terminal_freeze: bool = False,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         values = list(intervals)
         for active_first, active_last, freeze_through in values:
-            self._validate_interval(active_first, active_last, freeze_through)
+            self._validate_interval(
+                active_first,
+                active_last,
+                freeze_through,
+                allow_terminal_freeze=allow_terminal_freeze,
+            )
         components = self._components()
         if not values:
             return [], []
@@ -681,6 +690,7 @@ class ActiveTrackStore:
                     rejected=rejected_by_interval[index],
                     constraints_per_frame=constraints_by_interval[index],
                     frame_ids=frame_sets[index],
+                    terminal_freeze=allow_terminal_freeze,
                 )
             )
         return reports, materialized_by_interval
@@ -690,12 +700,18 @@ class ActiveTrackStore:
         active_first_ordinal: int,
         active_last_ordinal: int,
         freeze_through_ordinal: int,
+        *,
+        allow_terminal_freeze: bool = False,
     ) -> None:
         if (
             active_first_ordinal < 0
             or active_last_ordinal < active_first_ordinal
             or freeze_through_ordinal < active_first_ordinal
-            or freeze_through_ordinal >= active_last_ordinal
+            or (
+                freeze_through_ordinal > active_last_ordinal
+                if allow_terminal_freeze
+                else freeze_through_ordinal >= active_last_ordinal
+            )
         ):
             raise ActiveTrackStoreError("active/freeze interval is invalid")
 
@@ -1036,6 +1052,7 @@ class ActiveTrackStore:
         rejected: Counter[str],
         constraints_per_frame: Counter[int],
         frame_ids: tuple[int, ...] | None = None,
+        terminal_freeze: bool = False,
     ) -> dict[str, Any]:
         active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
         active_frame_ids = frame_ids or tuple(
@@ -1062,7 +1079,10 @@ class ActiveTrackStore:
         reason_codes: list[str] = []
         if not selected or zero_constraint_ordinals:
             reason_codes.append("ZERO_CONSTRAINT")
-        if len(bridge_tracks) < self.budget.minimum_bridge_tracks:
+        if (
+            not terminal_freeze
+            and len(bridge_tracks) < self.budget.minimum_bridge_tracks
+        ):
             reason_codes.append("BRIDGE_TRACKS_BELOW_MINIMUM")
         if under_constraint_ordinals:
             reason_codes.append("KEYFRAME_CONSTRAINTS_BELOW_MINIMUM")
@@ -1075,6 +1095,7 @@ class ActiveTrackStore:
             "activeFirstOrdinal": active_first_ordinal,
             "activeLastOrdinal": active_last_ordinal,
             "freezeThroughOrdinal": freeze_through_ordinal,
+            "terminalFreeze": terminal_freeze,
             "candidateTrackCount": len(candidates),
             "selectedTrackCount": len(selected),
             "bridgeTrackCount": len(bridge_tracks),
