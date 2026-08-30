@@ -7,6 +7,7 @@ path or the virtual (manual ``pygluemap.ReprojErrorCost``) path.
 
 import copy
 import logging
+from types import SimpleNamespace
 
 import numpy as np
 import pycolmap
@@ -14,6 +15,7 @@ import torch
 
 from gluemap.estimators.augmented_bundle_adjustment import (
     _configure_ceres_cpu_concurrency,
+    _resolved_cuda_backend,
     bundle_adjustment,
 )
 from gluemap.estimators.fixed_lag_prior import (
@@ -26,6 +28,28 @@ from gluemap.estimators.fixed_lag_ceres_linearization import (
 from tests.helpers import create_synthetic_reconstruction, perturb_points3D
 
 logger = logging.getLogger(__name__)
+
+
+def test_sparse_solver_does_not_inherit_unused_dense_cuda_identity():
+    summary = SimpleNamespace(
+        linear_solver_type_used="LinearSolverType.SPARSE_SCHUR",
+        dense_linear_algebra_library_type="DenseLinearAlgebraLibraryType.CUDA",
+        sparse_linear_algebra_library_type=(
+            "SparseLinearAlgebraLibraryType.SUITE_SPARSE"
+        ),
+    )
+    assert _resolved_cuda_backend(summary) is False
+
+
+def test_sparse_solver_reports_actual_cudss_backend():
+    summary = SimpleNamespace(
+        linear_solver_type_used="LinearSolverType.SPARSE_SCHUR",
+        dense_linear_algebra_library_type="DenseLinearAlgebraLibraryType.EIGEN",
+        sparse_linear_algebra_library_type=(
+            "SparseLinearAlgebraLibraryType.CUDA_SPARSE"
+        ),
+    )
+    assert _resolved_cuda_backend(summary) is True
 
 
 def test_ceres_concurrency_does_not_restore_the_small_problem_serial_gate(

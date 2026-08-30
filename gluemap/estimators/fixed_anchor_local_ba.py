@@ -9,7 +9,10 @@ from typing import Any
 import numpy as np
 import pycolmap
 
-from gluemap.estimators.augmented_bundle_adjustment import bundle_adjustment
+from gluemap.estimators.augmented_bundle_adjustment import (
+    _resolved_cuda_backend,
+    bundle_adjustment,
+)
 from gluemap.estimators.fixed_anchor_approximation import (
     FixedAnchorWindowSolution,
 )
@@ -58,8 +61,7 @@ def _resolved_backend(summary: object) -> tuple[str, str, bool]:
     ceres = getattr(summary, "ceres_summary", summary)
     dense = str(ceres.dense_linear_algebra_library_type)
     sparse = str(ceres.sparse_linear_algebra_library_type)
-    gpu_used = dense.endswith("CUDA") or sparse.endswith("CUDA_SPARSE")
-    return dense, sparse, gpu_used
+    return dense, sparse, _resolved_cuda_backend(ceres)
 
 
 def _ba_summary_acceptance(summary: object) -> tuple[bool, str]:

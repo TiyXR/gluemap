@@ -93,16 +93,23 @@ def _pyceres_loss_function(name: str) -> pyceres.LossFunction | None:
 _DEFAULT_LOSS = object()
 
 
-def _validate_resolved_ba_backend(summary: object, gpu_requested: bool) -> None:
-    if not gpu_requested:
-        return
+def _resolved_cuda_backend(summary: object) -> bool:
+    """Return whether the linear solver that actually ran used CUDA."""
     ceres_summary = getattr(summary, "ceres_summary", summary)
+    linear_solver = str(ceres_summary.linear_solver_type_used)
     dense_library = str(ceres_summary.dense_linear_algebra_library_type)
     sparse_library = str(ceres_summary.sparse_linear_algebra_library_type)
-    actual_cuda = dense_library.endswith("CUDA") or sparse_library.endswith(
-        "CUDA_SPARSE"
-    )
-    if not actual_cuda:
+    if linear_solver.endswith(("SPARSE_SCHUR", "SPARSE_NORMAL_CHOLESKY")):
+        return sparse_library.endswith("CUDA_SPARSE")
+    if linear_solver.endswith(
+        ("DENSE_SCHUR", "DENSE_NORMAL_CHOLESKY", "DENSE_QR")
+    ):
+        return dense_library.endswith("CUDA")
+    return False
+
+
+def _validate_resolved_ba_backend(summary: object, gpu_requested: bool) -> None:
+    if gpu_requested and not _resolved_cuda_backend(summary):
         raise RuntimeError("Ceres CUDA BA request resolved to a CPU solver")
 
 
