@@ -1,0 +1,176 @@
+import pytest
+import torch
+
+from gluemap.estimators.fixed_lag_prior import (
+    FejPriorState,
+    FixedLagPriorError,
+    marginalize_linearized_tracks,
+)
+
+
+def _fixture(dtype=torch.float64):
+    generator = torch.Generator().manual_seed(9127)
+    camera_ids = (10, 11, 12)
+    point_count = 8
+    maximum_views = 3
+    camera_indexes = torch.tensor(
+        [[0, 1, 2], [0, 1, -1], [1, 2, -1], [0, 2, -1]] * 2,
+        dtype=torch.int64,
+    )
+    residuals = torch.randn(
+        point_count, maximum_views, 2, generator=generator, dtype=dtype
+    )
+    camera_jacobians = torch.randn(
+        point_count, maximum_views, 2, 6, generator=generator, dtype=dtype
+    )
+    point_jacobians = torch.randn(
+        point_count, maximum_views, 2, 3, generator=generator, dtype=dtype
+    )
+    mask = camera_indexes >= 0
+    residuals[~mask] = 0
+    camera_jacobians[~mask] = 0
+    point_jacobians[~mask] = 0
+    linearization = torch.randn(3, 6, generator=generator, dtype=dtype)
+    initial_hessian = torch.eye(18, dtype=dtype) * 0.25
+    initial_gradient = torch.randn(18, generator=generator, dtype=dtype) * 0.01
+    eigenvalues, eigenvectors = torch.linalg.eigh(initial_hessian)
+    factor = eigenvalues.sqrt()[:, None] * eigenvectors.T
+    factor_residual = (eigenvectors.T @ initial_gradient) / eigenvalues.sqrt()
+    previous = FejPriorState(
+        camera_ids=camera_ids,
+        linearization_points=linearization.clone(),
+        hessian=initial_hessian,
+        gradient=initial_gradient,
+        factor=factor,
+        factor_residual=factor_residual,
+        report={},
+    )
+    return {
+        "camera_ids": camera_ids,
+        "linearization_points": linearization,
+        "observation_camera_indexes": camera_indexes,
+        "residuals": residuals,
+        "camera_jacobians": camera_jacobians,
+        "point_jacobians": point_jacobians,
+        "eliminate_camera_id": 10,
+        "previous_prior": previous,
+        "relative_rank_threshold": 1e-12,
+    }
+
+
+def _dense_reference(values):
+    camera_ids = values["camera_ids"]
+    camera_indexes = values["observation_camera_indexes"]
+    residuals = values["residuals"]
+    camera_jacobians = values["camera_jacobians"]
+    point_jacobians = values["point_jacobians"]
+    point_count, maximum_views = camera_indexes.shape
+    camera_dimension = len(camera_ids) * 6
+    point_dimension = point_count * 3
+    rows = int((camera_indexes >= 0).sum().item()) * 2
+    jacobian = torch.zeros(
+        rows, camera_dimension + point_dimension, dtype=torch.float64
+    )
+    residual = torch.zeros(rows, dtype=torch.float64)
+    row = 0
+    for point in range(point_count):
+        for view in range(maximum_views):
+            camera = int(camera_indexes[point, view])
+            if camera < 0:
+                continue
+            jacobian[row : row + 2, camera * 6 : (camera + 1) * 6] = (
+                camera_jacobians[point, view]
+            )
+            jacobian[
+                row : row + 2,
+                camera_dimension + point * 3 : camera_dimension + (point + 1) * 3,
+            ] = point_jacobians[point, view]
+            residual[row : row + 2] = residuals[point, view]
+            row += 2
+    hessian = jacobian.T @ jacobian
+    gradient = jacobian.T @ residual
+    previous = values["previous_prior"]
+    hessian[:camera_dimension, :camera_dimension] += previous.hessian
+    gradient[:camera_dimension] += previous.gradient
+    point_columns = torch.arange(camera_dimension, camera_dimension + point_dimension)
+    camera_columns = torch.arange(camera_dimension)
+    h_pp = hessian[point_columns[:, None], point_columns]
+    h_pc = hessian[point_columns[:, None], camera_columns]
+    h_cc = hessian[camera_columns[:, None], camera_columns]
+    g_p = gradient[point_columns]
+    g_c = gradient[camera_columns]
+    point_inverse = torch.linalg.pinv(h_pp, rtol=1e-12)
+    pose_hessian = h_cc - h_pc.T @ point_inverse @ h_pc
+    pose_gradient = g_c - h_pc.T @ point_inverse @ g_p
+    marginal = torch.arange(0, 6)
+    retained = torch.arange(6, camera_dimension)
+    h_mm = pose_hessian[marginal[:, None], marginal]
+    h_mr = pose_hessian[marginal[:, None], retained]
+    h_rr = pose_hessian[retained[:, None], retained]
+    g_m = pose_gradient[marginal]
+    g_r = pose_gradient[retained]
+    inverse_mm = torch.linalg.pinv(h_mm, rtol=1e-12)
+    return (
+        h_rr - h_mr.T @ inverse_mm @ h_mr,
+        g_r - h_mr.T @ inverse_mm @ g_m,
+    )
+
+
+def test_batched_schur_matches_dense_reference_on_cpu():
+    values = _fixture()
+    expected_hessian, expected_gradient = _dense_reference(values)
+
+    result = marginalize_linearized_tracks(**values, device_policy="cpu")
+
+    assert result.camera_ids == (11, 12)
+    assert result.report["status"] == "passed"
+    assert result.report["gpuUsed"] is False
+    torch.testing.assert_close(result.hessian, expected_hessian, rtol=1e-9, atol=1e-9)
+    torch.testing.assert_close(result.gradient, expected_gradient, rtol=1e-9, atol=1e-9)
+    torch.testing.assert_close(
+        result.factor.T @ result.factor,
+        result.hessian,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    torch.testing.assert_close(
+        result.factor.T @ result.factor_residual,
+        result.gradient,
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
+def test_cuda_schur_matches_cpu_and_reports_real_gpu_use():
+    values = _fixture()
+    cpu = marginalize_linearized_tracks(**values, device_policy="cpu")
+
+    cuda = marginalize_linearized_tracks(
+        **values, device_policy="cuda-required"
+    ).cpu()
+
+    assert cuda.report["gpuUsed"] is True
+    assert cuda.report["backend"] == "cuda"
+    torch.testing.assert_close(cuda.hessian, cpu.hessian, rtol=1e-8, atol=1e-8)
+    torch.testing.assert_close(cuda.gradient, cpu.gradient, rtol=1e-8, atol=1e-8)
+
+
+def test_previous_fej_linearization_identity_cannot_change():
+    values = _fixture()
+    values["linearization_points"] = values["linearization_points"].clone()
+    values["linearization_points"][0, 0] += 1e-12
+
+    with pytest.raises(FixedLagPriorError, match="linearization point changed"):
+        marginalize_linearized_tracks(**values, device_policy="cpu")
+
+
+def test_track_requires_two_real_views():
+    values = _fixture()
+    values["observation_camera_indexes"] = values[
+        "observation_camera_indexes"
+    ].clone()
+    values["observation_camera_indexes"][0, 1:] = -1
+
+    with pytest.raises(FixedLagPriorError, match="fewer than two views"):
+        marginalize_linearized_tracks(**values, device_policy="cpu")
