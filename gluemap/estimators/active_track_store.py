@@ -16,6 +16,17 @@ class ActiveTrackStoreError(ValueError):
     """Raised when active track state violates its deterministic contract."""
 
 
+def _load_track_native_module() -> Any:
+    try:
+        import pygluemap_tracks
+
+        return pygluemap_tracks
+    except (ImportError, OSError):
+        import pygluemap
+
+        return pygluemap
+
+
 def _canonical_sha256(value: Any) -> str:
     payload = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -119,9 +130,9 @@ class ActiveTrackStore:
     @staticmethod
     def _resolve_component_rebuild_backend() -> str:
         try:
-            import pygluemap
+            native = _load_track_native_module()
 
-            if hasattr(pygluemap, "compute_connected_components"):
+            if hasattr(native, "compute_connected_components"):
                 return "native-openmp"
         except (ImportError, OSError):
             pass
@@ -130,9 +141,9 @@ class ActiveTrackStore:
     @staticmethod
     def _resolve_spatial_intern_backend() -> str:
         try:
-            import pygluemap
+            native = _load_track_native_module()
 
-            if hasattr(pygluemap, "batch_spatial_intern"):
+            if hasattr(native, "batch_spatial_intern"):
                 return "native-openmp"
         except (ImportError, OSError):
             pass
@@ -271,11 +282,13 @@ class ActiveTrackStore:
                 self._validate_observation(value)
         if self._spatial_intern_backend == "native-openmp" and batch:
             return self._intern_observations_native(batch)
-        resolved_uids: list[str] = []
         radius_squared = self.budget.intra_image_merge_radius_pixels**2
-        for value in batch:
+        candidates: list[tuple[float, str, str, int, str]] = []
+        for index, value in enumerate(batch):
+            existing = self._observations.get(value.observation_uid)
+            if existing is not None and existing != value:
+                raise ActiveTrackStoreError("observation identity was reused")
             bucket = self._spatial_bucket(value)
-            candidates: list[tuple[float, str]] = []
             frame_buckets = self._spatial_buckets_by_frame[
                 value.geometry_ordinal
             ]
@@ -284,30 +297,42 @@ class ActiveTrackStore:
                     for uid in frame_buckets.get(
                         (bucket[0] + column_delta, bucket[1] + row_delta), ()
                     ):
-                        existing = self._observations[uid]
-                        distance_squared = (existing.x - value.x) ** 2 + (
-                            existing.y - value.y
+                        candidate = self._observations[uid]
+                        distance_squared = (candidate.x - value.x) ** 2 + (
+                            candidate.y - value.y
                         ) ** 2
                         if distance_squared <= radius_squared:
-                            candidates.append((distance_squared, uid))
-            if candidates:
-                resolved_uids.append(min(candidates)[1])
+                            candidates.append(
+                                (
+                                    distance_squared,
+                                    uid,
+                                    value.observation_uid,
+                                    index,
+                                    uid,
+                                )
+                            )
+        candidates.sort()
+        resolved_uids: list[str | None] = [None] * len(batch)
+        used_existing: set[str] = set()
+        for _, _, _, index, uid in candidates:
+            if resolved_uids[index] is not None or uid in used_existing:
                 continue
-            existing = self._observations.get(value.observation_uid)
-            if existing is not None:
-                if existing != value:
-                    raise ActiveTrackStoreError("observation identity was reused")
-                resolved_uids.append(value.observation_uid)
+            resolved_uids[index] = uid
+            used_existing.add(uid)
+        for index, value in enumerate(batch):
+            if resolved_uids[index] is not None:
                 continue
             self._insert_observation(value)
-            resolved_uids.append(value.observation_uid)
-        return resolved_uids
+            resolved_uids[index] = value.observation_uid
+        if any(value is None for value in resolved_uids):
+            raise ActiveTrackStoreError("spatial intern result is incomplete")
+        return [str(value) for value in resolved_uids]
 
     def _intern_observations_native(
         self, values: list[TrackObservation]
     ) -> list[str]:
         import numpy as np
-        import pygluemap
+        native = _load_track_native_module()
 
         relevant_frames = {value.geometry_ordinal for value in values}
         existing_uids = sorted(
@@ -316,7 +341,7 @@ class ActiveTrackStore:
             for uid in self._observations_by_frame.get(frame, ())
         )
         existing_values = [self._observations[uid] for uid in existing_uids]
-        representatives = pygluemap.batch_spatial_intern(
+        representatives = native.batch_spatial_intern(
             np.fromiter(
                 (value.geometry_ordinal for value in existing_values),
                 dtype=np.int64,
@@ -342,8 +367,9 @@ class ActiveTrackStore:
                 continue
             representative_index = representative - existing_count
             if representative_index != index:
-                resolved_uids.append(values[representative_index].observation_uid)
-                continue
+                raise ActiveTrackStoreError(
+                    "native spatial intern merged observations within one Star"
+                )
             existing = self._observations.get(value.observation_uid)
             if existing is not None:
                 if existing != value:
@@ -718,21 +744,36 @@ class ActiveTrackStore:
             )
         unique_active_observations = mask & ~previous_is_same_view
         view_counts = unique_active_observations.sum(dim=2)
-        observation_counts = mask.sum(dim=2)
-        first_indexes = mask.to(torch.int64).argmax(dim=2)
+        first_indexes = unique_active_observations.to(torch.int64).argmax(dim=2)
         last_indexes = maximum_observations - 1 - torch.flip(
-            mask, dims=(2,)
+            unique_active_observations, dims=(2,)
         ).to(torch.int64).argmax(dim=2)
         expanded_coordinates = coordinates[:, None, :, :].expand(
             -1, len(intervals), -1, -1
         )
         gather_indexes = first_indexes[:, :, None, None].expand(-1, -1, 1, 2)
         first_points = expanded_coordinates.gather(2, gather_indexes).squeeze(2)
-        selected_points = torch.where(
-            mask[:, :, :, None],
-            expanded_coordinates,
-            first_points[:, :, None, :],
-        ).reshape(-1, maximum_observations, 2)
+        maximum_views = max(1, int(view_counts.max().item()))
+        compact_positions = (
+            unique_active_observations.to(torch.int64).cumsum(dim=2) - 1
+        ).clamp_min_(0)
+        compact_points = torch.zeros(
+            (
+                len(component_values),
+                len(intervals),
+                maximum_views,
+                2,
+            ),
+            dtype=coordinates.dtype,
+            device=device,
+        )
+        compact_points.scatter_add_(
+            2,
+            compact_positions[:, :, :, None].expand(-1, -1, -1, 2),
+            expanded_coordinates
+            * unique_active_observations[:, :, :, None],
+        )
+        selected_points = compact_points.reshape(-1, maximum_views, 2)
         expanded_dimensions = dimensions[:, None, :, :].expand(
             -1, len(intervals), -1, -1
         )
@@ -741,7 +782,7 @@ class ActiveTrackStore:
         ).squeeze(2)
         diagonals = torch.sqrt((first_dimensions * first_dimensions).sum(dim=2))
         diagonals = diagonals.reshape(-1)
-        flat_observation_counts = observation_counts.reshape(-1)
+        flat_view_counts = view_counts.reshape(-1)
 
         batch_size = self.budget.parallax_microbatch_components
         parallax = torch.zeros(
@@ -762,7 +803,7 @@ class ActiveTrackStore:
                     squared_distance.amax(dim=(1, 2)).clamp_min_(0.0)
                 ) / diagonals[start : start + batch_size]
                 maximum = torch.where(
-                    flat_observation_counts[start : start + batch_size] >= 2,
+                    flat_view_counts[start : start + batch_size] >= 2,
                     maximum,
                     torch.zeros_like(maximum),
                 )
@@ -782,8 +823,8 @@ class ActiveTrackStore:
             freeze_through[None, :] < last_ordinals
         )
         mean_scores = (
-            (scores[:, None, :] * mask).sum(dim=2)
-            / observation_counts.clamp_min(1)
+            (scores[:, None, :] * unique_active_observations).sum(dim=2)
+            / view_counts.clamp_min(1)
         )
         representative_indexes = last_indexes[:, :, None]
         representative_seconds = seconds[:, None, :].expand(
@@ -1121,7 +1162,7 @@ class ActiveTrackStore:
         self, previous_component: dict[str, str]
     ) -> None:
         import numpy as np
-        import pygluemap
+        native = _load_track_native_module()
 
         uids = list(self._observations)
         index_by_uid = {uid: index for index, uid in enumerate(uids)}
@@ -1131,7 +1172,7 @@ class ActiveTrackStore:
         edge_second = np.fromiter(
             (index_by_uid[key[1]] for key in self._edges), dtype=np.int64
         )
-        labels = pygluemap.compute_connected_components(
+        labels = native.compute_connected_components(
             len(uids), edge_first, edge_second
         )
         grouped: dict[int, list[str]] = defaultdict(list)

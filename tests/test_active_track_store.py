@@ -158,6 +158,49 @@ def test_batch_metrics_count_one_constraint_per_track_and_frame():
     assert report["selectedTrackCount"] == 1
 
 
+def test_parallax_uses_one_observation_per_frame_in_duplicate_heavy_component():
+    store = ActiveTrackStore(
+        budget(
+            maximum_candidate_observations_per_keyframe=256,
+            minimum_parallax_diagonals=0.5,
+            parallax_backend_policy="cpu",
+        )
+    )
+    values = []
+    for frame in (0, 3):
+        values.append(
+            TrackObservation(
+                **{
+                    **observation(0, frame, x=10.0, y=10.0).__dict__,
+                    "observation_uid": f"000-first-frame-{frame}",
+                }
+            )
+        )
+        for index in range(1, 65):
+            values.append(
+                TrackObservation(
+                    **{
+                        **observation(index, frame, x=190.0, y=90.0).__dict__,
+                        "observation_uid": f"{index:03d}-duplicate-frame-{frame}",
+                    }
+                )
+            )
+    store.add_observations(values)
+    store.add_correspondences(
+        TrackCorrespondence(values[index].observation_uid, values[index + 1].observation_uid)
+        for index in range(len(values) - 1)
+    )
+
+    report = store.evaluate(
+        active_first_ordinal=0,
+        active_last_ordinal=3,
+        freeze_through_ordinal=1,
+    )
+
+    assert report["candidateTrackCount"] == 0
+    assert report["rejectedReasonHistogram"]["insufficient-parallax"] == 1
+
+
 def test_gate_report_is_canonical_across_decimal_key_width_boundary():
     store = ActiveTrackStore(budget(window_size_keyframes=4))
     add_track(store, 0, [8, 9, 10, 11])
@@ -290,7 +333,7 @@ def test_overlapping_stars_merge_nearby_observations_without_new_files():
     assert store.observation_count == 1
 
 
-def test_star_batch_interns_in_order_and_merges_within_the_batch():
+def test_star_batch_keeps_nearby_query_tracks_distinct_within_the_batch():
     store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
     first = observation(0, 0, x=50.0, y=20.0)
     nearby = TrackObservation(
@@ -303,7 +346,30 @@ def test_star_batch_interns_in_order_and_merges_within_the_batch():
     resolved = store.intern_observations([first, nearby, distant])
     assert resolved == [
         first.observation_uid,
-        first.observation_uid,
+        nearby.observation_uid,
         distant.observation_uid,
     ]
-    assert store.observation_count == 2
+    assert store.observation_count == 3
+
+
+def test_star_batch_matches_existing_observations_one_to_one():
+    store = ActiveTrackStore(budget(intra_image_merge_radius_pixels=3.0))
+    existing_first = observation(0, 0, x=50.0, y=20.0)
+    existing_second = observation(1, 0, x=54.0, y=20.0)
+    store.intern_observations([existing_first, existing_second])
+    incoming_first = TrackObservation(
+        **{
+            **observation(2, 0, x=51.0, y=20.0).__dict__,
+            "observation_uid": "incoming-first",
+        }
+    )
+    incoming_second = TrackObservation(
+        **{
+            **observation(3, 0, x=53.0, y=20.0).__dict__,
+            "observation_uid": "incoming-second",
+        }
+    )
+    assert store.intern_observations([incoming_first, incoming_second]) == [
+        existing_first.observation_uid,
+        existing_second.observation_uid,
+    ]

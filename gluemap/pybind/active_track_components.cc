@@ -110,8 +110,18 @@ std::vector<int64_t> BatchSpatialIntern(
   }
   std::vector<std::pair<int64_t, std::vector<int64_t>>> frame_groups(
       incoming_by_frame.begin(), incoming_by_frame.end());
-  std::vector<int64_t> representatives(incoming_count, -1);
+  std::vector<int64_t> representatives(incoming_count);
+#pragma omp parallel for schedule(static)
+  for (int64_t index = 0; index < incoming_count; ++index) {
+    representatives[index] = existing_count + index;
+  }
   const double radius_squared = radius * radius;
+
+  struct Candidate {
+    double distance;
+    int64_t existing_index;
+    int64_t incoming_index;
+  };
 
 #pragma omp parallel for schedule(dynamic)
   for (int64_t group_index = 0;
@@ -127,14 +137,12 @@ std::vector<int64_t> BatchSpatialIntern(
         buckets[SpatialBucketKey(column, row)].push_back(index);
       }
     }
+    std::vector<Candidate> candidates;
     for (const int64_t incoming_index : incoming_indexes) {
       const int64_t column = static_cast<int64_t>(
           std::floor(incoming_x[incoming_index] / radius));
       const int64_t row = static_cast<int64_t>(
           std::floor(incoming_y[incoming_index] / radius));
-      double best_distance = std::numeric_limits<double>::infinity();
-      int64_t best = -1;
-      const std::string *best_uid = nullptr;
       for (int64_t column_delta = -1; column_delta <= 1; ++column_delta) {
         for (int64_t row_delta = -1; row_delta <= 1; ++row_delta) {
           const auto bucket_it = buckets.find(SpatialBucketKey(
@@ -142,36 +150,46 @@ std::vector<int64_t> BatchSpatialIntern(
           if (bucket_it == buckets.end()) {
             continue;
           }
-          for (const int64_t encoded : bucket_it->second) {
-            const bool is_existing = encoded < existing_count;
-            const int64_t source_index =
-                is_existing ? encoded : encoded - existing_count;
-            const double candidate_x =
-                is_existing ? existing_x[source_index] : incoming_x[source_index];
-            const double candidate_y =
-                is_existing ? existing_y[source_index] : incoming_y[source_index];
-            const std::string &candidate_uid = is_existing
-                                                   ? existing_uids[source_index]
-                                                   : incoming_uids[source_index];
-            const double dx = candidate_x - incoming_x[incoming_index];
-            const double dy = candidate_y - incoming_y[incoming_index];
+          for (const int64_t existing_index : bucket_it->second) {
+            const double dx =
+                existing_x[existing_index] - incoming_x[incoming_index];
+            const double dy =
+                existing_y[existing_index] - incoming_y[incoming_index];
             const double distance = dx * dx + dy * dy;
-            if (distance <= radius_squared &&
-                (distance < best_distance ||
-                 (distance == best_distance &&
-                  (best_uid == nullptr || candidate_uid < *best_uid)))) {
-              best_distance = distance;
-              best = encoded;
-              best_uid = &candidate_uid;
+            if (distance <= radius_squared) {
+              candidates.push_back(
+                  {distance, existing_index, incoming_index});
             }
           }
         }
       }
-      if (best < 0) {
-        best = existing_count + incoming_index;
-        buckets[SpatialBucketKey(column, row)].push_back(best);
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [&](const Candidate &left, const Candidate &right) {
+                if (left.distance != right.distance) {
+                  return left.distance < right.distance;
+                }
+                const auto &left_existing =
+                    existing_uids[left.existing_index];
+                const auto &right_existing =
+                    existing_uids[right.existing_index];
+                if (left_existing != right_existing) {
+                  return left_existing < right_existing;
+                }
+                return incoming_uids[left.incoming_index] <
+                       incoming_uids[right.incoming_index];
+              });
+    std::unordered_map<int64_t, bool> used_existing;
+    std::unordered_map<int64_t, bool> assigned_incoming;
+    for (const Candidate &candidate : candidates) {
+      if (used_existing.find(candidate.existing_index) != used_existing.end() ||
+          assigned_incoming.find(candidate.incoming_index) !=
+              assigned_incoming.end()) {
+        continue;
       }
-      representatives[incoming_index] = best;
+      representatives[candidate.incoming_index] = candidate.existing_index;
+      used_existing.emplace(candidate.existing_index, true);
+      assigned_incoming.emplace(candidate.incoming_index, true);
     }
   }
   return representatives;

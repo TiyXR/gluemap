@@ -14,12 +14,13 @@ the two image IDs.
 
 import numpy as np
 import pygluemap
+import pygluemap_tracks
 
 import hashlib
 
 
 def test_connected_components_returns_minimum_integer_root():
-    labels = pygluemap.compute_connected_components(
+    labels = pygluemap_tracks.compute_connected_components(
         7,
         np.asarray([0, 1, 4], dtype=np.int64),
         np.asarray([1, 2, 5], dtype=np.int64),
@@ -28,7 +29,7 @@ def test_connected_components_returns_minimum_integer_root():
 
 
 def test_batch_spatial_intern_preserves_frame_and_input_order():
-    representatives = pygluemap.batch_spatial_intern(
+    representatives = pygluemap_tracks.batch_spatial_intern(
         np.asarray([0, 1], dtype=np.int64),
         np.asarray([10.0, 10.0], dtype=np.float64),
         np.asarray([10.0, 10.0], dtype=np.float64),
@@ -39,11 +40,41 @@ def test_batch_spatial_intern_preserves_frame_and_input_order():
         ["incoming-0", "incoming-1", "incoming-2"],
         2.0,
     )
-    assert representatives.tolist() == [0, 3, 3]
+    assert representatives.tolist() == [0, 3, 4]
+
+
+def test_batch_spatial_intern_assigns_existing_observations_one_to_one():
+    representatives = pygluemap_tracks.batch_spatial_intern(
+        np.asarray([0, 0], dtype=np.int64),
+        np.asarray([0.0, 2.0], dtype=np.float64),
+        np.asarray([0.0, 0.0], dtype=np.float64),
+        ["existing-0", "existing-1"],
+        np.asarray([0, 0], dtype=np.int64),
+        np.asarray([0.9, 1.1], dtype=np.float64),
+        np.asarray([0.0, 0.0], dtype=np.float64),
+        ["incoming-0", "incoming-1"],
+        2.0,
+    )
+    assert representatives.tolist() == [0, 1]
+
+
+def test_batch_spatial_intern_leaves_second_competing_observation_unmatched():
+    representatives = pygluemap_tracks.batch_spatial_intern(
+        np.asarray([0], dtype=np.int64),
+        np.asarray([0.0], dtype=np.float64),
+        np.asarray([0.0], dtype=np.float64),
+        ["existing"],
+        np.asarray([0, 0], dtype=np.int64),
+        np.asarray([0.5, 0.5], dtype=np.float64),
+        np.asarray([0.0, 0.0], dtype=np.float64),
+        ["incoming-z", "incoming-a"],
+        1.0,
+    )
+    assert representatives.tolist() == [1, 0]
 
 
 def test_batch_observation_uids_match_the_python_contract():
-    values = pygluemap.batch_observation_uids(
+    values = pygluemap_tracks.batch_observation_uids(
         "a" * 64,
         np.asarray([0, 12], dtype=np.int64),
         np.asarray([1, 3], dtype=np.int64),
