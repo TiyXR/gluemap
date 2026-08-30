@@ -12,12 +12,12 @@ import pycolmap
 import pygluemap
 
 from gluemap.estimators.augmented_bundle_adjustment import (
-    _configure_ceres_cpu_concurrency,
     _pyceres_loss_function,
     _validate_resolved_ba_backend,
 )
 from gluemap.estimators.fixed_lag_prior import FejPriorState
 from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
 
 class PersistentFixedLagBaError(ValueError):
@@ -73,21 +73,25 @@ def _solver_configuration(
     device_policy: str,
     ceres_cuda_available: bool | None,
 ) -> tuple[pyceres.SolverOptions, int, bool]:
-    options = pycolmap.BundleAdjustmentOptions()
-    options.ceres.solver_options = pyceres.SolverOptions()
-    options.ceres.solver_options.max_num_iterations = max_num_iterations
-    requested_threads = _configure_ceres_cpu_concurrency(options.ceres)
-    options.ceres.auto_select_solver_type = True
+    if frame_count < 1 or problem.num_parameter_blocks() < 1:
+        raise PersistentFixedLagBaError("persistent BA problem is empty")
+    solver_options = pyceres.SolverOptions()
+    solver_options.max_num_iterations = max_num_iterations
+    requested_threads = resolve_native_thread_count()
+    solver_options.num_threads = requested_threads
     solver_types = {
         "dense-schur": pyceres.LinearSolverType.DENSE_SCHUR,
         "sparse-schur": pyceres.LinearSolverType.SPARSE_SCHUR,
         "iterative-schur": pyceres.LinearSolverType.ITERATIVE_SCHUR,
     }
     if linear_solver_policy in solver_types:
-        options.ceres.auto_select_solver_type = False
-        options.ceres.solver_options.linear_solver_type = solver_types[
-            linear_solver_policy
-        ]
+        solver_options.linear_solver_type = solver_types[linear_solver_policy]
+    elif linear_solver_policy == "auto":
+        # Fixed-lag railway windows retain thousands of points behind a small
+        # camera frontier.  Keep the observed production choice explicit and
+        # avoid routing Ceres configuration through PyCOLMAP's separately
+        # linked Ceres instance.
+        solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
     elif linear_solver_policy != "auto":
         raise PersistentFixedLagBaError("persistent BA solver policy is invalid")
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
@@ -96,12 +100,6 @@ def _solver_configuration(
     if device_policy == "cuda-required" and not cuda_available:
         raise PersistentFixedLagBaError("persistent CUDA BA is unavailable")
     use_gpu = device_policy != "cpu" and cuda_available
-    options.ceres.use_gpu = use_gpu
-
-    config = pycolmap.BundleAdjustmentConfig()
-    for image_id in range(1, frame_count + 1):
-        config.add_image(image_id)
-    solver_options = options.ceres.create_solver_options(config, problem)
     return solver_options, requested_threads, use_gpu
 
 
