@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+import torch
 
 from gluemap.estimators.active_track_store import SelectedTrackState
 from gluemap.estimators.fixed_anchor_approximation import FixedAnchorWindowSolution
@@ -45,6 +48,13 @@ class SchurFejFixedLagStep:
 class _PoseState:
     rotations: dict[int, np.ndarray]
     centers: dict[int, np.ndarray]
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class SchurFejFixedLagRunner:
@@ -264,3 +274,146 @@ class SchurFejFixedLagRunner:
         )
         self._next_window_ordinal += 1
         return step
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return one JSON-compatible state containing the complete FEJ prior."""
+        if (
+            self._prior is None
+            or self._poses is None
+            or self._frozen_intrinsics is None
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag runner has no solved state"
+            )
+        prior = self._prior.cpu()
+        state = {
+            "contractId": "jarailsense.gluemap-schur-fej-checkpoint/v1",
+            "status": "passed",
+            "publishable": False,
+            "marginalizationMode": "schur-fej",
+            "nextWindowOrdinal": self._next_window_ordinal,
+            "fixedGaugeFrameIds": sorted(self.fixed_gauge_frame_ids),
+            "frameIds": sorted(self._poses.rotations),
+            "rotations": {
+                str(key): value.tolist()
+                for key, value in sorted(self._poses.rotations.items())
+            },
+            "centers": {
+                str(key): value.tolist()
+                for key, value in sorted(self._poses.centers.items())
+            },
+            "frozenIntrinsics": self._frozen_intrinsics.tolist(),
+            "prior": {
+                "cameraIds": list(prior.camera_ids),
+                "linearizationPoints": prior.linearization_points.tolist(),
+                "hessian": prior.hessian.tolist(),
+                "gradient": prior.gradient.tolist(),
+                "factor": prior.factor.tolist(),
+                "factorResidual": prior.factor_residual.tolist(),
+                "report": prior.report,
+            },
+        }
+        return {**state, "stateSha256": _canonical_sha256(state)}
+
+    def restore(self, checkpoint: dict[str, Any]) -> None:
+        """Restore an exact prior/pose state without recomputing old windows."""
+        state = {
+            key: value for key, value in checkpoint.items() if key != "stateSha256"
+        }
+        if (
+            checkpoint.get("contractId")
+            != "jarailsense.gluemap-schur-fej-checkpoint/v1"
+            or checkpoint.get("status") != "passed"
+            or checkpoint.get("publishable") is not False
+            or checkpoint.get("marginalizationMode") != "schur-fej"
+            or checkpoint.get("stateSha256") != _canonical_sha256(state)
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag checkpoint identity differs"
+            )
+        frame_ids = tuple(int(value) for value in checkpoint.get("frameIds", []))
+        rotations = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in checkpoint.get("rotations", {}).items()
+        }
+        centers = {
+            int(key): np.asarray(value, dtype=np.float64)
+            for key, value in checkpoint.get("centers", {}).items()
+        }
+        intrinsics = np.asarray(
+            checkpoint.get("frozenIntrinsics"), dtype=np.float64
+        )
+        next_ordinal = checkpoint.get("nextWindowOrdinal")
+        fixed_gauge = set(checkpoint.get("fixedGaugeFrameIds", []))
+        prior_value = checkpoint.get("prior")
+        if (
+            len(frame_ids) < 3
+            or frame_ids != tuple(sorted(set(frame_ids)))
+            or set(rotations) != set(frame_ids)
+            or set(centers) != set(frame_ids)
+            or fixed_gauge != self.fixed_gauge_frame_ids
+            or fixed_gauge - set(frame_ids)
+            or intrinsics.shape != (3, 3)
+            or isinstance(next_ordinal, bool)
+            or not isinstance(next_ordinal, int)
+            or next_ordinal < 1
+            or not isinstance(prior_value, dict)
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag checkpoint state is invalid"
+            )
+        prior_camera_ids = tuple(
+            int(value) for value in prior_value.get("cameraIds", [])
+        )
+        camera_count = len(prior_camera_ids)
+        linearization = torch.as_tensor(
+            prior_value.get("linearizationPoints"), dtype=torch.float64
+        )
+        hessian = torch.as_tensor(
+            prior_value.get("hessian"), dtype=torch.float64
+        )
+        gradient = torch.as_tensor(
+            prior_value.get("gradient"), dtype=torch.float64
+        )
+        factor = torch.as_tensor(
+            prior_value.get("factor"), dtype=torch.float64
+        )
+        factor_residual = torch.as_tensor(
+            prior_value.get("factorResidual"), dtype=torch.float64
+        )
+        if (
+            not prior_camera_ids
+            or len(set(prior_camera_ids)) != camera_count
+            or set(prior_camera_ids) - set(frame_ids)
+            or linearization.shape != (camera_count, 7)
+            or hessian.shape != (camera_count * 6, camera_count * 6)
+            or gradient.shape != (camera_count * 6,)
+            or factor.ndim != 2
+            or factor.shape[1] != camera_count * 6
+            or factor_residual.shape != (factor.shape[0],)
+            or not all(
+                bool(torch.isfinite(value).all())
+                for value in (
+                    linearization,
+                    hessian,
+                    gradient,
+                    factor,
+                    factor_residual,
+                )
+            )
+        ):
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag checkpoint prior is invalid"
+            )
+        self._poses = _PoseState(rotations=rotations, centers=centers)
+        self._frozen_intrinsics = intrinsics
+        self._prior = FejPriorState(
+            camera_ids=prior_camera_ids,
+            linearization_points=linearization,
+            hessian=hessian,
+            gradient=gradient,
+            factor=factor,
+            factor_residual=factor_residual,
+            report=dict(prior_value.get("report", {})),
+        )
+        self._next_window_ordinal = next_ordinal

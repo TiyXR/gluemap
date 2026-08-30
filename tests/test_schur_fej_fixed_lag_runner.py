@@ -90,7 +90,21 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
     first = runner.advance(
         first_coarse, first_tracks, marginalize_frame_id=1
     )
+    checkpoint = runner.snapshot()
     second = runner.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+    resumed_runner = SchurFejFixedLagRunner(
+        fixed_gauge_frame_ids={0},
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    resumed_runner.restore(checkpoint)
+    resumed_second = resumed_runner.advance(
         second_coarse, second_tracks, marginalize_frame_id=2
     )
 
@@ -105,3 +119,29 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
     assert second.prior.report["gpuUsed"] is True
     assert second.prior.report["priorNullity"] == 1
     assert runner.next_window_ordinal == 2
+    assert resumed_second.report["previousPriorCameraCount"] == 3
+    assert resumed_second.prior.camera_ids == second.prior.camera_ids
+    np.testing.assert_allclose(
+        resumed_second.finalized_rotation,
+        second.finalized_rotation,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        resumed_second.finalized_center,
+        second.finalized_center,
+        rtol=1e-9,
+        atol=1e-10,
+    )
+    np.testing.assert_allclose(
+        resumed_second.prior.hessian.cpu(),
+        second.prior.hessian.cpu(),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        resumed_second.prior.gradient.cpu(),
+        second.prior.gradient.cpu(),
+        rtol=1e-9,
+        atol=1e-9,
+    )
