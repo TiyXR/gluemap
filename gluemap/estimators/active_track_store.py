@@ -268,6 +268,8 @@ class ActiveTrackStore:
         self._component_rebuild_backend = self._resolve_component_rebuild_backend()
         self._spatial_intern_backend = self._resolve_spatial_intern_backend()
         self._last_gate_tensor_report: dict[str, int] = {}
+        self._last_gate_phase_wall: dict[str, float] = {}
+        self._last_gate_metric_phase_wall: dict[str, float] = {}
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
 
     @staticmethod
@@ -387,6 +389,10 @@ class ActiveTrackStore:
     @property
     def last_column_intern_phase_wall(self) -> dict[str, float]:
         return dict(self._last_column_intern_phase_wall)
+
+    @property
+    def last_gate_phase_wall(self) -> dict[str, float]:
+        return dict(self._last_gate_phase_wall)
 
     def _persistent_tensor_report(self) -> dict[str, Any]:
         table = self._gpu_observation_table
@@ -1027,11 +1033,20 @@ class ActiveTrackStore:
         ]
         if len(frame_sets) != len(values):
             raise ActiveTrackStoreError("active frame-set batch size differs")
+        phase_started = time.perf_counter()
         active_frame_union = set().union(*(set(value) for value in frame_sets))
         components, component_source_observation_count = (
             self._components_for_frames(active_frame_union)
         )
+        component_collection_seconds = time.perf_counter() - phase_started
         if not components:
+            self._last_gate_phase_wall = {
+                "componentCollection": component_collection_seconds,
+                "metricTotal": 0.0,
+                "candidateSelection": 0.0,
+                "constraintReduction": 0.0,
+                "trackMaterializeAndReport": 0.0,
+            }
             self._last_gate_tensor_report = {
                 "activeTensorComponentCount": 0,
                 "activeTensorMaximumObservations": 0,
@@ -1055,6 +1070,7 @@ class ActiveTrackStore:
                 ],
                 [[] for _ in values],
             )
+        phase_started = time.perf_counter()
         (
             candidates_by_interval,
             rejected_by_interval,
@@ -1062,6 +1078,8 @@ class ActiveTrackStore:
             unique_active_observations,
             component_values,
         ) = self._batch_component_metrics(components, values, frame_sets)
+        metric_seconds = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         selected_by_interval: list[list[dict[str, Any]]] = []
         bucket_counts_by_interval: list[Counter[tuple[int, int, int]]] = []
         selected_component_indexes: list[list[int]] = []
@@ -1074,6 +1092,8 @@ class ActiveTrackStore:
             selected_component_indexes.append(
                 [value["componentIndex"] for value in selected]
             )
+        candidate_selection_seconds = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         constraints_by_interval = self._batch_constraints_per_frame(
             ordinals=ordinals,
             unique_active_observations=unique_active_observations,
@@ -1081,6 +1101,8 @@ class ActiveTrackStore:
             intervals=values,
             frame_sets=frame_sets,
         )
+        constraint_reduction_seconds = time.perf_counter() - phase_started
+        phase_started = time.perf_counter()
         reports = []
         materialized_by_interval: list[list[SelectedTrackState]] = []
         for index, interval in enumerate(values):
@@ -1120,6 +1142,17 @@ class ActiveTrackStore:
                     constraint_exempt_frame_ids=constraint_exempt_frame_ids,
                 )
             )
+        self._last_gate_phase_wall = {
+            "componentCollection": component_collection_seconds,
+            "metricTotal": metric_seconds,
+            **{
+                f"metric.{name}": seconds
+                for name, seconds in self._last_gate_metric_phase_wall.items()
+            },
+            "candidateSelection": candidate_selection_seconds,
+            "constraintReduction": constraint_reduction_seconds,
+            "trackMaterializeAndReport": time.perf_counter() - phase_started,
+        }
         return reports, materialized_by_interval
 
     @staticmethod
@@ -1157,6 +1190,8 @@ class ActiveTrackStore:
         """Compute every read-only component/window metric as one tensor batch."""
         import torch
 
+        phase_wall: dict[str, float] = {}
+        phase_started = time.perf_counter()
         active_frame_union = set().union(*(set(value) for value in frame_sets))
         component_values: list[tuple[str, list[TrackObservation]]] = []
         for component_uid, observations in components.items():
@@ -1170,7 +1205,9 @@ class ActiveTrackStore:
                 component_values.append(
                     (component_uid, list(observation_by_frame.values()))
                 )
+        phase_wall["componentPrepare"] = time.perf_counter() - phase_started
         if not component_values:
+            self._last_gate_metric_phase_wall = phase_wall
             device = self._parallax_backend
             self._last_gate_tensor_report = {
                 "activeTensorComponentCount": 0,
@@ -1199,6 +1236,7 @@ class ActiveTrackStore:
                 len(observations) for observations in components.values()
             ),
         }
+        phase_started = time.perf_counter()
         if self._gpu_observation_table is not None:
             table = self._gpu_observation_table
             table.flush()
@@ -1273,6 +1311,10 @@ class ActiveTrackStore:
             seconds = torch.tensor(
                 padded_seconds, dtype=torch.float64, device=device
             )
+        phase_wall["observationTensorGather"] = (
+            time.perf_counter() - phase_started
+        )
+        phase_started = time.perf_counter()
         minimum_frame = min(value[0] for value in frame_sets)
         maximum_frame = max(value[-1] for value in frame_sets)
         membership = torch.zeros(
@@ -1339,7 +1381,11 @@ class ActiveTrackStore:
         diagonals = torch.sqrt((first_dimensions * first_dimensions).sum(dim=2))
         diagonals = diagonals.reshape(-1)
         flat_view_counts = view_counts.reshape(-1)
+        phase_wall["membershipAndCompaction"] = (
+            time.perf_counter() - phase_started
+        )
 
+        phase_started = time.perf_counter()
         batch_size = self.budget.parallax_microbatch_components
         parallax = torch.zeros(
             len(component_values) * len(intervals),
@@ -1365,7 +1411,9 @@ class ActiveTrackStore:
                 )
                 parallax[start : start + len(maximum)] = maximum
         parallax = parallax.reshape(len(component_values), len(intervals))
+        phase_wall["parallaxReduction"] = time.perf_counter() - phase_started
 
+        phase_started = time.perf_counter()
         first_ordinals = ordinals[:, None, :].expand(
             -1, len(intervals), -1
         ).gather(2, first_indexes[:, :, None]).squeeze(2)
@@ -1412,6 +1460,10 @@ class ActiveTrackStore:
         float_metrics = torch.stack(
             (parallax.to(torch.float64), mean_scores), dim=2
         ).cpu()
+        phase_wall["metricReductionAndDownload"] = (
+            time.perf_counter() - phase_started
+        )
+        phase_started = time.perf_counter()
         candidates_by_interval: list[list[dict[str, Any]]] = [
             [] for _ in intervals
         ]
@@ -1445,6 +1497,8 @@ class ActiveTrackStore:
                         "bucket": (time_bin, row, column),
                     }
                 )
+        phase_wall["candidateBuild"] = time.perf_counter() - phase_started
+        self._last_gate_metric_phase_wall = phase_wall
         return (
             candidates_by_interval,
             rejected_by_interval,
