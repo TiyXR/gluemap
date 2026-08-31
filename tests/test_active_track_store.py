@@ -225,6 +225,25 @@ def test_fixed_gauge_is_not_a_visual_constraint_minimum():
     assert report["underConstraintOrdinals"] == []
 
 
+def test_constraint_minimum_only_applies_through_freeze_boundary():
+    store = ActiveTrackStore(
+        budget(parallax_backend_policy="cpu", minimum_constraints_per_keyframe=2)
+    )
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1])
+
+    reports, _ = store.evaluate_frame_sets_materialized(
+        [((0, 1, 2, 3), 1)]
+    )
+
+    report = reports[0]
+    assert report["status"] == "passed"
+    assert report["constraintsPerFrame"] == {"0": 2, "1": 2, "2": 1, "3": 1}
+    assert report["constraintRequiredOrdinals"] == [0, 1]
+    assert report["underConstraintOrdinals"] == []
+    assert report["zeroConstraintOrdinals"] == []
+
+
 def test_gate_tensor_only_contains_current_frame_union():
     store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
     add_track(store, 0, list(range(50)))

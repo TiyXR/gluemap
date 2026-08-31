@@ -2055,11 +2055,16 @@ class ActiveTrackStore:
             if ordinal not in exempt_frame_ids
             and constraints_per_frame[ordinal] == 0
         ]
-        under_constraint_ordinals = [
+        constraint_required_ordinals = [
             ordinal
             for ordinal in active_frame_ids
             if ordinal not in exempt_frame_ids
-            and constraints_per_frame[ordinal]
+            and (terminal_freeze or ordinal <= freeze_through_ordinal)
+        ]
+        under_constraint_ordinals = [
+            ordinal
+            for ordinal in constraint_required_ordinals
+            if constraints_per_frame[ordinal]
             < self.budget.minimum_constraints_per_keyframe
         ]
         bridge_tracks = [value for value in selected if value["bridge"]]
@@ -2105,6 +2110,7 @@ class ActiveTrackStore:
             "bridgeTrackUidsSha256": _canonical_sha256(bridge_track_uids),
             "constraintsPerFrame": frame_constraints,
             "constraintExemptFrameIds": exempt_frame_ids,
+            "constraintRequiredOrdinals": constraint_required_ordinals,
             "zeroConstraintOrdinals": zero_constraint_ordinals,
             "underConstraintOrdinals": under_constraint_ordinals,
             "timeGridBucketCounts": {
