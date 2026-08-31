@@ -293,21 +293,25 @@ def _symmetric_pseudoinverse(
     return inverse, values, accepted
 
 
-def _prior_condition_metrics(
+def _prior_factorization(
     hessian: torch.Tensor,
+    gradient: torch.Tensor,
     eigenvalues: torch.Tensor,
-    accepted: torch.Tensor,
+    eigenvectors: torch.Tensor,
+    raw_accepted: torch.Tensor,
     *,
     relative_rank_threshold: float,
     policy: str,
-) -> dict[str, Any]:
-    """Measure prior conditioning without changing its FEJ normal form.
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Build a square-root prior in the selected conditioning coordinates.
 
     The raw eigenvalue ratio is coordinate-scale dependent.  In particular,
     pose translation Jacobians acquire a growing rotation/translation lever arm
     as a forward-only trajectory moves away from the global origin.  A block
-    Jacobi congruence normalizes each 6-DoF camera block before measuring the
-    spectrum while preserving the original Hessian used to build the prior.
+    Jacobi congruence normalizes each 6-DoF camera block before measuring and
+    truncating the spectrum.  The resulting factor is mapped back to the
+    original coordinates, so the stored Hessian, gradient and FEJ points remain
+    unchanged while the numerical rank no longer depends on pose units.
     """
     if policy not in {"raw-eigenvalue", "camera-block-jacobi"}:
         raise FixedLagPriorError("prior condition estimate policy is invalid")
@@ -316,11 +320,14 @@ def _prior_condition_metrics(
     if hessian.shape[0] % 6 != 0:
         raise FixedLagPriorError("prior Hessian is not camera-block aligned")
 
-    positive_values = eigenvalues[accepted]
-    raw_rank = int(accepted.sum().item())
+    raw_positive_values = eigenvalues[raw_accepted]
+    raw_positive_vectors = eigenvectors[:, raw_accepted]
+    raw_rank = int(raw_accepted.sum().item())
     raw_nullity = int(len(eigenvalues) - raw_rank)
     raw_condition = (
-        float((positive_values.max() / positive_values.min()).item())
+        float(
+            (raw_positive_values.max() / raw_positive_values.min()).item()
+        )
         if raw_rank
         else float("inf")
     )
@@ -329,14 +336,22 @@ def _prior_condition_metrics(
         "rawRank": raw_rank,
         "rawNullity": raw_nullity,
         "rawConditionEstimate": raw_condition,
+        "selectedRank": raw_rank,
+        "selectedNullity": raw_nullity,
         "equilibratedRank": None,
         "equilibratedNullity": None,
         "equilibratedConditionEstimate": None,
         "maximumCameraBlockConditionEstimate": None,
     }
     if policy == "raw-eigenvalue":
+        factor = (
+            raw_positive_values.sqrt()[:, None] * raw_positive_vectors.T
+        )
+        factor_residual = (
+            raw_positive_vectors.T @ gradient
+        ) / raw_positive_values.sqrt()
         result["selectedConditionEstimate"] = raw_condition
-        return result
+        return factor, factor_residual, result
 
     camera_count = hessian.shape[0] // 6
     blocks = torch.stack(
@@ -354,13 +369,20 @@ def _prior_condition_metrics(
     inverse_square_root_values = torch.rsqrt(
         torch.maximum(block_values, block_floor[:, None])
     )
+    square_root_values = torch.sqrt(
+        torch.maximum(block_values, block_floor[:, None])
+    )
     whiteners = (
         block_vectors * inverse_square_root_values[:, None, :]
     ) @ block_vectors.transpose(-1, -2)
+    unwhiteners = (
+        block_vectors * square_root_values[:, None, :]
+    ) @ block_vectors.transpose(-1, -2)
     whitening = torch.block_diag(*whiteners.unbind())
+    unwhitening = torch.block_diag(*unwhiteners.unbind())
     equilibrated = whitening @ hessian @ whitening.T
     equilibrated = (equilibrated + equilibrated.T) * 0.5
-    equilibrated_values = torch.linalg.eigvalsh(equilibrated)
+    equilibrated_values, equilibrated_vectors = torch.linalg.eigh(equilibrated)
     equilibrated_maximum = equilibrated_values.max().clamp_min(
         torch.finfo(hessian.dtype).eps
     )
@@ -381,6 +403,16 @@ def _prior_condition_metrics(
         if equilibrated_rank
         else float("inf")
     )
+    equilibrated_positive_vectors = equilibrated_vectors[
+        :, equilibrated_accepted
+    ]
+    factor = (
+        equilibrated_positive.sqrt()[:, None]
+        * equilibrated_positive_vectors.T
+    ) @ unwhitening
+    factor_residual = (
+        equilibrated_positive_vectors.T @ (whitening @ gradient)
+    ) / equilibrated_positive.sqrt()
     block_accepted = block_values > block_floor[:, None]
     block_minimum = torch.where(
         block_accepted,
@@ -393,13 +425,15 @@ def _prior_condition_metrics(
             "equilibratedRank": equilibrated_rank,
             "equilibratedNullity": equilibrated_nullity,
             "equilibratedConditionEstimate": equilibrated_condition,
+            "selectedRank": equilibrated_rank,
+            "selectedNullity": equilibrated_nullity,
             "maximumCameraBlockConditionEstimate": float(
                 block_condition.max().item()
             ),
             "selectedConditionEstimate": equilibrated_condition,
         }
     )
-    return result
+    return factor, factor_residual, result
 
 
 def _validate_prior_identity(
@@ -532,37 +566,27 @@ def marginalize_pose_prior_batch(
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
-    positive_values = eigenvalues[accepted]
-    positive_vectors = eigenvectors[:, accepted]
-    factor = positive_values.sqrt()[:, None] * positive_vectors.T
-    factor_residual = (
-        positive_vectors.T @ retained_gradient
-    ) / positive_values.sqrt()
-    reconstructed_gradient = factor.T @ factor_residual
-    gradient_error = float(
-        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
-    )
-    condition_metrics = _prior_condition_metrics(
+    factor, factor_residual, condition_metrics = _prior_factorization(
         retained_hessian,
+        retained_gradient,
         eigenvalues,
+        eigenvectors,
         accepted,
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
-    rank = condition_metrics["rawRank"]
-    nullity = condition_metrics["rawNullity"]
+    reconstructed_gradient = factor.T @ factor_residual
+    gradient_error = float(
+        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
+    )
+    rank = condition_metrics["selectedRank"]
+    nullity = condition_metrics["selectedNullity"]
     condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
-    if (
-        condition_metrics["equilibratedRank"] is not None
-        and condition_metrics["equilibratedRank"] != rank
-    ):
-        status = "failed"
-        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -607,6 +631,8 @@ def marginalize_pose_prior_batch(
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
         "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawRank": condition_metrics["rawRank"],
+        "priorRawNullity": condition_metrics["rawNullity"],
         "priorRawConditionEstimate": condition_metrics[
             "rawConditionEstimate"
         ],
@@ -823,37 +849,27 @@ def marginalize_linearized_tracks(
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
-    positive_values = eigenvalues[accepted]
-    positive_vectors = eigenvectors[:, accepted]
-    factor = positive_values.sqrt()[:, None] * positive_vectors.T
-    factor_residual = (
-        positive_vectors.T @ retained_gradient
-    ) / positive_values.sqrt()
-    reconstructed_gradient = factor.T @ factor_residual
-    gradient_error = float(
-        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
-    )
-    condition_metrics = _prior_condition_metrics(
+    factor, factor_residual, condition_metrics = _prior_factorization(
         retained_hessian,
+        retained_gradient,
         eigenvalues,
+        eigenvectors,
         accepted,
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
-    rank = condition_metrics["rawRank"]
-    nullity = condition_metrics["rawNullity"]
+    reconstructed_gradient = factor.T @ factor_residual
+    gradient_error = float(
+        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
+    )
+    rank = condition_metrics["selectedRank"]
+    nullity = condition_metrics["selectedNullity"]
     condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
-    if (
-        condition_metrics["equilibratedRank"] is not None
-        and condition_metrics["equilibratedRank"] != rank
-    ):
-        status = "failed"
-        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -882,6 +898,8 @@ def marginalize_linearized_tracks(
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
         "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawRank": condition_metrics["rawRank"],
+        "priorRawNullity": condition_metrics["rawNullity"],
         "priorRawConditionEstimate": condition_metrics[
             "rawConditionEstimate"
         ],
@@ -1220,33 +1238,23 @@ def marginalize_ceres_linearization(
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
-    positive_values = eigenvalues[accepted]
-    positive_vectors = eigenvectors[:, accepted]
-    factor = positive_values.sqrt()[:, None] * positive_vectors.T
-    factor_residual = (
-        positive_vectors.T @ retained_gradient
-    ) / positive_values.sqrt()
-    condition_metrics = _prior_condition_metrics(
+    factor, factor_residual, condition_metrics = _prior_factorization(
         retained_hessian,
+        retained_gradient,
         eigenvalues,
+        eigenvectors,
         accepted,
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
-    rank = condition_metrics["rawRank"]
-    nullity = condition_metrics["rawNullity"]
+    rank = condition_metrics["selectedRank"]
+    nullity = condition_metrics["selectedNullity"]
     condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
-    if (
-        condition_metrics["equilibratedRank"] is not None
-        and condition_metrics["equilibratedRank"] != rank
-    ):
-        status = "failed"
-        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -1280,6 +1288,8 @@ def marginalize_ceres_linearization(
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
         "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawRank": condition_metrics["rawRank"],
+        "priorRawNullity": condition_metrics["rawNullity"],
         "priorRawConditionEstimate": condition_metrics[
             "rawConditionEstimate"
         ],

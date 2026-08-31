@@ -10,6 +10,7 @@ from gluemap.estimators.fixed_lag_prior import (
     marginalize_pose_prior_batch,
     marginalize_linearized_tracks,
     marginalize_ceres_linearization,
+    _prior_factorization,
 )
 from gluemap.estimators.fixed_lag_ceres_linearization import (
     CeresProblemLinearization,
@@ -237,6 +238,56 @@ def test_camera_block_jacobi_condition_gate_ignores_pose_coordinate_scale():
         equilibrated.report["priorRank"]
     )
     assert equilibrated.report["priorEquilibratedNullity"] == 1
+
+
+def test_camera_block_jacobi_factor_keeps_rank_lost_by_raw_pose_scale():
+    generator = torch.Generator().manual_seed(20260831)
+    dimension = 24
+    basis = torch.randn(
+        dimension - 1,
+        dimension,
+        generator=generator,
+        dtype=torch.float64,
+    )
+    _, _, right = torch.linalg.svd(basis, full_matrices=True)
+    base_factor = right[: dimension - 1]
+    coordinate_scale = torch.tensor(
+        [1e-4, 1e-4, 1e-4, 1e4, 1e4, 1e4] * 4,
+        dtype=torch.float64,
+    )
+    transform = torch.diag(coordinate_scale)
+    scaled_factor = base_factor @ transform
+    hessian = scaled_factor.T @ scaled_factor
+    delta = torch.randn(dimension, generator=generator, dtype=torch.float64)
+    gradient = hessian @ delta
+    eigenvalues, eigenvectors = torch.linalg.eigh(hessian)
+    accepted = eigenvalues > eigenvalues.max() * 1e-10
+
+    factor, factor_residual, metrics = _prior_factorization(
+        hessian,
+        gradient,
+        eigenvalues,
+        eigenvectors,
+        accepted,
+        relative_rank_threshold=1e-10,
+        policy="camera-block-jacobi",
+    )
+
+    assert metrics["rawNullity"] > 1
+    assert metrics["selectedRank"] == dimension - 1
+    assert metrics["selectedNullity"] == 1
+    reconstructed_hessian = factor.T @ factor
+    reconstructed_gradient = factor.T @ factor_residual
+    assert (
+        torch.linalg.vector_norm(reconstructed_hessian - hessian)
+        / torch.linalg.vector_norm(hessian)
+        < 1e-12
+    )
+    assert (
+        torch.linalg.vector_norm(reconstructed_gradient - gradient)
+        / torch.linalg.vector_norm(gradient)
+        < 1e-12
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
