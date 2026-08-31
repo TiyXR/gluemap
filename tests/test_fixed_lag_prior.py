@@ -186,6 +186,59 @@ def test_pose_only_batch_schur_matches_sequential_elimination_on_cpu():
     )
 
 
+def test_pose_only_batch_schur_removes_accumulated_scale_information():
+    camera_count = 4
+    dimension = camera_count * 6
+    linearization = torch.zeros((camera_count, 7), dtype=torch.float64)
+    linearization[:, 3] = 1.0
+    linearization[:, 4:] = torch.tensor(
+        [
+            [1.0, 0.5, -0.25],
+            [2.0, 0.75, -0.5],
+            [3.0, 1.25, -0.75],
+            [4.0, 1.5, -1.0],
+        ],
+        dtype=torch.float64,
+    )
+    scale_gauge = torch.zeros((camera_count, 6), dtype=torch.float64)
+    scale_gauge[:, 3:] = linearization[:, 4:]
+    scale_gauge = scale_gauge.reshape(-1)
+    scale_gauge /= torch.linalg.vector_norm(scale_gauge)
+    projector = torch.eye(dimension, dtype=torch.float64) - torch.outer(
+        scale_gauge, scale_gauge
+    )
+    hessian = projector + 1e-6 * torch.outer(scale_gauge, scale_gauge)
+    generator = torch.Generator().manual_seed(319655)
+    delta = torch.randn(dimension, generator=generator, dtype=torch.float64)
+    gradient = hessian @ delta
+    values, vectors = torch.linalg.eigh(hessian)
+    factor = values.sqrt()[:, None] * vectors.T
+    prior = FejPriorState(
+        camera_ids=(10, 11, 12, 13),
+        linearization_points=linearization,
+        hessian=hessian,
+        gradient=gradient,
+        factor=factor,
+        factor_residual=(vectors.T @ gradient) / values.sqrt(),
+        report={},
+    )
+
+    result = marginalize_pose_prior_batch(
+        prior,
+        eliminate_camera_ids=(10,),
+        device_policy="cpu",
+        relative_rank_threshold=1e-10,
+        maximum_condition_estimate=1e8,
+        condition_estimate_policy="camera-block-jacobi",
+        expected_nullity=1,
+    )
+
+    assert result.report["status"] == "passed"
+    assert result.report["scaleGaugeProjectionApplied"] is True
+    assert result.report["priorNullity"] == 1
+    assert result.report["reasonCodes"] == []
+
+
 def test_camera_block_jacobi_condition_gate_ignores_pose_coordinate_scale():
     prior = _pose_only_batch_fixture(camera_count=4)
     coordinate_scale = torch.ones(24, dtype=torch.float64)

@@ -563,6 +563,39 @@ def marginalize_pose_prior_batch(
     retained_gradient = g_r - h_mr.T @ inverse_mm @ g_m
     retained_hessian = (retained_hessian + retained_hessian.T) * 0.5
 
+    retained_camera_ids = tuple(
+        camera_ids[index] for index in retained_indexes
+    )
+    retained_points = linearization[
+        torch.as_tensor(retained_indexes, dtype=torch.int64, device=device)
+    ].contiguous()
+    scale_gauge = torch.zeros_like(retained_gradient).view(-1, 6)
+    scale_gauge[:, 3:] = retained_points[:, 4:]
+    scale_gauge = scale_gauge.reshape(-1)
+    scale_gauge_norm = torch.linalg.vector_norm(scale_gauge)
+    scale_projection_applied = bool(
+        expected_nullity == 1
+        and scale_gauge_norm > torch.finfo(dtype).eps
+    )
+    removed_scale_gradient = 0.0
+    if scale_projection_applied:
+        scale_gauge /= scale_gauge_norm
+        hessian_scale = retained_hessian @ scale_gauge
+        scale_information = scale_gauge @ hessian_scale
+        retained_hessian = (
+            retained_hessian
+            - torch.outer(hessian_scale, scale_gauge)
+            - torch.outer(scale_gauge, hessian_scale)
+            + scale_information * torch.outer(scale_gauge, scale_gauge)
+        )
+        removed_scale_gradient = float(
+            (scale_gauge @ retained_gradient).detach().cpu().item()
+        )
+        retained_gradient = (
+            retained_gradient - scale_gauge * (scale_gauge @ retained_gradient)
+        )
+        retained_hessian = (retained_hessian + retained_hessian.T) * 0.5
+
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
@@ -596,12 +629,6 @@ def marginalize_pose_prior_batch(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     wall = time.perf_counter() - started
-    retained_camera_ids = tuple(
-        camera_ids[index] for index in retained_indexes
-    )
-    retained_points = linearization[
-        torch.as_tensor(retained_indexes, dtype=torch.int64, device=device)
-    ].contiguous()
     single_pose = len(eliminated_ids) == 1
     terminal_solve_mode = (
         "prior-only-schur" if single_pose else "prior-only-batch-schur"
@@ -647,6 +674,8 @@ def marginalize_pose_prior_batch(
             "maximumCameraBlockConditionEstimate"
         ],
         "factorGradientMaximumAbsoluteError": gradient_error,
+        "scaleGaugeProjectionApplied": scale_projection_applied,
+        "scaleGaugeRemovedGradient": removed_scale_gradient,
         "cpuSparseNormalWallSeconds": 0.0,
         "resolvedSchurWallSeconds": wall,
         "pointSchurMicrobatchPoints": 0,
