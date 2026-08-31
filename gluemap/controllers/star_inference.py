@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
@@ -20,6 +21,17 @@ if TYPE_CHECKING:
     from gluemap.datasets.star import BaseStarDataset
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CudaEventInterval:
+    """One GPU timing interval resolved after the output D2H boundary."""
+
+    started: torch.cuda.Event
+    finished: torch.cuda.Event
+
+    def elapsed_seconds(self) -> float:
+        return float(self.started.elapsed_time(self.finished)) / 1000.0
 
 
 def resolve_pi3_sdpa_backend(device: str | torch.device) -> str:
@@ -96,6 +108,13 @@ class BatchInferenceStar:
         self.dtype = dtype
         self.defer_output_to_sink = defer_output_to_sink
         self.synchronization_count = 0
+        self.timing_backend = (
+            "cuda-event-d2h-drain/v1"
+            if defer_output_to_sink
+            and torch.cuda.is_available()
+            and torch.device(device).type == "cuda"
+            else "synchronized-perf-counter/v1"
+        )
         self.resolved_attention_backend = (
             resolve_pi3_sdpa_backend(device)
             if model_type == "pi3"
@@ -126,6 +145,26 @@ class BatchInferenceStar:
             self.synchronization_count = (
                 getattr(self, "synchronization_count", 0) + 1
             )
+
+    def _timing_started(self) -> float | torch.cuda.Event:
+        if (
+            getattr(self, "timing_backend", "synchronized-perf-counter/v1")
+            != "cuda-event-d2h-drain/v1"
+        ):
+            return time.perf_counter()
+        started = torch.cuda.Event(enable_timing=True)
+        started.record()
+        return started
+
+    def _timing_finished(
+        self, started: float | torch.cuda.Event
+    ) -> float | CudaEventInterval:
+        if isinstance(started, float):
+            self._synchronize()
+            return time.perf_counter() - started
+        finished = torch.cuda.Event(enable_timing=True)
+        finished.record()
+        return CudaEventInterval(started, finished)
 
     def main(
         self,
@@ -158,7 +197,7 @@ class BatchInferenceStar:
             include_track=include_track,
         )
 
-        covisibility_started = time.perf_counter()
+        covisibility_started = self._timing_started()
         (
             extrinsics,
             intrinsics,
@@ -171,8 +210,7 @@ class BatchInferenceStar:
             batch["indexes"],
             batch["images_change"],
         )
-        self._synchronize()
-        covisibility_time = time.perf_counter() - covisibility_started
+        covisibility_time = self._timing_finished(covisibility_started)
 
         result_dict = {
             "indexes": batch["indexes"][0].tolist(),
@@ -222,7 +260,11 @@ class BatchInferenceStar:
         batch: dict,
         use_dummy_tracks: bool = False,
         include_track: bool = True,
-    ) -> tuple[dict, float, float]:
+    ) -> tuple[
+        dict,
+        float | CudaEventInterval,
+        float | CudaEventInterval,
+    ]:
         """Run local + track inference.
 
         Returns ``(predictions, forward_time, track_time)``.
@@ -234,7 +276,7 @@ class BatchInferenceStar:
             )
 
         # Local inference (timed)
-        t0 = time.perf_counter()
+        forward_started = self._timing_started()
         compatibility = (
             pi3_sdpa_compatibility(self.device)
             if self.model_type == "pi3"
@@ -243,8 +285,7 @@ class BatchInferenceStar:
         with compatibility as attention_backend:
             predictions = self.local_inference.predict(batch)
         self.resolved_attention_backend = attention_backend
-        self._synchronize()
-        forward_time = time.perf_counter() - t0
+        forward_time = self._timing_finished(forward_started)
 
         # Track inference
         track_preds, track_time = self._run_track_inference(
@@ -259,18 +300,17 @@ class BatchInferenceStar:
         batch: dict,
         use_dummy_tracks: bool,
         include_track: bool,
-    ) -> tuple[dict, float]:
+    ) -> tuple[dict, float | CudaEventInterval]:
         """Returns (track_preds_dict, track_time)."""
         if not include_track:
             return {}, 0.0
 
-        t0 = time.perf_counter()
+        tracking_started = self._timing_started()
         track_preds = self.track_inference.predict(
             batch=batch,
             use_dummy_tracks=use_dummy_tracks,
         )
-        self._synchronize()
-        track_time = time.perf_counter() - t0
+        track_time = self._timing_finished(tracking_started)
         return track_preds, track_time
 
 

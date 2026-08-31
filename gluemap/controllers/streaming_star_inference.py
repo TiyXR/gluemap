@@ -11,7 +11,10 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader, default_collate
 
-from gluemap.controllers.star_inference import StarInferencePipeline
+from gluemap.controllers.star_inference import (
+    CudaEventInterval,
+    StarInferencePipeline,
+)
 
 
 class StreamingStarInferenceError(ValueError):
@@ -121,6 +124,13 @@ def move_output_to_cpu(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(move_output_to_cpu(item) for item in value)
     return value
+
+
+def resolve_deferred_timing(value: Any) -> float:
+    """Resolve CUDA-event timing after the batch output has reached CPU."""
+    if isinstance(value, CudaEventInterval):
+        return value.elapsed_seconds()
+    return float(value)
 
 
 def _slice_batched_output(value: Any, index: int, batch_size: int) -> Any:
@@ -280,16 +290,6 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                     output, timings = self._run_batch_step(
                         batch_inference, batch
                     )
-                    batch_seconds.append(time.perf_counter() - batch_started)
-                    forward_seconds.append(
-                        float(timings.get("forward_times", 0.0))
-                    )
-                    tracking_seconds.append(
-                        float(timings.get("tracking_times", 0.0))
-                    )
-                    covisibility_seconds.append(
-                        float(timings.get("covisibility_times", 0.0))
-                    )
                     covisibility_report = timings.get("covisibility_reports")
                     if (
                         isinstance(covisibility_report, dict)
@@ -305,8 +305,24 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
 
                     transfer_started = time.perf_counter()
                     cpu_batch_output = move_output_to_cpu(output)
+                    batch_seconds.append(time.perf_counter() - batch_started)
                     transfer_elapsed = time.perf_counter() - transfer_started
                     output_transfer_seconds.append(transfer_elapsed)
+                    forward_seconds.append(
+                        resolve_deferred_timing(
+                            timings.get("forward_times", 0.0)
+                        )
+                    )
+                    tracking_seconds.append(
+                        resolve_deferred_timing(
+                            timings.get("tracking_times", 0.0)
+                        )
+                    )
+                    covisibility_seconds.append(
+                        resolve_deferred_timing(
+                            timings.get("covisibility_times", 0.0)
+                        )
+                    )
                     sink_started = time.perf_counter()
                     for batch_index, center in enumerate(centers):
                         cpu_output = _slice_batched_output(
@@ -488,6 +504,15 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                 for value in sorted(set(context_microbatch_sizes))
             },
             "modelLoadCount": 1,
+            "timingBackend": getattr(
+                batch_inference,
+                "timing_backend",
+                "synchronized-perf-counter/v1",
+            ),
+            "outputTransferIncludesGpuDrain": bool(
+                getattr(batch_inference, "timing_backend", "")
+                == "cuda-event-d2h-drain/v1"
+            ),
             "modelLoadSeconds": model_load_seconds,
             "frontendRunSeconds": time.perf_counter() - run_started,
             "inferenceSeconds": sum(batch_seconds),

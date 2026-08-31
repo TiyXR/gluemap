@@ -9,6 +9,7 @@ from torch.utils.data import IterableDataset
 
 from gluemap.controllers.star_inference import (
     BatchInferenceStar,
+    CudaEventInterval,
     pi3_sdpa_compatibility,
     resolve_pi3_sdpa_backend,
 )
@@ -16,6 +17,7 @@ from gluemap.controllers.streaming_star_inference import (
     StreamingStarInferenceError,
     StreamingStarInferencePipeline,
     move_output_to_cpu,
+    resolve_deferred_timing,
 )
 
 
@@ -162,6 +164,17 @@ def test_recursive_output_detach_keeps_structure():
     assert moved["a"][1][0].tolist() == [2]
 
 
+def test_deferred_cuda_timing_resolves_after_output_transfer():
+    class FakeEvent:
+        def elapsed_time(self, finished):
+            assert finished == "finished"
+            return 1250.0
+
+    interval = CudaEventInterval(FakeEvent(), "finished")
+    assert resolve_deferred_timing(interval) == 1.25
+    assert resolve_deferred_timing(0.5) == 0.5
+
+
 def test_star_output_binds_working_and_original_image_shapes():
     pipeline = BatchInferenceStar.__new__(BatchInferenceStar)
     predictions = {
@@ -249,6 +262,7 @@ def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
         "jarailsense.gluemap-streaming-frontend-profile/v1"
     )
     assert report["modelLoadCount"] == 1
+    assert report["timingBackend"] == "synchronized-perf-counter/v1"
     assert report["pi3EncoderUniqueFrameCount"] == 2
     assert report["pi3EncoderInvocationFrameCount"] == 4
     assert report["duplicateEncoderFrameInvocationCount"] == 2
