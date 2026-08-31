@@ -122,7 +122,7 @@ class SchurFejWindowRunner:
             or frame_ids != sorted(set(frame_ids))
             or self.fixed_gauge_frame_id not in frame_ids
             or isinstance(solve_every_advances, bool)
-            or not 1 <= solve_every_advances <= 8
+            or solve_every_advances < 1
         ):
             raise SchurFejWindowRunnerError(
                 "Schur/FEJ frame ordering or gauge is invalid"

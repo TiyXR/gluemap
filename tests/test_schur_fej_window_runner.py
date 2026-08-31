@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from gluemap.estimators.active_track_store import (
     SelectedTrackState,
@@ -178,6 +179,29 @@ def test_batched_window_drops_the_previous_finalized_batch():
         f"frame-{value}" for value in second_ids
     ]
     assert second.report["minimumConstraintCount"] == 64
+
+
+def test_large_batched_window_is_bounded_by_the_active_body_not_a_fixed_cap():
+    class _AcceptedBatchProbe:
+        def solve(self, *_args, **_kwargs):
+            raise RuntimeError("large batch accepted")
+
+    runner = SchurFejWindowRunner(
+        fixed_gauge_frame_id=0,
+        coarse_solver=_AcceptedBatchProbe(),
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    first_ids = list(range(33))
+
+    with pytest.raises(RuntimeError, match="large batch accepted"):
+        runner.advance_batch(
+            {}, first_ids, [], solve_every_advances=16
+        )
 
 
 def test_terminal_drain_finalizes_every_retained_body_pose_on_cuda():
