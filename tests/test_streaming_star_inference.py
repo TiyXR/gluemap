@@ -31,6 +31,7 @@ class FakeDataset(IterableDataset):
         for center in range(2):
             yield {
                 "star_indexes": center,
+                "indexes": torch.tensor([center, 1 - center]),
                 "value": torch.tensor([float(center)]),
             }
 
@@ -161,6 +162,43 @@ def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
     assert report["saladLoadCount"] == 0
     assert report["peakResidentFrames"] == 3
     assert report["releasedFrameCount"] == 2
+    assert report["profileContractId"] == (
+        "jarailsense.gluemap-streaming-frontend-profile/v1"
+    )
+    assert report["modelLoadCount"] == 1
+    assert report["pi3EncoderUniqueFrameCount"] == 2
+    assert report["pi3EncoderInvocationFrameCount"] == 4
+    assert report["duplicateEncoderFrameInvocationCount"] == 2
+    assert report["hotPathEmptyCacheCount"] == 0
+    assert report["timingSummary"]["forward"]["count"] == 2
+    assert sum(value["starCount"] for value in report["cudaTimeline"]) == 2
+
+
+def test_timing_summary_reports_linear_percentiles():
+    from gluemap.controllers.streaming_star_inference import timing_summary
+
+    summary = timing_summary([1.0, 2.0, 3.0, 4.0])
+    assert summary["count"] == 4
+    assert summary["totalSeconds"] == 10.0
+    assert summary["p50Seconds"] == 2.5
+    assert summary["p95Seconds"] == 3.85
+
+
+def test_streaming_profile_reads_live_cuda_counters():
+    if not torch.cuda.is_available():
+        return
+    pipeline = FakePipeline(
+        args(), 1, 0, file_name="unused.pth", device="cuda:0"
+    )
+    report = pipeline.run_to_sink(
+        FakeDataset(), lambda _center, _output: None
+    )
+    assert report["device"] == "cuda:0"
+    assert report["streamSynchronizationCount"] == 4
+    assert report["synchronizationCount"] == 4
+    assert report["peakCudaAllocatedBytes"] >= 0
+    assert report["peakCudaReservedBytes"] >= 0
+    assert len(report["cudaTimeline"]) >= 1
 
 
 def test_streaming_pipeline_rejects_distributed_execution():

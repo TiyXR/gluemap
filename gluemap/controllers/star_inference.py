@@ -88,6 +88,7 @@ class BatchInferenceStar:
         self.model_track = model_track
         self.device = device
         self.dtype = dtype
+        self.synchronization_count = 0
         self.resolved_attention_backend = (
             resolve_pi3_sdpa_backend(device)
             if model_type == "pi3"
@@ -99,6 +100,14 @@ class BatchInferenceStar:
         )
         self.track_inference = TrackInference(model_track, device)
         self.covisibility_extraction = CovisibilityExtraction()
+
+    def _synchronize(self) -> None:
+        device = getattr(self, "device", "cpu")
+        if torch.cuda.is_available() and str(device).startswith("cuda"):
+            torch.cuda.synchronize(device)
+            self.synchronization_count = (
+                getattr(self, "synchronization_count", 0) + 1
+            )
 
     def main(
         self,
@@ -131,6 +140,8 @@ class BatchInferenceStar:
             include_track=include_track,
         )
 
+        self._synchronize()
+        covisibility_started = time.perf_counter()
         (
             extrinsics,
             intrinsics,
@@ -143,6 +154,8 @@ class BatchInferenceStar:
             batch["indexes"],
             batch["images_change"],
         )
+        self._synchronize()
+        covisibility_time = time.perf_counter() - covisibility_started
 
         result_dict = {
             "indexes": batch["indexes"][0].tolist(),
@@ -160,6 +173,7 @@ class BatchInferenceStar:
             "valid_virtual": valid_virtual,
             "_forward_time": forward_time,
             "_track_time": track_time,
+            "_covisibility_time": covisibility_time,
         }
 
         if include_track:
@@ -187,7 +201,7 @@ class BatchInferenceStar:
             )
 
         # Local inference (timed)
-        torch.cuda.synchronize()
+        self._synchronize()
         t0 = time.perf_counter()
         compatibility = (
             pi3_sdpa_compatibility(self.device)
@@ -197,7 +211,7 @@ class BatchInferenceStar:
         with compatibility as attention_backend:
             predictions = self.local_inference.predict(batch)
         self.resolved_attention_backend = attention_backend
-        torch.cuda.synchronize()
+        self._synchronize()
         forward_time = time.perf_counter() - t0
 
         # Track inference
@@ -218,13 +232,13 @@ class BatchInferenceStar:
         if not include_track:
             return {}, 0.0
 
-        torch.cuda.synchronize()
+        self._synchronize()
         t0 = time.perf_counter()
         track_preds = self.track_inference.predict(
             batch=batch,
             use_dummy_tracks=use_dummy_tracks,
         )
-        torch.cuda.synchronize()
+        self._synchronize()
         track_time = time.perf_counter() - t0
         return track_preds, track_time
 
@@ -281,6 +295,7 @@ class StarInferencePipeline(BaseInferencePipeline):
         extras = {
             "forward_times": outputs.pop("_forward_time", 0.0),
             "tracking_times": outputs.pop("_track_time", 0.0),
+            "covisibility_times": outputs.pop("_covisibility_time", 0.0),
         }
         return outputs, extras
 
@@ -323,9 +338,11 @@ class StarInferencePipeline(BaseInferencePipeline):
     ) -> str:
         forward_times = extra_timings.get("forward_times", [])
         tracking_times = extra_timings.get("tracking_times", [])
+        covisibility_times = extra_timings.get("covisibility_times", [])
         return (
             f", forward={sum(forward_times):.2f}s, "
-            f"tracking={sum(tracking_times):.2f}s"
+            f"tracking={sum(tracking_times):.2f}s, "
+            f"covisibility={sum(covisibility_times):.2f}s"
         )
 
 
