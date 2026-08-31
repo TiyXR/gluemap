@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 
 from gluemap.estimators.track_inference import (
-    TrackInference,
     TrackerCoarseFeatureCache,
+    TrackInference,
 )
 
 
@@ -55,6 +55,30 @@ def test_tracker_feature_cache_is_bounded():
     assert report["evictionCount"] == 1
 
 
+def test_context_microbatch_deduplicates_overlapping_tracker_inputs():
+    model = FakeTracker()
+    cache = TrackerCoarseFeatureCache(model, 4, "cuda:0")
+    batched_images = torch.cat(
+        [images([1.0, 2.0, 3.0]), images([2.0, 3.0, 4.0])], dim=0
+    )
+
+    features = cache.features(
+        model,
+        batched_images,
+        [["a", "b", "c"], ["b", "c", "d"]],
+    )
+
+    assert features[:, :, 0, 0, 0].tolist() == [
+        [1.0, 2.0, 3.0],
+        [2.0, 3.0, 4.0],
+    ]
+    report = cache.report()
+    assert model.extracted_frame_count == 4
+    assert report["requestedFrameCount"] == 6
+    assert report["cacheMissCount"] == 4
+    assert report["microbatchReuseCount"] == 2
+
+
 def test_collated_frame_uids_remain_stable_tracker_cache_keys():
     assert TrackInference._frame_uids(
         {"frame_uids": [("frame-a",), ("frame-b",)]}, 2
@@ -62,3 +86,10 @@ def test_collated_frame_uids_remain_stable_tracker_cache_keys():
     assert TrackInference._frame_uids(
         {"indexes": torch.tensor([[4, 5]])}, 2
     ) == ["geometry-4", "geometry-5"]
+    assert TrackInference._frame_uids(
+        {
+            "images": torch.zeros((2, 2, 3, 4, 4)),
+            "frame_uids": [("frame-a", "frame-b"), ("frame-c", "frame-d")],
+        },
+        2,
+    ) == [["frame-a", "frame-c"], ["frame-b", "frame-d"]]

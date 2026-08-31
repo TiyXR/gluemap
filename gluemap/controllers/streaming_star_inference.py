@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch.utils.data import DataLoader, default_collate
 
 from gluemap.controllers.star_inference import StarInferencePipeline
 
@@ -54,6 +55,7 @@ class CudaTimeline:
         self,
         *,
         elapsed_seconds: float,
+        star_count: int,
         frame_invocations: int,
         data_wait_seconds: float,
         inference_seconds: float,
@@ -85,7 +87,7 @@ class CudaTimeline:
                 "peakCudaReservedBytes": 0,
             },
         )
-        bucket["starCount"] += 1
+        bucket["starCount"] += star_count
         bucket["frameInvocationCount"] += frame_invocations
         for key, value in (
             ("dataWaitSeconds", data_wait_seconds),
@@ -121,6 +123,29 @@ def move_output_to_cpu(value: Any) -> Any:
     return value
 
 
+def _slice_batched_output(value: Any, index: int, batch_size: int) -> Any:
+    if (
+        isinstance(value, torch.Tensor)
+        and value.ndim > 0
+        and value.shape[0] == batch_size
+    ):
+        return value[index : index + 1]
+    if isinstance(value, dict):
+        return {
+            key: _slice_batched_output(item, index, batch_size)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _slice_batched_output(item, index, batch_size) for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _slice_batched_output(item, index, batch_size) for item in value
+        )
+    return value
+
+
 class StreamingStarInferencePipeline(StarInferencePipeline):
     """Run center-ordered Star inference without retaining whole-video output.
 
@@ -133,6 +158,14 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.synchronize(self.device)
             self._stream_synchronization_count += 1
+
+    def _make_dataloader(self, dataset: Any) -> DataLoader:
+        return DataLoader(
+            dataset,
+            batch_size=None,
+            num_workers=0,
+            pin_memory=False,
+        )
 
     def run_to_sink(
         self,
@@ -170,6 +203,13 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             )
 
         data_loader = self._make_dataloader(dataset)
+        context_microbatch_size = int(
+            getattr(self.args, "context_microbatch_size", 1)
+        )
+        if context_microbatch_size < 1:
+            raise StreamingStarInferenceError(
+                "context microbatch size must be positive"
+            )
         self._stream_synchronization_count = 0
         if torch.cuda.is_available() and str(self.device).startswith("cuda"):
             torch.cuda.init()
@@ -178,9 +218,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         load_started = time.perf_counter()
         models = self._load_models()
         model_load_seconds = time.perf_counter() - load_started
-        loaded_model_keys = sorted(
-            key for key in models if key != "mv"
-        )
+        loaded_model_keys = sorted(key for key in models if key != "mv")
         if any(key in {"salad", "dg", "faiss"} for key in loaded_model_keys):
             raise StreamingStarInferenceError(
                 "G0 Star streaming loaded a retrieval or Doppelgangers model"
@@ -198,6 +236,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         sink_seconds: list[float] = []
         unique_frame_indexes: set[int] = set()
         frame_invocation_count = 0
+        context_microbatch_sizes: list[int] = []
         cuda_timeline = CudaTimeline()
         run_started = time.perf_counter()
         wait_started = time.perf_counter()
@@ -209,23 +248,33 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         )
         try:
             with torch.no_grad():
-                for batch in data_loader:
+                pending_items: list[dict[str, Any]] = []
+                pending_view_count: int | None = None
+
+                def process_pending() -> None:
+                    nonlocal \
+                        expected_center, \
+                        frame_invocation_count, \
+                        wait_started
+                    if not pending_items:
+                        return
+                    batch = default_collate(pending_items)
                     batch_ready = time.perf_counter()
                     data_wait = batch_ready - wait_started
                     data_wait_seconds.append(data_wait)
-                    center_value = batch[self._index_key]
-                    if (
-                        not isinstance(center_value, torch.Tensor)
-                        or center_value.numel() != 1
-                    ):
+                    center_values = batch[self._index_key]
+                    if not isinstance(center_values, torch.Tensor):
                         raise StreamingStarInferenceError(
-                            "streaming Star batch must contain one center"
+                            "streaming Star batch centers must be a tensor"
                         )
-                    center = int(center_value.item())
-                    if center != expected_center:
+                    centers = [int(value) for value in center_values.flatten()]
+                    if centers != list(
+                        range(expected_center, expected_center + len(centers))
+                    ):
                         raise StreamingStarInferenceError(
                             "streaming Star centers are not contiguous"
                         )
+                    context_microbatch_sizes.append(len(centers))
 
                     batch_started = time.perf_counter()
                     output, timings = self._run_batch_step(
@@ -247,25 +296,34 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                         and covisibility_report
                     ):
                         covisibility_reports.append(covisibility_report)
-                    raw_indexes = output.get("indexes", batch.get("indexes"))
-                    if isinstance(raw_indexes, torch.Tensor):
-                        indexes = [
-                            int(value)
-                            for value in raw_indexes.flatten().tolist()
-                        ]
-                    elif isinstance(raw_indexes, (list, tuple)):
-                        indexes = [int(value) for value in raw_indexes]
-                    else:
-                        indexes = [center]
+                    raw_indexes = batch.get("indexes")
+                    indexes = [
+                        int(value) for value in raw_indexes.flatten().tolist()
+                    ]
                     unique_frame_indexes.update(indexes)
                     frame_invocation_count += len(indexes)
 
                     transfer_started = time.perf_counter()
-                    cpu_output = move_output_to_cpu(output)
+                    cpu_batch_output = move_output_to_cpu(output)
                     transfer_elapsed = time.perf_counter() - transfer_started
                     output_transfer_seconds.append(transfer_elapsed)
                     sink_started = time.perf_counter()
-                    sink(center, cpu_output)
+                    for batch_index, center in enumerate(centers):
+                        cpu_output = _slice_batched_output(
+                            cpu_batch_output, batch_index, len(centers)
+                        )
+                        cpu_output["indexes"] = batch["indexes"][
+                            batch_index
+                        ].tolist()
+                        if "images_shape_ori" in batch:
+                            cpu_output["images_shape_ori"] = batch[
+                                "images_shape_ori"
+                            ][batch_index].tolist()
+                        if "images_change" in batch:
+                            cpu_output["images_change"] = batch[
+                                "images_change"
+                            ][batch_index].tolist()
+                        sink(center, cpu_output)
                     sink_elapsed = time.perf_counter() - sink_started
                     sink_seconds.append(sink_elapsed)
                     allocated_bytes = 0
@@ -281,6 +339,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                         )
                     cuda_timeline.add(
                         elapsed_seconds=time.perf_counter() - run_started,
+                        star_count=len(centers),
                         frame_invocations=len(indexes),
                         data_wait_seconds=data_wait,
                         inference_seconds=batch_seconds[-1],
@@ -292,8 +351,25 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                         allocated_bytes=allocated_bytes,
                         reserved_bytes=reserved_bytes,
                     )
-                    expected_center += 1
+                    expected_center += len(centers)
                     wait_started = time.perf_counter()
+
+                for item in data_loader:
+                    raw_indexes = item.get("indexes")
+                    view_count = int(len(raw_indexes))
+                    if pending_items and (
+                        view_count != pending_view_count
+                        or len(pending_items) >= context_microbatch_size
+                    ):
+                        process_pending()
+                        pending_items = []
+                    pending_items.append(item)
+                    pending_view_count = view_count
+                    if len(pending_items) >= context_microbatch_size:
+                        process_pending()
+                        pending_items = []
+                        pending_view_count = None
+                process_pending()
         finally:
             self._release_models()
 
@@ -330,9 +406,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         if local_inference is not None and hasattr(
             local_inference, "encoder_token_cache_report"
         ):
-            token_cache_report = (
-                local_inference.encoder_token_cache_report()
-            )
+            token_cache_report = local_inference.encoder_token_cache_report()
         actual_encoder_invocations = (
             int(token_cache_report["encodedFrameCount"])
             if token_cache_report is not None
@@ -376,7 +450,10 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             covisibility_graph_report = {
                 "contractId": "jarailsense.gluemap-covisibility-run/v1",
                 **identity,
-                "starCount": len(covisibility_reports),
+                "starCount": sum(
+                    int(report.get("batchCount", 1))
+                    for report in covisibility_reports
+                ),
                 "evaluatedDirectedPairCount": sum(
                     int(report["evaluatedDirectedPairCount"])
                     for report in covisibility_reports
@@ -398,6 +475,18 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         return {
             "profileContractId": PROFILE_CONTRACT_ID,
             "starCount": expected_center,
+            "contextBatchCount": len(context_microbatch_sizes),
+            "contextMicrobatchSize": context_microbatch_size,
+            "peakContextMicrobatchSize": max(
+                context_microbatch_sizes, default=0
+            ),
+            "overlappingContextCount": sum(
+                max(0, value - 1) for value in context_microbatch_sizes
+            ),
+            "contextMicrobatchHistogram": {
+                str(value): context_microbatch_sizes.count(value)
+                for value in sorted(set(context_microbatch_sizes))
+            },
             "modelLoadCount": 1,
             "modelLoadSeconds": model_load_seconds,
             "frontendRunSeconds": time.perf_counter() - run_started,
@@ -425,8 +514,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             "trackerFeatureCache": tracker_feature_cache_report,
             "covisibilityGraph": covisibility_graph_report,
             "synchronizationCount": (
-                self._stream_synchronization_count
-                + batch_synchronization_count
+                self._stream_synchronization_count + batch_synchronization_count
             ),
             "streamSynchronizationCount": self._stream_synchronization_count,
             "batchSynchronizationCount": batch_synchronization_count,

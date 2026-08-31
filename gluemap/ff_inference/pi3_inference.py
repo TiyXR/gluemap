@@ -35,7 +35,9 @@ class Pi3EncoderTokenCache:
         dtype: torch.dtype,
     ) -> None:
         if capacity_frames < 1:
-            raise ValueError("Pi3 encoder token cache capacity must be positive")
+            raise ValueError(
+                "Pi3 encoder token cache capacity must be positive"
+            )
         self.model_identity = (
             f"{model.__class__.__module__}.{model.__class__.__qualname__}:"
             f"{id(model)}"
@@ -51,6 +53,7 @@ class Pi3EncoderTokenCache:
         self.miss_count = 0
         self.encoded_frame_count = 0
         self.eviction_count = 0
+        self.microbatch_reuse_count = 0
         self.peak_entry_count = 0
         self.peak_logical_bytes = 0
 
@@ -71,53 +74,79 @@ class Pi3EncoderTokenCache:
         self,
         model: torch.nn.Module,
         images: torch.Tensor,
-        frame_uids: list[str],
+        frame_uids: list[str] | list[list[str]],
     ):
-        if images.ndim != 5 or images.shape[0] != 1:
-            raise ValueError("Pi3 token cache currently requires batch size one")
-        if images.shape[1] != len(frame_uids):
-            raise ValueError("Pi3 token cache frame UID count differs")
-        if images.shape[1] > self.capacity_frames:
+        if images.ndim != 5:
+            raise ValueError("Pi3 token cache requires B,N,C,H,W images")
+        batch_size, frame_count = images.shape[:2]
+        if frame_uids and isinstance(frame_uids[0], str):
+            uid_rows = [list(frame_uids)]
+        else:
+            uid_rows = [list(row) for row in frame_uids]
+        if len(uid_rows) != batch_size or any(
+            len(row) != frame_count for row in uid_rows
+        ):
+            raise ValueError("Pi3 token cache frame UID shape differs")
+        if frame_count > self.capacity_frames:
             raise ValueError("Pi3 context exceeds encoder token cache capacity")
 
         height, width = int(images.shape[-2]), int(images.shape[-1])
-        keys = [self._key(value, height, width) for value in frame_uids]
-        context_tokens: list[torch.Tensor | None] = [None] * len(keys)
-        missing_positions: list[int] = []
-        self.requested_frame_count += len(keys)
-        for position, key in enumerate(keys):
-            token = self._entries.pop(key, None)
-            if token is None:
-                self.miss_count += 1
-                missing_positions.append(position)
-            else:
-                self.hit_count += 1
-                self._entries[key] = token
-                context_tokens[position] = token
+        key_rows = [
+            [self._key(value, height, width) for value in row]
+            for row in uid_rows
+        ]
+        context_tokens: list[list[torch.Tensor | None]] = [
+            [None] * frame_count for _ in range(batch_size)
+        ]
+        missing: OrderedDict[EncoderTokenKey, tuple[int, int]] = OrderedDict()
+        pending_positions: dict[EncoderTokenKey, list[tuple[int, int]]] = {}
+        self.requested_frame_count += batch_size * frame_count
+        for batch_index, keys in enumerate(key_rows):
+            for frame_index, key in enumerate(keys):
+                token = self._entries.pop(key, None)
+                if token is not None:
+                    self.hit_count += 1
+                    self._entries[key] = token
+                    context_tokens[batch_index][frame_index] = token
+                elif key in missing:
+                    self.microbatch_reuse_count += 1
+                    pending_positions[key].append((batch_index, frame_index))
+                else:
+                    self.miss_count += 1
+                    missing[key] = (batch_index, frame_index)
+                    pending_positions[key] = [(batch_index, frame_index)]
 
-        if missing_positions:
-            missing_images = images[:, missing_positions].contiguous()
+        if missing:
+            missing_images = torch.stack(
+                [
+                    images[batch_index, frame_index]
+                    for batch_index, frame_index in missing.values()
+                ],
+                dim=0,
+            ).unsqueeze(0)
             encoded = model.encode_frames(missing_images)
-            if encoded.tokens.shape[1] != len(missing_positions):
-                raise ValueError("Pi3 encoder returned an unexpected frame count")
-            self.encoded_frame_count += len(missing_positions)
-            for encoded_position, context_position in enumerate(
-                missing_positions
-            ):
+            if encoded.tokens.shape[1] != len(missing):
+                raise ValueError(
+                    "Pi3 encoder returned an unexpected frame count"
+                )
+            self.encoded_frame_count += len(missing)
+            for encoded_position, key in enumerate(missing):
                 token = encoded.tokens[
                     :, encoded_position : encoded_position + 1
                 ]
-                key = keys[context_position]
                 self._entries[key] = token
-                context_tokens[context_position] = token
+                for batch_index, frame_index in pending_positions[key]:
+                    context_tokens[batch_index][frame_index] = token
                 while len(self._entries) > self.capacity_frames:
                     self._entries.popitem(last=False)
                     self.eviction_count += 1
 
-        if any(value is None for value in context_tokens):
+        if any(value is None for row in context_tokens for value in row):
             raise RuntimeError("Pi3 token cache failed to assemble a context")
-        tokens = torch.cat(context_tokens, dim=1)
-        encoded_type = type(encoded) if missing_positions else None
+        tokens = torch.cat(
+            [torch.cat(row, dim=1) for row in context_tokens], dim=0
+        )
+        encoded_type = type(encoded) if missing else None
         if encoded_type is None:
             from pi3.models.pi3 import Pi3EncodedFrames
 
@@ -127,16 +156,12 @@ class Pi3EncoderTokenCache:
             image_height=height,
             image_width=width,
         )
-        self.peak_entry_count = max(
-            self.peak_entry_count, len(self._entries)
-        )
+        self.peak_entry_count = max(self.peak_entry_count, len(self._entries))
         logical_bytes = sum(
             value.numel() * value.element_size()
             for value in self._entries.values()
         )
-        self.peak_logical_bytes = max(
-            self.peak_logical_bytes, logical_bytes
-        )
+        self.peak_logical_bytes = max(self.peak_logical_bytes, logical_bytes)
         return result
 
     def report(self) -> dict[str, int | float | str]:
@@ -147,6 +172,7 @@ class Pi3EncoderTokenCache:
             "requestedFrameCount": requests,
             "cacheHitCount": self.hit_count,
             "cacheMissCount": self.miss_count,
+            "microbatchReuseCount": self.microbatch_reuse_count,
             "encodedFrameCount": self.encoded_frame_count,
             "evictionCount": self.eviction_count,
             "residentFrameCount": len(self._entries),
@@ -183,26 +209,42 @@ class Pi3LocalInference(LocalInference):
         )
 
     @staticmethod
-    def _frame_uids(batch: dict, frame_count: int) -> list[str]:
+    def _frame_uids(
+        batch: dict, frame_count: int
+    ) -> list[str] | list[list[str]]:
+        images = batch.get("images")
+        indexes = batch.get("indexes")
+        batch_size = (
+            int(images.shape[0])
+            if isinstance(images, torch.Tensor)
+            else int(indexes.shape[0])
+            if isinstance(indexes, torch.Tensor) and indexes.ndim == 2
+            else 1
+        )
         raw = batch.get("frame_uids")
         if isinstance(raw, (list, tuple)) and len(raw) == frame_count:
-            values = []
-            for value in raw:
-                if isinstance(value, str):
-                    values.append(value)
-                elif (
-                    isinstance(value, (list, tuple))
-                    and len(value) == 1
-                    and isinstance(value[0], str)
-                ):
-                    values.append(value[0])
-                else:
-                    break
-            if len(values) == frame_count:
-                return values
-        indexes = batch.get("indexes")
-        if isinstance(indexes, torch.Tensor) and indexes.numel() == frame_count:
-            return [f"geometry-{int(value)}" for value in indexes.flatten()]
+            if all(isinstance(value, str) for value in raw) and batch_size == 1:
+                return list(raw)
+            if all(
+                isinstance(value, (list, tuple))
+                and len(value) == batch_size
+                and all(isinstance(item, str) for item in value)
+                for value in raw
+            ):
+                rows = [
+                    [str(raw[frame][batch]) for frame in range(frame_count)]
+                    for batch in range(batch_size)
+                ]
+                return rows[0] if batch_size == 1 else rows
+        if isinstance(indexes, torch.Tensor) and indexes.shape == (
+            batch_size,
+            frame_count,
+        ):
+            rows = [
+                [f"geometry-{int(value)}" for value in row]
+                for row in indexes.tolist()
+            ]
+            return rows[0] if batch_size == 1 else rows
         raise ValueError("Pi3 token cache requires stable frame identities")
 
     def encoder_token_cache_report(self) -> dict | None:

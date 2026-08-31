@@ -36,6 +36,19 @@ class FakeDataset(IterableDataset):
             }
 
 
+class FakeFourStarDataset(FakeDataset):
+    def __len__(self) -> int:
+        return 4
+
+    def __iter__(self):
+        for center in range(4):
+            yield {
+                "star_indexes": center,
+                "indexes": torch.tensor([center, (center + 1) % 4]),
+                "value": torch.tensor([float(center)]),
+            }
+
+
 class FakeBatchInference:
     def main(self, batch, use_dummy_tracks=False):
         center = int(batch["star_indexes"].item())
@@ -84,6 +97,31 @@ class FakeTokenCacheBatchInference(FakeBatchInference):
     local_inference = FakeTokenCacheLocalInference()
 
 
+class FakeMicrobatchInference:
+    def main(self, batch, use_dummy_tracks=False):
+        centers = batch["star_indexes"].reshape(-1, 1)
+        batch_size = int(centers.shape[0])
+        return {
+            "center": centers,
+            "nested": [centers + 1],
+            "_forward_time": 0.25,
+            "_track_time": 0.5,
+            "_covisibility_report": {
+                "contractId": "jarailsense.gluemap-covisibility/v1",
+                "graphPolicy": "planned-star",
+                "batchCount": batch_size,
+                "viewCount": 2,
+                "evaluatedDirectedPairCount": 3 * batch_size,
+                "denseEquivalentDirectedPairCount": 4 * batch_size,
+                "virtualTrackDepthNoiseRatio": 0.1,
+                "virtualTrackNoiseSeed": 20260831,
+                "virtualTrackNoiseSeedPolicy": (
+                    "sha256-base-seed-and-star-indexes/v1"
+                ),
+            },
+        }
+
+
 class FakePipeline(StreamingStarInferencePipeline):
     def _load_models(self):
         self.models = {
@@ -99,6 +137,11 @@ class FakePipeline(StreamingStarInferencePipeline):
 class FakeTokenCachePipeline(FakePipeline):
     def _create_batch_inference(self, models):
         return FakeTokenCacheBatchInference()
+
+
+class FakeMicrobatchPipeline(FakePipeline):
+    def _create_batch_inference(self, models):
+        return FakeMicrobatchInference()
 
 
 def args(**overrides):
@@ -189,9 +232,7 @@ def test_ampere_pi3_attention_keeps_native_flash(monkeypatch):
 
 
 def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
-    pipeline = FakePipeline(
-        args(), 1, 0, file_name="unused.pth", device="cpu"
-    )
+    pipeline = FakePipeline(args(), 1, 0, file_name="unused.pth", device="cpu")
     outputs = []
     report = pipeline.run_to_sink(
         FakeDataset(), lambda center, output: outputs.append((center, output))
@@ -223,14 +264,38 @@ def test_streaming_profile_uses_actual_token_cache_encoder_count():
     pipeline = FakeTokenCachePipeline(
         args(), 1, 0, file_name="unused.pth", device="cpu"
     )
-    report = pipeline.run_to_sink(
-        FakeDataset(), lambda _center, _output: None
-    )
+    report = pipeline.run_to_sink(FakeDataset(), lambda _center, _output: None)
     assert report["encoderAccountingMode"] == "frame-token-cache/v1"
     assert report["pi3EncoderUniqueFrameCount"] == 2
     assert report["pi3EncoderInvocationFrameCount"] == 2
     assert report["duplicateEncoderFrameInvocationCount"] == 0
     assert report["encoderTokenCache"]["hitRate"] == 0.5
+
+
+def test_streaming_pipeline_microbatches_contiguous_equal_contexts():
+    pipeline = FakeMicrobatchPipeline(
+        args(context_microbatch_size=2),
+        1,
+        0,
+        file_name="unused.pth",
+        device="cpu",
+    )
+    outputs = []
+
+    report = pipeline.run_to_sink(
+        FakeFourStarDataset(),
+        lambda center, output: outputs.append((center, output)),
+    )
+
+    assert [value[0] for value in outputs] == [0, 1, 2, 3]
+    assert [value[1]["center"].item() for value in outputs] == [0, 1, 2, 3]
+    assert report["starCount"] == 4
+    assert report["contextBatchCount"] == 2
+    assert report["peakContextMicrobatchSize"] == 2
+    assert report["overlappingContextCount"] == 2
+    assert report["contextMicrobatchHistogram"] == {"2": 2}
+    assert report["covisibilityGraph"]["starCount"] == 4
+    assert sum(value["starCount"] for value in report["cudaTimeline"]) == 4
 
 
 def test_timing_summary_reports_linear_percentiles():
@@ -249,9 +314,7 @@ def test_streaming_profile_reads_live_cuda_counters():
     pipeline = FakePipeline(
         args(), 1, 0, file_name="unused.pth", device="cuda:0"
     )
-    report = pipeline.run_to_sink(
-        FakeDataset(), lambda _center, _output: None
-    )
+    report = pipeline.run_to_sink(FakeDataset(), lambda _center, _output: None)
     assert report["device"] == "cuda:0"
     assert report["streamSynchronizationCount"] == 0
     assert report["synchronizationCount"] == 0
