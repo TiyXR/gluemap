@@ -374,6 +374,7 @@ def _prior_factorization(
     *,
     relative_rank_threshold: float,
     policy: str,
+    minimum_nullity: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """Build a square-root prior in the selected conditioning coordinates.
 
@@ -438,6 +439,8 @@ def _prior_factorization(
         equilibrated_values
         > equilibrated_maximum * relative_rank_threshold
     )
+    if minimum_nullity:
+        equilibrated_accepted[:minimum_nullity] = False
     equilibrated_positive = equilibrated_values[equilibrated_accepted]
     equilibrated_rank = int(equilibrated_accepted.sum().item())
     equilibrated_nullity = int(len(equilibrated_values) - equilibrated_rank)
@@ -671,6 +674,8 @@ def marginalize_pose_prior_batch(
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
+    if scale_projection_applied and expected_nullity:
+        accepted[:expected_nullity] = False
     factor, factor_residual, condition_metrics = _prior_factorization(
         retained_hessian,
         retained_gradient,
@@ -679,6 +684,7 @@ def marginalize_pose_prior_batch(
         accepted,
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
+        minimum_nullity=(expected_nullity or 0) if scale_projection_applied else 0,
     )
     canonical_hessian, canonical_gradient = _canonical_normal_from_factor(
         factor, factor_residual
@@ -1361,6 +1367,10 @@ def marginalize_ceres_linearization(
     eigenvalues, eigenvectors = torch.linalg.eigh(retained_hessian)
     maximum_eigenvalue = eigenvalues.max().clamp_min(torch.finfo(dtype).eps)
     accepted = eigenvalues > maximum_eigenvalue * relative_rank_threshold
+    if scale_projection_applied and expected_nullity:
+        # The Ceres CRS path can retain a tiny projected gauge eigenvalue just
+        # above the relative cutoff after merging the previous FEJ factor.
+        accepted[:expected_nullity] = False
     factor, factor_residual, condition_metrics = _prior_factorization(
         retained_hessian,
         retained_gradient,
@@ -1369,6 +1379,7 @@ def marginalize_ceres_linearization(
         accepted,
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
+        minimum_nullity=(expected_nullity or 0) if scale_projection_applied else 0,
     )
     canonical_hessian, canonical_gradient = _canonical_normal_from_factor(
         factor, factor_residual
