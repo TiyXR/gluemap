@@ -231,6 +231,50 @@ def test_pose_only_prior_does_not_propagate_truncated_normal_modes():
     assert result.report["factorHessianMaximumAbsoluteError"] >= 0.0
 
 
+def test_pose_only_batch_whitens_the_joint_elimination_block():
+    prior = _pose_only_batch_fixture(camera_count=5)
+    coordinate_scale = torch.tensor(
+        [1e-4, 1e-2, 1.0, 1e2, 1e4, 1e1] * 5,
+        dtype=torch.float64,
+    )
+    transform = torch.diag(coordinate_scale)
+    scaled = FejPriorState(
+        camera_ids=prior.camera_ids,
+        linearization_points=prior.linearization_points,
+        hessian=transform.T @ prior.hessian @ transform,
+        gradient=transform.T @ prior.gradient,
+        factor=prior.factor @ transform,
+        factor_residual=prior.factor_residual,
+        report={},
+    )
+
+    raw = marginalize_pose_prior_batch(
+        scaled,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cpu",
+        relative_rank_threshold=1e-10,
+        condition_estimate_policy="raw-eigenvalue",
+        expected_nullity=1,
+    )
+    equilibrated = marginalize_pose_prior_batch(
+        scaled,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cpu",
+        relative_rank_threshold=1e-10,
+        condition_estimate_policy="camera-block-jacobi",
+        expected_nullity=1,
+    )
+
+    assert raw.report["marginalPoseRank"] < 12
+    assert equilibrated.report["marginalPoseRank"] == 12
+    assert equilibrated.report["marginalPoseConditionPolicy"] == (
+        "camera-block-jacobi"
+    )
+    assert equilibrated.report["priorNullity"] == 1
+    assert equilibrated.report["status"] == "passed"
+    _assert_normal_matches_factor(equilibrated)
+
+
 def test_pose_only_batch_schur_removes_accumulated_scale_information():
     camera_count = 4
     dimension = camera_count * 6

@@ -293,6 +293,78 @@ def _symmetric_pseudoinverse(
     return inverse, values, accepted
 
 
+def _camera_block_jacobi_whitening(
+    hessian: torch.Tensor,
+    relative_rank_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, float]:
+    if hessian.ndim != 2 or hessian.shape[0] != hessian.shape[1]:
+        raise FixedLagPriorError("block-Jacobi Hessian shape is invalid")
+    if hessian.shape[0] % 6 != 0:
+        raise FixedLagPriorError("block-Jacobi Hessian is not camera aligned")
+    camera_count = hessian.shape[0] // 6
+    blocks = torch.stack(
+        tuple(
+            hessian[
+                index * 6 : (index + 1) * 6,
+                index * 6 : (index + 1) * 6,
+            ]
+            for index in range(camera_count)
+        )
+    )
+    blocks = (blocks + blocks.transpose(-1, -2)) * 0.5
+    block_values, block_vectors = torch.linalg.eigh(blocks)
+    block_maximum = block_values.amax(dim=-1).clamp_min(
+        torch.finfo(hessian.dtype).eps
+    )
+    block_floor = block_maximum * relative_rank_threshold
+    inverse_square_root_values = torch.rsqrt(
+        torch.maximum(block_values, block_floor[:, None])
+    )
+    square_root_values = torch.sqrt(
+        torch.maximum(block_values, block_floor[:, None])
+    )
+    whiteners = (
+        block_vectors * inverse_square_root_values[:, None, :]
+    ) @ block_vectors.transpose(-1, -2)
+    unwhiteners = (
+        block_vectors * square_root_values[:, None, :]
+    ) @ block_vectors.transpose(-1, -2)
+    block_accepted = block_values > block_floor[:, None]
+    block_minimum = torch.where(
+        block_accepted,
+        block_values,
+        torch.full_like(block_values, float("inf")),
+    ).amin(dim=-1)
+    maximum_block_condition = float(
+        (block_maximum / block_minimum).max().item()
+    )
+    return (
+        torch.block_diag(*whiteners.unbind()),
+        torch.block_diag(*unwhiteners.unbind()),
+        maximum_block_condition,
+    )
+
+
+def _camera_block_jacobi_pseudoinverse(
+    matrix: torch.Tensor,
+    relative_rank_threshold: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    whitening, _, maximum_block_condition = (
+        _camera_block_jacobi_whitening(matrix, relative_rank_threshold)
+    )
+    equilibrated = whitening @ matrix @ whitening.T
+    equilibrated = (equilibrated + equilibrated.T) * 0.5
+    inverse, eigenvalues, accepted = _symmetric_pseudoinverse(
+        equilibrated, relative_rank_threshold
+    )
+    return (
+        whitening.T @ inverse @ whitening,
+        eigenvalues,
+        accepted,
+        maximum_block_condition,
+    )
+
+
 def _prior_factorization(
     hessian: torch.Tensor,
     gradient: torch.Tensor,
@@ -353,33 +425,9 @@ def _prior_factorization(
         result["selectedConditionEstimate"] = raw_condition
         return factor, factor_residual, result
 
-    camera_count = hessian.shape[0] // 6
-    blocks = torch.stack(
-        tuple(
-            hessian[index * 6 : (index + 1) * 6, index * 6 : (index + 1) * 6]
-            for index in range(camera_count)
-        )
+    whitening, unwhitening, maximum_block_condition = (
+        _camera_block_jacobi_whitening(hessian, relative_rank_threshold)
     )
-    blocks = (blocks + blocks.transpose(-1, -2)) * 0.5
-    block_values, block_vectors = torch.linalg.eigh(blocks)
-    block_maximum = block_values.amax(dim=-1).clamp_min(
-        torch.finfo(hessian.dtype).eps
-    )
-    block_floor = block_maximum * relative_rank_threshold
-    inverse_square_root_values = torch.rsqrt(
-        torch.maximum(block_values, block_floor[:, None])
-    )
-    square_root_values = torch.sqrt(
-        torch.maximum(block_values, block_floor[:, None])
-    )
-    whiteners = (
-        block_vectors * inverse_square_root_values[:, None, :]
-    ) @ block_vectors.transpose(-1, -2)
-    unwhiteners = (
-        block_vectors * square_root_values[:, None, :]
-    ) @ block_vectors.transpose(-1, -2)
-    whitening = torch.block_diag(*whiteners.unbind())
-    unwhitening = torch.block_diag(*unwhiteners.unbind())
     equilibrated = whitening @ hessian @ whitening.T
     equilibrated = (equilibrated + equilibrated.T) * 0.5
     equilibrated_values, equilibrated_vectors = torch.linalg.eigh(equilibrated)
@@ -413,13 +461,6 @@ def _prior_factorization(
     factor_residual = (
         equilibrated_positive_vectors.T @ (whitening @ gradient)
     ) / equilibrated_positive.sqrt()
-    block_accepted = block_values > block_floor[:, None]
-    block_minimum = torch.where(
-        block_accepted,
-        block_values,
-        torch.full_like(block_values, float("inf")),
-    ).amin(dim=-1)
-    block_condition = block_maximum / block_minimum
     result.update(
         {
             "equilibratedRank": equilibrated_rank,
@@ -427,8 +468,8 @@ def _prior_factorization(
             "equilibratedConditionEstimate": equilibrated_condition,
             "selectedRank": equilibrated_rank,
             "selectedNullity": equilibrated_nullity,
-            "maximumCameraBlockConditionEstimate": float(
-                block_condition.max().item()
+            "maximumCameraBlockConditionEstimate": (
+                maximum_block_condition
             ),
             "selectedConditionEstimate": equilibrated_condition,
         }
@@ -571,9 +612,25 @@ def marginalize_pose_prior_batch(
     h_rr = hessian[retained_columns[:, None], retained_columns]
     g_m = gradient[eliminate_columns]
     g_r = gradient[retained_columns]
-    inverse_mm, marginal_eigenvalues, marginal_rank_mask = (
-        _symmetric_pseudoinverse(h_mm, relative_rank_threshold)
+    raw_marginal_eigenvalues = torch.linalg.eigvalsh(
+        (h_mm + h_mm.T) * 0.5
     )
+    marginal_block_condition = None
+    if condition_estimate_policy == "camera-block-jacobi":
+        (
+            inverse_mm,
+            marginal_eigenvalues,
+            marginal_rank_mask,
+            marginal_block_condition,
+        ) = _camera_block_jacobi_pseudoinverse(
+            h_mm, relative_rank_threshold
+        )
+        marginal_condition_policy = "camera-block-jacobi"
+    else:
+        inverse_mm, marginal_eigenvalues, marginal_rank_mask = (
+            _symmetric_pseudoinverse(h_mm, relative_rank_threshold)
+        )
+        marginal_condition_policy = "raw-eigenvalue"
     retained_hessian = h_rr - h_mr.T @ inverse_mm @ h_mr
     retained_gradient = g_r - h_mr.T @ inverse_mm @ g_m
     retained_hessian = (retained_hessian + retained_hessian.T) * 0.5
@@ -671,8 +728,16 @@ def marginalize_pose_prior_batch(
         "maximumPointCameraCount": 0,
         "degeneratePointCount": 0,
         "marginalPoseRank": int(marginal_rank_mask.sum().item()),
+        "marginalPoseConditionPolicy": marginal_condition_policy,
+        "marginalPoseMaximumCameraBlockConditionEstimate": (
+            marginal_block_condition
+        ),
         "marginalPoseEigenvalues": [
             float(value) for value in marginal_eigenvalues.detach().cpu().tolist()
+        ],
+        "marginalPoseRawEigenvalues": [
+            float(value)
+            for value in raw_marginal_eigenvalues.detach().cpu().tolist()
         ],
         "priorRank": rank,
         "priorNullity": nullity,
