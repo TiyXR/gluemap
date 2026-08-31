@@ -145,7 +145,7 @@ class CovisibilityExtraction:
                 depth_transformed, extrinsics, intrinsics
             )
 
-        tracks_virtual, points3d_virtual, isnegative_virtual, valid_virtual = (
+        tracks_virtual, points3d_virtual, valid_virtual, _isnegative_virtual = (
             self._calculate_virtual_tracks(
                 predictions["depth"],
                 extrinsics,
@@ -221,8 +221,8 @@ class CovisibilityExtraction:
                 :meth:`_verify_by_reprojection_n2`.
 
         Returns:
-            ``(tracks_virtual, points3d_virtual, isnegative_virtual,
-            valid_virtual)`` as returned by ``project_tracks``.
+            ``(tracks_virtual, points3d_virtual, valid_virtual,
+            isnegative_virtual)`` as returned by ``project_tracks``.
         """
         # Use the valid to obtain a distribution of the depth
         # Assuming the first image has the identity matrix

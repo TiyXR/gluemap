@@ -58,6 +58,50 @@ def test_zero_virtual_track_noise_does_not_consume_random_state() -> None:
     assert torch.equal(torch.rand(4), expected)
 
 
+def test_main_returns_validity_not_negative_mask(monkeypatch) -> None:
+    extractor = CovisibilityExtraction(include_track=False, return_cpu=False)
+    extrinsics = torch.eye(4).reshape(1, 1, 4, 4)
+    intrinsics = torch.eye(3).reshape(1, 1, 3, 3)
+    depth = torch.ones((1, 1, 2, 2, 1))
+    indexes = torch.tensor([[7]])
+    scores = torch.ones((1, 1))
+    pairwise_valid = torch.ones((1, 1, 2, 2), dtype=torch.bool)
+    tracks_virtual = torch.zeros((1, 1, 4, 2))
+    points3d_virtual = torch.zeros((1, 4, 3))
+    valid_virtual = torch.ones((1, 1, 4), dtype=torch.bool)
+    isnegative_virtual = torch.zeros((1, 1, 4), dtype=torch.bool)
+
+    monkeypatch.setattr(
+        extractor,
+        "_convert_from_depth_to_world_points",
+        lambda *_args: torch.zeros((1, 1, 2, 2, 3)),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_verify_by_reprojection_n2",
+        lambda *_args, **_kwargs: (scores, pairwise_valid),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_calculate_virtual_tracks",
+        lambda *_args: (
+            tracks_virtual,
+            points3d_virtual,
+            valid_virtual,
+            isnegative_virtual,
+        ),
+    )
+
+    outputs = extractor.main(
+        {"extrinsics": extrinsics, "intrinsics": intrinsics, "depth": depth},
+        indexes,
+        torch.zeros((1, 1, 4)),
+    )
+
+    assert torch.equal(outputs[-1], valid_virtual)
+    assert not torch.equal(outputs[-1], isnegative_virtual)
+
+
 def test_planned_star_uses_one_symmetric_center_sweep(monkeypatch) -> None:
     extractor = CovisibilityExtraction(graph_policy="planned-star")
     calls = []
