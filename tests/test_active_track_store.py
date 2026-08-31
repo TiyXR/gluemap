@@ -176,18 +176,11 @@ def test_gpu_observation_rows_upload_once_and_reuse_released_slots():
     )
 
 
-def test_column_intern_constructs_only_new_observation_rows(monkeypatch):
+def test_column_intern_constructs_only_new_observation_rows():
     store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
     existing = observation(0, 0, x=10.0, y=10.0)
     store.add_observations([existing])
-    inserted = []
-    original_insert = store._insert_observation_batch
-
-    def counted_insert(values):
-        inserted.extend(value.observation_uid for value in values)
-        original_insert(values)
-
-    monkeypatch.setattr(store, "_insert_observation_batch", counted_insert)
+    count_before = store.observation_count
     resolved = store.intern_observation_columns(
         ["nearby-reference", "new-reference"],
         [0, 0],
@@ -203,7 +196,9 @@ def test_column_intern_constructs_only_new_observation_rows(monkeypatch):
     )
 
     assert resolved == [existing.observation_uid, "new-reference"]
-    assert inserted == ["new-reference"]
+    assert store.observation_count == count_before + 1
+    assert "nearby-reference" not in store._observations
+    assert "new-reference" in store._observations
     assert store.observation_count == 2
 
 
@@ -458,6 +453,46 @@ def test_time_grid_round_robin_prevents_one_bucket_from_consuming_budget():
     assert report["selectedTrackCount"] == 2
     assert len(report["timeGridBucketCounts"]) == 2
     assert report["rejectedReasonHistogram"]["active-budget-or-cell-cap"] == 2
+
+
+def test_weak_window_reseeds_from_resident_candidate_budget():
+    store = ActiveTrackStore(
+        budget(
+            active_track_budget_per_keyframe=1,
+            maximum_tracks_per_grid_cell=1,
+            minimum_constraints_per_keyframe=2,
+            parallax_backend_policy="cuda-required",
+        )
+    )
+    for track in range(2):
+        observations = [
+            observation(track, frame, x=10 + frame, y=20)
+            for frame in range(4)
+        ]
+        store.add_observations(observations)
+        store.add_correspondences(
+            TrackCorrespondence(
+                observations[index].observation_uid,
+                observations[index + 1].observation_uid,
+            )
+            for index in range(len(observations) - 1)
+        )
+
+    base, _ = store.evaluate_frame_sets_materialized(
+        [((0, 1, 2, 3), 1)]
+    )
+    reseeded, tracks = store.evaluate_frame_sets_materialized(
+        [((0, 1, 2, 3), 1)], selection_budget_multiplier=2
+    )
+
+    assert base[0]["status"] == "failed"
+    assert "KEYFRAME_CONSTRAINTS_BELOW_MINIMUM" in base[0]["reasonCodes"]
+    assert base[0]["selectionBudgetMultiplier"] == 1
+    assert reseeded[0]["status"] == "passed"
+    assert reseeded[0]["selectionBudgetMultiplier"] == 2
+    assert reseeded[0]["maximumTracksPerGridCell"] == 2
+    assert reseeded[0]["gateMetricsBackend"] == "cuda"
+    assert len(tracks[0]) == 2
 
 
 def test_low_parallax_rejection_is_reported():

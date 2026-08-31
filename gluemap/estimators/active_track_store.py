@@ -1345,17 +1345,29 @@ class ActiveTrackStore:
     def evaluate_batch(
         self,
         intervals: Iterable[tuple[int, int, int]],
+        *,
+        selection_budget_multiplier: int = 1,
     ) -> list[dict[str, Any]]:
         """Evaluate one release group with one tensor upload and one reduction."""
-        reports, _ = self._evaluate_batch_impl(intervals, materialize_tracks=False)
+        reports, _ = self._evaluate_batch_impl(
+            intervals,
+            materialize_tracks=False,
+            selection_budget_multiplier=selection_budget_multiplier,
+        )
         return reports
 
     def evaluate_batch_materialized(
         self,
         intervals: Iterable[tuple[int, int, int]],
+        *,
+        selection_budget_multiplier: int = 1,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         """Return ephemeral selected observations from the same gate pass."""
-        return self._evaluate_batch_impl(intervals, materialize_tracks=True)
+        return self._evaluate_batch_impl(
+            intervals,
+            materialize_tracks=True,
+            selection_budget_multiplier=selection_budget_multiplier,
+        )
 
     def evaluate_frame_sets_materialized(
         self,
@@ -1363,6 +1375,7 @@ class ActiveTrackStore:
         *,
         terminal: bool = False,
         constraint_exempt_frame_ids: Iterable[int] = (),
+        selection_budget_multiplier: int = 1,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         """Evaluate arbitrary fixed-lag frame sets in one GPU membership batch."""
         values: list[tuple[int, ...]] = []
@@ -1388,6 +1401,7 @@ class ActiveTrackStore:
             constraint_exempt_frame_ids={
                 int(value) for value in constraint_exempt_frame_ids
             },
+            selection_budget_multiplier=selection_budget_multiplier,
         )
 
     def _evaluate_batch_impl(
@@ -1398,7 +1412,23 @@ class ActiveTrackStore:
         active_frame_sets: list[tuple[int, ...]] | None = None,
         allow_terminal_freeze: bool = False,
         constraint_exempt_frame_ids: set[int] | None = None,
+        selection_budget_multiplier: int = 1,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
+        if (
+            isinstance(selection_budget_multiplier, bool)
+            or not isinstance(selection_budget_multiplier, int)
+            or not 1 <= selection_budget_multiplier <= 16
+        ):
+            raise ActiveTrackStoreError(
+                "selection budget multiplier must be in [1, 16]"
+            )
+        maximum_active_tracks = (
+            self.budget.maximum_active_tracks * selection_budget_multiplier
+        )
+        maximum_tracks_per_grid_cell = (
+            self.budget.maximum_tracks_per_grid_cell
+            * selection_budget_multiplier
+        )
         values = list(intervals)
         for active_first, active_last, freeze_through in values:
             self._validate_interval(
@@ -1446,6 +1476,11 @@ class ActiveTrackStore:
                         rejected=Counter({"active-budget-or-cell-cap": 0}),
                         constraints_per_frame=Counter(),
                         constraint_exempt_frame_ids=constraint_exempt_frame_ids,
+                        selection_budget_multiplier=selection_budget_multiplier,
+                        maximum_active_tracks=maximum_active_tracks,
+                        maximum_tracks_per_grid_cell=(
+                            maximum_tracks_per_grid_cell
+                        ),
                     )
                     for value in values
                 ],
@@ -1470,7 +1505,12 @@ class ActiveTrackStore:
         for candidates, rejected in zip(
             candidates_by_interval, rejected_by_interval, strict=True
         ):
-            selected, bucket_counts = self._select_candidates(candidates, rejected)
+            selected, bucket_counts = self._select_candidates(
+                candidates,
+                rejected,
+                maximum_active_tracks=maximum_active_tracks,
+                maximum_tracks_per_grid_cell=maximum_tracks_per_grid_cell,
+            )
             selected_by_interval.append(selected)
             bucket_counts_by_interval.append(bucket_counts)
             selected_component_indexes.append(
@@ -1540,6 +1580,11 @@ class ActiveTrackStore:
                     frame_ids=frame_sets[index],
                     terminal_freeze=allow_terminal_freeze,
                     constraint_exempt_frame_ids=constraint_exempt_frame_ids,
+                    selection_budget_multiplier=selection_budget_multiplier,
+                    maximum_active_tracks=maximum_active_tracks,
+                    maximum_tracks_per_grid_cell=(
+                        maximum_tracks_per_grid_cell
+                    ),
                 )
             )
         self._last_gate_phase_wall = {
@@ -1935,6 +1980,9 @@ class ActiveTrackStore:
         self,
         candidates: list[dict[str, Any]],
         rejected: Counter[str],
+        *,
+        maximum_active_tracks: int,
+        maximum_tracks_per_grid_cell: int,
     ) -> tuple[list[dict[str, Any]], Counter[tuple[int, int, int]]]:
         selected: list[dict[str, Any]] = []
         bucket_counts: Counter[tuple[int, int, int]] = Counter()
@@ -1954,12 +2002,12 @@ class ActiveTrackStore:
             candidates_by_bucket[candidate["bucket"]].append(candidate)
         while (
             candidates_by_bucket
-            and len(selected) < self.budget.maximum_active_tracks
+            and len(selected) < maximum_active_tracks
         ):
             progressed = False
             empty_buckets: list[tuple[int, int, int]] = []
             for bucket in sorted(candidates_by_bucket):
-                if bucket_counts[bucket] >= self.budget.maximum_tracks_per_grid_cell:
+                if bucket_counts[bucket] >= maximum_tracks_per_grid_cell:
                     continue
                 values = candidates_by_bucket[bucket]
                 candidate = values.popleft()
@@ -1968,7 +2016,7 @@ class ActiveTrackStore:
                 progressed = True
                 if not values:
                     empty_buckets.append(bucket)
-                if len(selected) >= self.budget.maximum_active_tracks:
+                if len(selected) >= maximum_active_tracks:
                     break
             for bucket in empty_buckets:
                 del candidates_by_bucket[bucket]
@@ -2037,6 +2085,9 @@ class ActiveTrackStore:
         frame_ids: tuple[int, ...] | None = None,
         terminal_freeze: bool = False,
         constraint_exempt_frame_ids: set[int] | None = None,
+        selection_budget_multiplier: int = 1,
+        maximum_active_tracks: int | None = None,
+        maximum_tracks_per_grid_cell: int | None = None,
     ) -> dict[str, Any]:
         active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
         active_frame_ids = frame_ids or tuple(
@@ -2093,7 +2144,17 @@ class ActiveTrackStore:
             "candidateTrackCount": len(candidates),
             "selectedTrackCount": len(selected),
             "bridgeTrackCount": len(bridge_tracks),
-            "maximumActiveTracks": self.budget.maximum_active_tracks,
+            "selectionBudgetMultiplier": selection_budget_multiplier,
+            "maximumActiveTracks": (
+                self.budget.maximum_active_tracks
+                if maximum_active_tracks is None
+                else maximum_active_tracks
+            ),
+            "maximumTracksPerGridCell": (
+                self.budget.maximum_tracks_per_grid_cell
+                if maximum_tracks_per_grid_cell is None
+                else maximum_tracks_per_grid_cell
+            ),
             "parallaxBackendPolicy": self.budget.parallax_backend_policy,
             "parallaxBackend": self.parallax_backend,
             "gateMetricsBackend": self.parallax_backend,
