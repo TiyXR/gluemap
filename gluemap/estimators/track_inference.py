@@ -1,16 +1,206 @@
+from collections import OrderedDict
+from dataclasses import dataclass
+
 import torch
 
 from gluemap.math.scaling import rescale_tracks_single, standardize_query_points
+
+
+@dataclass(frozen=True)
+class TrackerFeatureKey:
+    model_identity: str
+    preprocessing_identity: str
+    frame_uid: str
+    image_height: int
+    image_width: int
+    dtype: str
+    device: str
+
+
+class TrackerCoarseFeatureCache:
+    """Bounded GPU LRU for VGGSfM's context-independent coarse fmaps."""
+
+    PREPROCESSING_IDENTITY = "vggsfm-coarse-downsample-bilinear/v1"
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        capacity_frames: int,
+        device: str | torch.device,
+    ) -> None:
+        if capacity_frames < 1:
+            raise ValueError("tracker feature cache capacity must be positive")
+        self.model_identity = (
+            f"{model.__class__.__module__}.{model.__class__.__qualname__}:"
+            f"{id(model)}"
+        )
+        self.capacity_frames = capacity_frames
+        self.device = str(device)
+        self._entries: OrderedDict[TrackerFeatureKey, torch.Tensor] = (
+            OrderedDict()
+        )
+        self.requested_frame_count = 0
+        self.hit_count = 0
+        self.miss_count = 0
+        self.extracted_frame_count = 0
+        self.eviction_count = 0
+        self.peak_entry_count = 0
+        self.peak_logical_bytes = 0
+
+    def _key(
+        self,
+        frame_uid: str,
+        image_height: int,
+        image_width: int,
+        dtype: torch.dtype,
+    ) -> TrackerFeatureKey:
+        return TrackerFeatureKey(
+            model_identity=self.model_identity,
+            preprocessing_identity=self.PREPROCESSING_IDENTITY,
+            frame_uid=frame_uid,
+            image_height=image_height,
+            image_width=image_width,
+            dtype=str(dtype),
+            device=self.device,
+        )
+
+    def features(
+        self,
+        model: torch.nn.Module,
+        images: torch.Tensor,
+        frame_uids: list[str],
+    ) -> torch.Tensor:
+        if images.ndim != 5 or images.shape[0] != 1:
+            raise ValueError("tracker feature cache currently requires batch size one")
+        if images.shape[1] != len(frame_uids):
+            raise ValueError("tracker feature cache frame UID count differs")
+        if images.shape[1] > self.capacity_frames:
+            raise ValueError("tracker context exceeds feature cache capacity")
+
+        height, width = int(images.shape[-2]), int(images.shape[-1])
+        keys = [
+            self._key(value, height, width, images.dtype)
+            for value in frame_uids
+        ]
+        context_features: list[torch.Tensor | None] = [None] * len(keys)
+        missing_positions: list[int] = []
+        self.requested_frame_count += len(keys)
+        for position, key in enumerate(keys):
+            feature = self._entries.pop(key, None)
+            if feature is None:
+                self.miss_count += 1
+                missing_positions.append(position)
+            else:
+                self.hit_count += 1
+                self._entries[key] = feature
+                context_features[position] = feature
+
+        if missing_positions:
+            missing_images = images[:, missing_positions].reshape(
+                -1, *images.shape[2:]
+            )
+            extracted = model.process_images_to_fmaps(missing_images)
+            if extracted.shape[0] != len(missing_positions):
+                raise ValueError("tracker returned an unexpected fmap count")
+            self.extracted_frame_count += len(missing_positions)
+            for extracted_position, context_position in enumerate(
+                missing_positions
+            ):
+                feature = extracted[
+                    extracted_position : extracted_position + 1
+                ]
+                key = keys[context_position]
+                self._entries[key] = feature
+                context_features[context_position] = feature
+                while len(self._entries) > self.capacity_frames:
+                    self._entries.popitem(last=False)
+                    self.eviction_count += 1
+
+        if any(value is None for value in context_features):
+            raise RuntimeError("tracker feature cache failed to assemble a context")
+        result = torch.stack(context_features, dim=1)
+        self.peak_entry_count = max(
+            self.peak_entry_count, len(self._entries)
+        )
+        logical_bytes = sum(
+            value.numel() * value.element_size()
+            for value in self._entries.values()
+        )
+        self.peak_logical_bytes = max(
+            self.peak_logical_bytes, logical_bytes
+        )
+        return result
+
+    def report(self) -> dict[str, int | float | str]:
+        requests = self.requested_frame_count
+        dtype = next(
+            (key.dtype for key in self._entries), "unknown"
+        )
+        return {
+            "contractId": "jarailsense.vggsfm-coarse-feature-cache/v1",
+            "capacityFrames": self.capacity_frames,
+            "requestedFrameCount": requests,
+            "cacheHitCount": self.hit_count,
+            "cacheMissCount": self.miss_count,
+            "extractedFrameCount": self.extracted_frame_count,
+            "evictionCount": self.eviction_count,
+            "residentFrameCount": len(self._entries),
+            "peakResidentFrameCount": self.peak_entry_count,
+            "peakResidentLogicalBytes": self.peak_logical_bytes,
+            "hitRate": self.hit_count / requests if requests else 0.0,
+            "preprocessingIdentity": self.PREPROCESSING_IDENTITY,
+            "dtype": dtype,
+            "device": self.device,
+        }
 
 
 class TrackInference:
     """Point tracking using the VGGSfM tracker."""
 
     def __init__(
-        self, model_track: torch.nn.Module, device: str = "cuda"
+        self,
+        model_track: torch.nn.Module,
+        device: str = "cuda",
+        feature_cache_frames: int = 0,
     ) -> None:
         self.model_track = model_track
         self.device = device
+        self.feature_cache = (
+            TrackerCoarseFeatureCache(
+                model_track, feature_cache_frames, device
+            )
+            if feature_cache_frames > 0
+            and hasattr(model_track, "process_images_to_fmaps")
+            else None
+        )
+
+    @staticmethod
+    def _frame_uids(batch: dict, frame_count: int) -> list[str]:
+        raw = batch.get("frame_uids")
+        if isinstance(raw, (list, tuple)) and len(raw) == frame_count:
+            values = []
+            for value in raw:
+                if isinstance(value, str):
+                    values.append(value)
+                elif (
+                    isinstance(value, (list, tuple))
+                    and len(value) == 1
+                    and isinstance(value[0], str)
+                ):
+                    values.append(value[0])
+                else:
+                    break
+            if len(values) == frame_count:
+                return values
+        indexes = batch.get("indexes")
+        if isinstance(indexes, torch.Tensor) and indexes.numel() == frame_count:
+            return [f"geometry-{int(value)}" for value in indexes.flatten()]
+        raise ValueError("tracker feature cache requires stable frame identities")
+
+    def feature_cache_report(self) -> dict | None:
+        if self.feature_cache is None:
+            return None
+        return self.feature_cache.report()
 
     def predict(
         self,
@@ -39,6 +229,12 @@ class TrackInference:
             }
 
         images_1024 = batch["images_1024"].to(self.device)
+        fmaps = None
+        if self.feature_cache is not None:
+            frame_uids = self._frame_uids(batch, images_1024.shape[1])
+            fmaps = self.feature_cache.features(
+                self.model_track, images_1024, frame_uids
+            )
 
         tracks_all = []
         vis_all = []
@@ -46,7 +242,10 @@ class TrackInference:
 
         for i in range(images_1024.shape[0]):
             fine_pred_track, _, pred_vis, pred_score = self.model_track(
-                images_1024[i : i + 1], query_points[i : i + 1]
+                images_1024[i : i + 1],
+                query_points[i : i + 1],
+                fmaps=None if fmaps is None else fmaps[i : i + 1],
+                inference=False,
             )
             tracks_all.append(fine_pred_track)
             vis_all.append(pred_vis)

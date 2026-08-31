@@ -333,6 +333,14 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             if token_cache_report is not None
             else frame_invocation_count
         )
+        tracker_feature_cache_report = None
+        track_inference = getattr(batch_inference, "track_inference", None)
+        if track_inference is not None and hasattr(
+            track_inference, "feature_cache_report"
+        ):
+            tracker_feature_cache_report = (
+                track_inference.feature_cache_report()
+            )
         stage_timings = {
             "dataWait": timing_summary(data_wait_seconds),
             "inference": timing_summary(batch_seconds),
@@ -369,6 +377,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                 actual_encoder_invocations - len(unique_frame_indexes)
             ),
             "encoderTokenCache": token_cache_report,
+            "trackerFeatureCache": tracker_feature_cache_report,
             "synchronizationCount": (
                 self._stream_synchronization_count
                 + batch_synchronization_count

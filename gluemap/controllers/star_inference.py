@@ -83,6 +83,7 @@ class BatchInferenceStar:
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         encoder_token_cache_frames: int = 0,
+        tracker_feature_cache_frames: int = 0,
     ):
         self.model = model
         self.model_type = model_type
@@ -103,7 +104,9 @@ class BatchInferenceStar:
             dtype,
             encoder_token_cache_frames=encoder_token_cache_frames,
         )
-        self.track_inference = TrackInference(model_track, device)
+        self.track_inference = TrackInference(
+            model_track, device, tracker_feature_cache_frames
+        )
         self.covisibility_extraction = CovisibilityExtraction()
 
     def _synchronize(self) -> None:
@@ -290,6 +293,9 @@ class StarInferencePipeline(BaseInferencePipeline):
             dtype=self.dtype,
             encoder_token_cache_frames=getattr(
                 self.args, "encoder_token_cache_frames", 0
+            ),
+            tracker_feature_cache_frames=getattr(
+                self.args, "tracker_feature_cache_frames", 0
             ),
         )
 
