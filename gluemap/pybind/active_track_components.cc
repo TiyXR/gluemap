@@ -11,6 +11,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -88,6 +89,270 @@ ComputeConnectedComponents(int64_t node_count, const int64_t *edge_first,
     labels[node] = FindRoot(parents.get(), node);
   }
   return labels;
+}
+
+struct ActiveTrackCandidate {
+  int64_t component_index;
+  int64_t time_bin;
+  int64_t row;
+  int64_t column;
+};
+
+struct ActiveTrackIntervalSelection {
+  std::vector<int64_t> component_indexes;
+  std::map<std::tuple<int64_t, int64_t, int64_t>, int64_t> bucket_counts;
+  std::string selected_uids_sha256;
+  std::string bridge_uids_sha256;
+  int64_t candidate_count = 0;
+  int64_t bridge_count = 0;
+  int64_t insufficient_view_count = 0;
+  int64_t insufficient_parallax_count = 0;
+};
+
+struct ActiveTrackSelectionBatch {
+  std::vector<int64_t> selected_component_indexes;
+  std::vector<int64_t> selected_offsets;
+  std::vector<int64_t> candidate_counts;
+  std::vector<int64_t> bridge_counts;
+  std::vector<std::string> selected_uids_sha256;
+  std::vector<std::string> bridge_uids_sha256;
+  std::vector<int64_t> insufficient_view_counts;
+  std::vector<int64_t> insufficient_parallax_counts;
+  std::vector<int64_t> bucket_offsets;
+  std::vector<int64_t> bucket_time_bins;
+  std::vector<int64_t> bucket_rows;
+  std::vector<int64_t> bucket_columns;
+  std::vector<int64_t> bucket_counts;
+};
+
+std::string HexSha256(const std::string &payload);
+
+std::string CanonicalStringListSha256(
+    const std::vector<int64_t> &component_indexes,
+    const std::vector<std::string> &component_uids,
+    const int64_t *integer_metrics, int64_t interval_count, int64_t interval,
+    bool bridge_only) {
+  std::string payload;
+  payload.reserve(component_indexes.size() * 68 + 2);
+  payload.push_back('[');
+  bool first_value = true;
+  constexpr char hex[] = "0123456789abcdef";
+  for (const int64_t component_index : component_indexes) {
+    const int64_t integer_base =
+        (component_index * interval_count + interval) * 5;
+    if (bridge_only && integer_metrics[integer_base + 1] == 0) {
+      continue;
+    }
+    if (!first_value) {
+      payload.push_back(',');
+    }
+    first_value = false;
+    payload.push_back('"');
+    for (const unsigned char value :
+         component_uids[static_cast<size_t>(component_index)]) {
+      switch (value) {
+      case '"':
+        payload.append("\\\"");
+        break;
+      case '\\':
+        payload.append("\\\\");
+        break;
+      case '\b':
+        payload.append("\\b");
+        break;
+      case '\f':
+        payload.append("\\f");
+        break;
+      case '\n':
+        payload.append("\\n");
+        break;
+      case '\r':
+        payload.append("\\r");
+        break;
+      case '\t':
+        payload.append("\\t");
+        break;
+      default:
+        if (value < 0x20) {
+          payload.append("\\u00");
+          payload.push_back(hex[value >> 4]);
+          payload.push_back(hex[value & 0x0f]);
+        } else {
+          payload.push_back(static_cast<char>(value));
+        }
+      }
+    }
+    payload.push_back('"');
+  }
+  payload.push_back(']');
+  return HexSha256(payload);
+}
+
+ActiveTrackSelectionBatch SelectActiveTrackCandidates(
+    const int64_t *integer_metrics, const double *float_metrics,
+    const std::vector<std::string> &component_uids, int64_t component_count,
+    int64_t interval_count, int64_t minimum_track_views,
+    double minimum_parallax_diagonals, int64_t maximum_active_tracks,
+    int64_t maximum_tracks_per_grid_cell, int native_thread_count) {
+  std::vector<ActiveTrackIntervalSelection> interval_results(
+      static_cast<size_t>(interval_count));
+
+#pragma omp parallel for schedule(dynamic) num_threads(native_thread_count)
+  for (int64_t interval = 0; interval < interval_count; ++interval) {
+    auto &result = interval_results[static_cast<size_t>(interval)];
+    std::vector<ActiveTrackCandidate> candidates;
+    candidates.reserve(static_cast<size_t>(component_count));
+    for (int64_t component = 0; component < component_count; ++component) {
+      const int64_t integer_base = (component * interval_count + interval) * 5;
+      const int64_t float_base = (component * interval_count + interval) * 2;
+      const int64_t view_count = integer_metrics[integer_base];
+      const double parallax = float_metrics[float_base];
+      const bool insufficient_views = view_count < minimum_track_views;
+      const bool insufficient_parallax =
+          parallax < minimum_parallax_diagonals;
+      result.insufficient_view_count += insufficient_views ? 1 : 0;
+      result.insufficient_parallax_count += insufficient_parallax ? 1 : 0;
+      if (insufficient_views || insufficient_parallax) {
+        continue;
+      }
+      candidates.push_back({component, integer_metrics[integer_base + 2],
+                            integer_metrics[integer_base + 3],
+                            integer_metrics[integer_base + 4]});
+    }
+    result.candidate_count = static_cast<int64_t>(candidates.size());
+
+    const auto quality_less = [&](const ActiveTrackCandidate &first,
+                                  const ActiveTrackCandidate &second) {
+      const int64_t first_integer =
+          (first.component_index * interval_count + interval) * 5;
+      const int64_t second_integer =
+          (second.component_index * interval_count + interval) * 5;
+      const int64_t first_float =
+          (first.component_index * interval_count + interval) * 2;
+      const int64_t second_float =
+          (second.component_index * interval_count + interval) * 2;
+      const auto first_bucket =
+          std::tie(first.time_bin, first.row, first.column);
+      const auto second_bucket =
+          std::tie(second.time_bin, second.row, second.column);
+      if (first_bucket != second_bucket) {
+        return first_bucket < second_bucket;
+      }
+      const bool first_bridge = integer_metrics[first_integer + 1] != 0;
+      const bool second_bridge = integer_metrics[second_integer + 1] != 0;
+      if (first_bridge != second_bridge) {
+        return first_bridge;
+      }
+      const int64_t first_views = integer_metrics[first_integer];
+      const int64_t second_views = integer_metrics[second_integer];
+      if (first_views != second_views) {
+        return first_views > second_views;
+      }
+      const double first_parallax = float_metrics[first_float];
+      const double second_parallax = float_metrics[second_float];
+      if (first_parallax != second_parallax) {
+        return first_parallax > second_parallax;
+      }
+      const double first_score = float_metrics[first_float + 1];
+      const double second_score = float_metrics[second_float + 1];
+      if (first_score != second_score) {
+        return first_score > second_score;
+      }
+      return component_uids[static_cast<size_t>(first.component_index)] <
+             component_uids[static_cast<size_t>(second.component_index)];
+    };
+    std::sort(candidates.begin(), candidates.end(), quality_less);
+
+    std::vector<std::pair<size_t, size_t>> bucket_ranges;
+    for (size_t begin = 0; begin < candidates.size();) {
+      size_t end = begin + 1;
+      while (end < candidates.size() &&
+             candidates[end].time_bin == candidates[begin].time_bin &&
+             candidates[end].row == candidates[begin].row &&
+             candidates[end].column == candidates[begin].column) {
+        ++end;
+      }
+      bucket_ranges.emplace_back(begin, end);
+      begin = end;
+    }
+
+    result.component_indexes.reserve(static_cast<size_t>(std::min(
+        maximum_active_tracks, static_cast<int64_t>(candidates.size()))));
+    for (int64_t depth = 0;
+         depth < maximum_tracks_per_grid_cell &&
+         static_cast<int64_t>(result.component_indexes.size()) <
+             maximum_active_tracks;
+         ++depth) {
+      bool progressed = false;
+      for (const auto &[begin, end] : bucket_ranges) {
+        const size_t candidate_index = begin + static_cast<size_t>(depth);
+        if (candidate_index >= end) {
+          continue;
+        }
+        result.component_indexes.push_back(
+            candidates[candidate_index].component_index);
+        progressed = true;
+        if (static_cast<int64_t>(result.component_indexes.size()) >=
+            maximum_active_tracks) {
+          break;
+        }
+      }
+      if (!progressed) {
+        break;
+      }
+    }
+    for (const int64_t component_index : result.component_indexes) {
+      const int64_t integer_base =
+          (component_index * interval_count + interval) * 5;
+      result.bridge_count += integer_metrics[integer_base + 1] != 0 ? 1 : 0;
+      ++result.bucket_counts[std::make_tuple(integer_metrics[integer_base + 2],
+                                             integer_metrics[integer_base + 3],
+                                             integer_metrics[integer_base + 4])];
+    }
+    result.selected_uids_sha256 = CanonicalStringListSha256(
+        result.component_indexes, component_uids, integer_metrics,
+        interval_count, interval, false);
+    result.bridge_uids_sha256 = CanonicalStringListSha256(
+        result.component_indexes, component_uids, integer_metrics,
+        interval_count, interval, true);
+  }
+
+  ActiveTrackSelectionBatch batch;
+  batch.selected_offsets.reserve(static_cast<size_t>(interval_count + 1));
+  batch.candidate_counts.reserve(static_cast<size_t>(interval_count));
+  batch.bridge_counts.reserve(static_cast<size_t>(interval_count));
+  batch.selected_uids_sha256.reserve(static_cast<size_t>(interval_count));
+  batch.bridge_uids_sha256.reserve(static_cast<size_t>(interval_count));
+  batch.insufficient_view_counts.reserve(static_cast<size_t>(interval_count));
+  batch.insufficient_parallax_counts.reserve(
+      static_cast<size_t>(interval_count));
+  batch.selected_offsets.push_back(0);
+  batch.bucket_offsets.push_back(0);
+  for (auto &result : interval_results) {
+    batch.selected_component_indexes.insert(
+        batch.selected_component_indexes.end(), result.component_indexes.begin(),
+        result.component_indexes.end());
+    batch.selected_offsets.push_back(
+        static_cast<int64_t>(batch.selected_component_indexes.size()));
+    batch.candidate_counts.push_back(result.candidate_count);
+    batch.bridge_counts.push_back(result.bridge_count);
+    batch.selected_uids_sha256.push_back(
+        std::move(result.selected_uids_sha256));
+    batch.bridge_uids_sha256.push_back(
+        std::move(result.bridge_uids_sha256));
+    batch.insufficient_view_counts.push_back(result.insufficient_view_count);
+    batch.insufficient_parallax_counts.push_back(
+        result.insufficient_parallax_count);
+    for (const auto &[bucket, count] : result.bucket_counts) {
+      batch.bucket_time_bins.push_back(std::get<0>(bucket));
+      batch.bucket_rows.push_back(std::get<1>(bucket));
+      batch.bucket_columns.push_back(std::get<2>(bucket));
+      batch.bucket_counts.push_back(count);
+    }
+    batch.bucket_offsets.push_back(
+        static_cast<int64_t>(batch.bucket_counts.size()));
+  }
+  return batch;
 }
 
 int64_t SpatialBucketKey(int64_t column, int64_t row) {
@@ -569,6 +834,64 @@ private:
 
 } // namespace
 
+py::dict SelectActiveTrackCandidatesWrapper(
+    py::array_t<int64_t, py::array::c_style> integer_metrics,
+    py::array_t<double, py::array::c_style> float_metrics,
+    const std::vector<std::string> &component_uids,
+    int64_t minimum_track_views, double minimum_parallax_diagonals,
+    int64_t maximum_active_tracks, int64_t maximum_tracks_per_grid_cell,
+    int native_thread_count) {
+  if (integer_metrics.ndim() != 3 || integer_metrics.shape(2) != 5 ||
+      float_metrics.ndim() != 3 || float_metrics.shape(2) != 2 ||
+      integer_metrics.shape(0) != float_metrics.shape(0) ||
+      integer_metrics.shape(1) != float_metrics.shape(1) ||
+      integer_metrics.shape(0) !=
+          static_cast<int64_t>(component_uids.size())) {
+    throw std::invalid_argument("active track metric arrays differ in shape");
+  }
+  if (minimum_track_views < 1 || minimum_parallax_diagonals < 0.0 ||
+      maximum_active_tracks < 1 || maximum_tracks_per_grid_cell < 1 ||
+      native_thread_count < 1) {
+    throw std::invalid_argument("active track selection limits are invalid");
+  }
+  ActiveTrackSelectionBatch result;
+  {
+    py::gil_scoped_release release;
+    result = SelectActiveTrackCandidates(
+        integer_metrics.data(), float_metrics.data(), component_uids,
+        integer_metrics.shape(0), integer_metrics.shape(1),
+        minimum_track_views, minimum_parallax_diagonals,
+        maximum_active_tracks, maximum_tracks_per_grid_cell,
+        native_thread_count);
+  }
+  py::dict report;
+  report["selectedComponentIndexes"] =
+      VecToArray1D(std::move(result.selected_component_indexes));
+  report["selectedOffsets"] =
+      VecToArray1D(std::move(result.selected_offsets));
+  report["candidateCounts"] =
+      VecToArray1D(std::move(result.candidate_counts));
+  report["bridgeCounts"] =
+      VecToArray1D(std::move(result.bridge_counts));
+  report["selectedTrackUidsSha256"] =
+      std::move(result.selected_uids_sha256);
+  report["bridgeTrackUidsSha256"] =
+      std::move(result.bridge_uids_sha256);
+  report["insufficientViewCounts"] =
+      VecToArray1D(std::move(result.insufficient_view_counts));
+  report["insufficientParallaxCounts"] =
+      VecToArray1D(std::move(result.insufficient_parallax_counts));
+  report["bucketOffsets"] =
+      VecToArray1D(std::move(result.bucket_offsets));
+  report["bucketTimeBins"] =
+      VecToArray1D(std::move(result.bucket_time_bins));
+  report["bucketRows"] = VecToArray1D(std::move(result.bucket_rows));
+  report["bucketColumns"] =
+      VecToArray1D(std::move(result.bucket_columns));
+  report["bucketCounts"] = VecToArray1D(std::move(result.bucket_counts));
+  return report;
+}
+
 void BindActiveTrackGraph(py::module_ &module) {
   py::class_<ActiveTrackGraph>(module, "ActiveTrackGraph")
       .def(py::init<>())
@@ -592,6 +915,15 @@ void BindActiveTrackGraph(py::module_ &module) {
            py::arg("uids"))
       .def_property_readonly("node_count", &ActiveTrackGraph::NodeCount)
       .def_property_readonly("edge_count", &ActiveTrackGraph::EdgeCount);
+  module.def(
+      "select_active_track_candidates", &SelectActiveTrackCandidatesWrapper,
+      py::arg("integer_metrics"), py::arg("float_metrics"),
+      py::arg("component_uids"), py::arg("minimum_track_views"),
+      py::arg("minimum_parallax_diagonals"),
+      py::arg("maximum_active_tracks"),
+      py::arg("maximum_tracks_per_grid_cell"),
+      py::arg("native_thread_count"),
+      "Select active tracks with deterministic native OpenMP workers.");
 }
 
 py::array_t<int64_t> ComputeConnectedComponentsWrapper(

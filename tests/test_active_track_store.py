@@ -1,7 +1,9 @@
 import hashlib
 import json
+from collections import Counter
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from gluemap.estimators.active_track_store import (
@@ -10,6 +12,7 @@ from gluemap.estimators.active_track_store import (
     TrackBudget,
     TrackCorrespondence,
     TrackObservation,
+    _load_track_native_module,
 )
 
 
@@ -63,6 +66,146 @@ def add_track(store, track, frames):
     )
 
 
+def test_native_batched_selector_matches_reference_round_robin_exactly():
+    native = _load_track_native_module()
+    if not hasattr(native, "select_active_track_candidates"):
+        pytest.skip("native selector is unavailable in the packaged baseline")
+    component_count = 79
+    interval_count = 5
+    rng = np.random.default_rng(20260831)
+    integer_metrics = np.empty(
+        (component_count, interval_count, 5), dtype=np.int64
+    )
+    integer_metrics[:, :, 0] = rng.integers(
+        1, 6, size=(component_count, interval_count)
+    )
+    integer_metrics[:, :, 1] = rng.integers(
+        0, 2, size=(component_count, interval_count)
+    )
+    integer_metrics[:, :, 2] = rng.integers(
+        0, 3, size=(component_count, interval_count)
+    )
+    integer_metrics[:, :, 3] = rng.integers(
+        0, 2, size=(component_count, interval_count)
+    )
+    integer_metrics[:, :, 4] = rng.integers(
+        0, 2, size=(component_count, interval_count)
+    )
+    float_metrics = np.empty(
+        (component_count, interval_count, 2), dtype=np.float64
+    )
+    float_metrics[:, :, 0] = rng.choice(
+        [0.001, 0.01, 0.02, 0.04], size=(component_count, interval_count)
+    )
+    float_metrics[:, :, 1] = rng.choice(
+        [0.5, 0.75, 1.0], size=(component_count, interval_count)
+    )
+    component_uids = [f"track-{index:03d}" for index in range(component_count)]
+    component_uids[0] = "轨道-\"反斜杠\\换行\n"
+    maximum_active_tracks = 17
+    maximum_tracks_per_grid_cell = 3
+    minimum_track_views = 2
+    minimum_parallax = 0.005
+
+    actual = native.select_active_track_candidates(
+        integer_metrics,
+        float_metrics,
+        component_uids,
+        minimum_track_views,
+        minimum_parallax,
+        maximum_active_tracks,
+        maximum_tracks_per_grid_cell,
+        4,
+    )
+    selected_indexes = np.asarray(actual["selectedComponentIndexes"])
+    selected_offsets = np.asarray(actual["selectedOffsets"])
+    store = ActiveTrackStore(budget())
+    for interval_index in range(interval_count):
+        candidates = []
+        rejected = Counter()
+        for component_index, track_uid in enumerate(component_uids):
+            view_count, bridge, time_bin, row, column = integer_metrics[
+                component_index, interval_index
+            ]
+            parallax, mean_score = float_metrics[
+                component_index, interval_index
+            ]
+            reasons = []
+            if view_count < minimum_track_views:
+                reasons.append("insufficient-views")
+            if parallax < minimum_parallax:
+                reasons.append("insufficient-parallax")
+            if reasons:
+                rejected.update(reasons)
+                continue
+            candidates.append(
+                {
+                    "trackUid": track_uid,
+                    "componentIndex": component_index,
+                    "viewCount": int(view_count),
+                    "bridge": bool(bridge),
+                    "parallaxDiagonals": float(parallax),
+                    "meanScore": float(mean_score),
+                    "bucket": (int(time_bin), int(row), int(column)),
+                }
+            )
+        selected, bucket_counts = store._select_candidates(
+            candidates,
+            rejected,
+            maximum_active_tracks=maximum_active_tracks,
+            maximum_tracks_per_grid_cell=maximum_tracks_per_grid_cell,
+        )
+        begin = int(selected_offsets[interval_index])
+        end = int(selected_offsets[interval_index + 1])
+        assert selected_indexes[begin:end].tolist() == [
+            value["componentIndex"] for value in selected
+        ]
+        assert int(actual["candidateCounts"][interval_index]) == len(candidates)
+        assert int(actual["insufficientViewCounts"][interval_index]) == rejected[
+            "insufficient-views"
+        ]
+        assert int(
+            actual["insufficientParallaxCounts"][interval_index]
+        ) == rejected["insufficient-parallax"]
+        assert Counter(value["bucket"] for value in selected) == bucket_counts
+        expected_uids = [value["trackUid"] for value in selected]
+        expected_bridge_uids = [
+            value["trackUid"] for value in selected if value["bridge"]
+        ]
+        canonical_hash = lambda values: hashlib.sha256(
+            json.dumps(
+                values,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        assert actual["selectedTrackUidsSha256"][interval_index] == canonical_hash(
+            expected_uids
+        )
+        assert actual["bridgeTrackUidsSha256"][interval_index] == canonical_hash(
+            expected_bridge_uids
+        )
+        assert int(actual["bridgeCounts"][interval_index]) == len(
+            expected_bridge_uids
+        )
+        bucket_begin = int(actual["bucketOffsets"][interval_index])
+        bucket_end = int(actual["bucketOffsets"][interval_index + 1])
+        actual_bucket_counts = Counter(
+            {
+                (int(time_bin), int(row), int(column)): int(count)
+                for time_bin, row, column, count in zip(
+                    actual["bucketTimeBins"][bucket_begin:bucket_end],
+                    actual["bucketRows"][bucket_begin:bucket_end],
+                    actual["bucketColumns"][bucket_begin:bucket_end],
+                    actual["bucketCounts"][bucket_begin:bucket_end],
+                    strict=True,
+                )
+            }
+        )
+        assert actual_bucket_counts == bucket_counts
+
+
 def test_bridge_and_constraint_gate_passes_with_deterministic_identity():
     store = ActiveTrackStore(budget())
     add_track(store, 0, [0, 1, 2, 3])
@@ -97,6 +240,20 @@ def test_release_group_batch_matches_individual_gate_results():
         for active_first, active_last, freeze_through in intervals
     ]
     assert store.evaluate_batch(intervals) == expected
+
+
+def test_gate_interval_microbatch_preserves_order_and_bounds_peak_batch():
+    store = ActiveTrackStore(budget(gate_interval_microbatch_size=2))
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+    intervals = [(0, 3, 1)] * 5
+
+    reports = store.evaluate_batch(intervals)
+
+    assert len(reports) == 5
+    assert [value["freezeThroughOrdinal"] for value in reports] == [1] * 5
+    assert store.last_gate_phase_wall["intervalMicrobatchCount"] == 3.0
+    assert store.last_gate_phase_wall["intervalMicrobatchSize"] == 2.0
 
 
 def test_materialized_gate_reuses_selected_tracks_without_report_payloads():

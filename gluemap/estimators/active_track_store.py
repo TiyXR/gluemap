@@ -11,6 +11,7 @@ from math import floor, hypot, isfinite
 from typing import Any, Iterable
 
 from gluemap.math.union_find import UnionFind
+from gluemap.utils.runtime_capacity import resolve_native_thread_count
 
 
 class ActiveTrackStoreError(ValueError):
@@ -61,6 +62,7 @@ class TrackBudget:
     minimum_parallax_diagonals: float
     parallax_backend_policy: str = "cuda-preferred"
     parallax_microbatch_components: int = 256
+    gate_interval_microbatch_size: int = 16
 
     @property
     def maximum_active_tracks(self) -> int:
@@ -529,10 +531,18 @@ class ActiveTrackStore:
                 self.budget.parallax_microbatch_components,
                 1,
             ),
+            "gate_interval_microbatch_size": (
+                self.budget.gate_interval_microbatch_size,
+                1,
+            ),
         }
         for name, (value, minimum) in integer_bounds.items():
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ActiveTrackStoreError(f"{name} is below its minimum")
+        if self.budget.gate_interval_microbatch_size > 128:
+            raise ActiveTrackStoreError(
+                "gate_interval_microbatch_size exceeds its maximum"
+            )
         if (
             not isfinite(self.budget.selection_time_bin_seconds)
             or self.budget.selection_time_bin_seconds <= 0
@@ -1413,6 +1423,7 @@ class ActiveTrackStore:
         allow_terminal_freeze: bool = False,
         constraint_exempt_frame_ids: set[int] | None = None,
         selection_budget_multiplier: int = 1,
+        _allow_interval_microbatch: bool = True,
     ) -> tuple[list[dict[str, Any]], list[list[SelectedTrackState]]]:
         if (
             isinstance(selection_budget_multiplier, bool)
@@ -1444,6 +1455,35 @@ class ActiveTrackStore:
         ]
         if len(frame_sets) != len(values):
             raise ActiveTrackStoreError("active frame-set batch size differs")
+        interval_microbatch_size = self.budget.gate_interval_microbatch_size
+        if _allow_interval_microbatch and len(values) > interval_microbatch_size:
+            reports: list[dict[str, Any]] = []
+            materialized: list[list[SelectedTrackState]] = []
+            aggregate_phase_wall: Counter[str] = Counter()
+            microbatch_count = 0
+            for begin in range(0, len(values), interval_microbatch_size):
+                end = begin + interval_microbatch_size
+                chunk_reports, chunk_materialized = self._evaluate_batch_impl(
+                    values[begin:end],
+                    materialize_tracks=materialize_tracks,
+                    active_frame_sets=frame_sets[begin:end],
+                    allow_terminal_freeze=allow_terminal_freeze,
+                    constraint_exempt_frame_ids=constraint_exempt_frame_ids,
+                    selection_budget_multiplier=selection_budget_multiplier,
+                    _allow_interval_microbatch=False,
+                )
+                reports.extend(chunk_reports)
+                materialized.extend(chunk_materialized)
+                aggregate_phase_wall.update(self._last_gate_phase_wall)
+                microbatch_count += 1
+            self._last_gate_phase_wall = dict(aggregate_phase_wall)
+            self._last_gate_phase_wall["intervalMicrobatchCount"] = float(
+                microbatch_count
+            )
+            self._last_gate_phase_wall["intervalMicrobatchSize"] = float(
+                interval_microbatch_size
+            )
+            return reports, materialized
         phase_started = time.perf_counter()
         active_frame_union = set().union(*(set(value) for value in frame_sets))
         components, component_source_observation_count = (
@@ -1493,28 +1533,45 @@ class ActiveTrackStore:
             ordinals,
             unique_active_observations,
             component_values,
-        ) = self._batch_component_metrics(components, values, frame_sets)
+            native_selected_by_interval,
+            native_bucket_counts_by_interval,
+        ) = self._batch_component_metrics(
+            components,
+            values,
+            frame_sets,
+            maximum_active_tracks=maximum_active_tracks,
+            maximum_tracks_per_grid_cell=maximum_tracks_per_grid_cell,
+        )
         self._last_gate_tensor_report[
             "activeComponentSourceObservationCount"
         ] = component_source_observation_count
         metric_seconds = time.perf_counter() - phase_started
         phase_started = time.perf_counter()
-        selected_by_interval: list[list[dict[str, Any]]] = []
+        selected_by_interval: list[Any] = []
         bucket_counts_by_interval: list[Counter[tuple[int, int, int]]] = []
-        selected_component_indexes: list[list[int]] = []
-        for candidates, rejected in zip(
-            candidates_by_interval, rejected_by_interval, strict=True
+        selected_component_indexes: list[Any] = []
+        for index, (candidates, rejected) in enumerate(
+            zip(candidates_by_interval, rejected_by_interval, strict=True)
         ):
-            selected, bucket_counts = self._select_candidates(
-                candidates,
-                rejected,
-                maximum_active_tracks=maximum_active_tracks,
-                maximum_tracks_per_grid_cell=maximum_tracks_per_grid_cell,
-            )
+            if native_selected_by_interval is None:
+                selected, bucket_counts = self._select_candidates(
+                    candidates,
+                    rejected,
+                    maximum_active_tracks=maximum_active_tracks,
+                    maximum_tracks_per_grid_cell=maximum_tracks_per_grid_cell,
+                )
+            else:
+                assert native_bucket_counts_by_interval is not None
+                selected = native_selected_by_interval[index]
+                bucket_counts = native_bucket_counts_by_interval[index]
             selected_by_interval.append(selected)
             bucket_counts_by_interval.append(bucket_counts)
             selected_component_indexes.append(
-                [value["componentIndex"] for value in selected]
+                (
+                    [value["componentIndex"] for value in selected]
+                    if native_selected_by_interval is None
+                    else selected["componentIndexes"]
+                )
             )
         candidate_selection_seconds = time.perf_counter() - phase_started
         phase_started = time.perf_counter()
@@ -1534,8 +1591,13 @@ class ActiveTrackStore:
             materialized = []
             if materialize_tracks:
                 active_frames = set(frame_sets[index])
-                for candidate in selected:
-                    component_index = candidate["componentIndex"]
+                component_indexes = (
+                    [candidate["componentIndex"] for candidate in selected]
+                    if native_selected_by_interval is None
+                    else selected["componentIndexes"]
+                )
+                for component_index_value in component_indexes:
+                    component_index = int(component_index_value)
                     if isinstance(component_values, _NativeComponentBatch):
                         begin = int(component_values.offsets[component_index])
                         end = int(component_values.offsets[component_index + 1])
@@ -1567,8 +1629,9 @@ class ActiveTrackStore:
                         )
                     )
             materialized_by_interval.append(materialized)
-            for candidate in selected:
-                candidate.pop("componentIndex", None)
+            if native_selected_by_interval is None:
+                for candidate in selected:
+                    candidate.pop("componentIndex", None)
             reports.append(
                 self._build_report(
                     interval=interval,
@@ -1584,6 +1647,11 @@ class ActiveTrackStore:
                     maximum_active_tracks=maximum_active_tracks,
                     maximum_tracks_per_grid_cell=(
                         maximum_tracks_per_grid_cell
+                    ),
+                    selection_summary=(
+                        None
+                        if native_selected_by_interval is None
+                        else selected
                     ),
                 )
             )
@@ -1625,12 +1693,17 @@ class ActiveTrackStore:
         components: dict[str, list[TrackObservation]] | _NativeComponentBatch,
         intervals: list[tuple[int, int, int]],
         frame_sets: list[tuple[int, ...]],
+        *,
+        maximum_active_tracks: int,
+        maximum_tracks_per_grid_cell: int,
     ) -> tuple[
-        list[list[dict[str, Any]]],
+        list[Any],
         list[Counter[str]],
         Any,
         Any,
         Any,
+        list[dict[str, Any]] | None,
+        list[Counter[tuple[int, int, int]]] | None,
     ]:
         """Compute every read-only component/window metric as one tensor batch."""
         import numpy as np
@@ -1686,6 +1759,8 @@ class ActiveTrackStore:
                     (0, len(intervals), 1), dtype=torch.bool, device=device
                 ),
                 [],
+                None,
+                None,
             )
         device = self._parallax_backend
         self._last_gate_tensor_report = {
@@ -1933,6 +2008,126 @@ class ActiveTrackStore:
         ]
         integer_values = integer_metrics.numpy()
         float_values = float_metrics.numpy()
+        native = _load_track_native_module()
+        native_selector = getattr(native, "select_active_track_candidates", None)
+        if native_selector is not None:
+            native_started = time.perf_counter()
+            selection = native_selector(
+                integer_values,
+                float_values,
+                component_uids,
+                self.budget.minimum_track_views,
+                self.budget.minimum_parallax_diagonals,
+                maximum_active_tracks,
+                maximum_tracks_per_grid_cell,
+                resolve_native_thread_count(),
+            )
+            phase_wall["nativeCandidateSelection"] = (
+                time.perf_counter() - native_started
+            )
+            selected_indexes = np.asarray(
+                selection["selectedComponentIndexes"], dtype=np.int64
+            )
+            selected_offsets = np.asarray(
+                selection["selectedOffsets"], dtype=np.int64
+            )
+            candidate_counts = np.asarray(
+                selection["candidateCounts"], dtype=np.int64
+            )
+            bridge_counts = np.asarray(
+                selection["bridgeCounts"], dtype=np.int64
+            )
+            selected_uid_hashes = selection["selectedTrackUidsSha256"]
+            bridge_uid_hashes = selection["bridgeTrackUidsSha256"]
+            insufficient_view_counts = np.asarray(
+                selection["insufficientViewCounts"], dtype=np.int64
+            )
+            insufficient_parallax_counts = np.asarray(
+                selection["insufficientParallaxCounts"], dtype=np.int64
+            )
+            bucket_offsets = np.asarray(
+                selection["bucketOffsets"], dtype=np.int64
+            )
+            bucket_time_bins = np.asarray(
+                selection["bucketTimeBins"], dtype=np.int64
+            )
+            bucket_rows = np.asarray(selection["bucketRows"], dtype=np.int64)
+            bucket_columns = np.asarray(
+                selection["bucketColumns"], dtype=np.int64
+            )
+            bucket_values = np.asarray(
+                selection["bucketCounts"], dtype=np.int64
+            )
+            native_selected_by_interval: list[dict[str, Any]] = []
+            native_bucket_counts_by_interval: list[
+                Counter[tuple[int, int, int]]
+            ] = []
+            materialize_started = time.perf_counter()
+            for interval_index in range(len(intervals)):
+                begin = int(selected_offsets[interval_index])
+                end = int(selected_offsets[interval_index + 1])
+                interval_indexes = selected_indexes[begin:end]
+                bucket_begin = int(bucket_offsets[interval_index])
+                bucket_end = int(bucket_offsets[interval_index + 1])
+                buckets = Counter(
+                    {
+                        (int(time_bin), int(row), int(column)): int(count)
+                        for time_bin, row, column, count in zip(
+                            bucket_time_bins[bucket_begin:bucket_end],
+                            bucket_rows[bucket_begin:bucket_end],
+                            bucket_columns[bucket_begin:bucket_end],
+                            bucket_values[bucket_begin:bucket_end],
+                            strict=True,
+                        )
+                    }
+                )
+                rejected = rejected_by_interval[interval_index]
+                insufficient_views = int(
+                    insufficient_view_counts[interval_index]
+                )
+                insufficient_parallax = int(
+                    insufficient_parallax_counts[interval_index]
+                )
+                if insufficient_views:
+                    rejected["insufficient-views"] = insufficient_views
+                if insufficient_parallax:
+                    rejected["insufficient-parallax"] = insufficient_parallax
+                rejected["active-budget-or-cell-cap"] = int(
+                    candidate_counts[interval_index]
+                ) - len(interval_indexes)
+                native_selected_by_interval.append(
+                    {
+                        "componentIndexes": interval_indexes,
+                        "selectedTrackCount": len(interval_indexes),
+                        "bridgeTrackCount": int(
+                            bridge_counts[interval_index]
+                        ),
+                        "selectedTrackUidsSha256": selected_uid_hashes[
+                            interval_index
+                        ],
+                        "bridgeTrackUidsSha256": bridge_uid_hashes[
+                            interval_index
+                        ],
+                    }
+                )
+                native_bucket_counts_by_interval.append(buckets)
+            phase_wall["selectedCandidateMaterialize"] = (
+                time.perf_counter() - materialize_started
+            )
+            phase_wall["candidateBuild"] = time.perf_counter() - phase_started
+            self._last_gate_metric_phase_wall = phase_wall
+            self._last_gate_tensor_report["activeTrackSelectionNativeThreads"] = (
+                resolve_native_thread_count()
+            )
+            return (
+                [range(int(count)) for count in candidate_counts],
+                rejected_by_interval,
+                ordinals,
+                unique_active_observations,
+                component_values,
+                native_selected_by_interval,
+                native_bucket_counts_by_interval,
+            )
         for component_index, track_uid in enumerate(component_uids):
             for interval_index in range(len(intervals)):
                 view_count, bridge, time_bin, row, column = integer_values[
@@ -1974,6 +2169,8 @@ class ActiveTrackStore:
             ordinals,
             unique_active_observations,
             component_values,
+            None,
+            None,
         )
 
     def _select_candidates(
@@ -2032,7 +2229,7 @@ class ActiveTrackStore:
         *,
         ordinals: Any,
         unique_active_observations: Any,
-        selected_component_indexes: list[list[int]],
+        selected_component_indexes: list[Any],
         intervals: list[tuple[int, int, int]],
         frame_sets: list[tuple[int, ...]],
     ) -> list[Counter[int]]:
@@ -2045,8 +2242,13 @@ class ActiveTrackStore:
             device=ordinals.device,
         )
         for interval_index, indexes in enumerate(selected_component_indexes):
-            if indexes:
-                selected_mask[indexes, interval_index] = True
+            if len(indexes):
+                selected_mask[
+                    torch.as_tensor(
+                        indexes, dtype=torch.int64, device=ordinals.device
+                    ),
+                    interval_index,
+                ] = True
         selected_observations = (
             unique_active_observations & selected_mask[:, :, None]
         )
@@ -2077,8 +2279,8 @@ class ActiveTrackStore:
         self,
         *,
         interval: tuple[int, int, int],
-        candidates: list[dict[str, Any]],
-        selected: list[dict[str, Any]],
+        candidates: Any,
+        selected: Any,
         bucket_counts: Counter[tuple[int, int, int]],
         rejected: Counter[str],
         constraints_per_frame: Counter[int],
@@ -2088,6 +2290,7 @@ class ActiveTrackStore:
         selection_budget_multiplier: int = 1,
         maximum_active_tracks: int | None = None,
         maximum_tracks_per_grid_cell: int | None = None,
+        selection_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         active_first_ordinal, active_last_ordinal, freeze_through_ordinal = interval
         active_frame_ids = frame_ids or tuple(
@@ -2118,15 +2321,31 @@ class ActiveTrackStore:
             if constraints_per_frame[ordinal]
             < self.budget.minimum_constraints_per_keyframe
         ]
-        bridge_tracks = [value for value in selected if value["bridge"]]
-        selected_track_uids = [value["trackUid"] for value in selected]
-        bridge_track_uids = [value["trackUid"] for value in bridge_tracks]
+        if selection_summary is None:
+            bridge_tracks = [value for value in selected if value["bridge"]]
+            selected_track_count = len(selected)
+            bridge_track_count = len(bridge_tracks)
+            selected_track_uids_sha256 = _canonical_sha256(
+                [value["trackUid"] for value in selected]
+            )
+            bridge_track_uids_sha256 = _canonical_sha256(
+                [value["trackUid"] for value in bridge_tracks]
+            )
+        else:
+            selected_track_count = selection_summary["selectedTrackCount"]
+            bridge_track_count = selection_summary["bridgeTrackCount"]
+            selected_track_uids_sha256 = selection_summary[
+                "selectedTrackUidsSha256"
+            ]
+            bridge_track_uids_sha256 = selection_summary[
+                "bridgeTrackUidsSha256"
+            ]
         reason_codes: list[str] = []
-        if not selected or zero_constraint_ordinals:
+        if not selected_track_count or zero_constraint_ordinals:
             reason_codes.append("ZERO_CONSTRAINT")
         if (
             not terminal_freeze
-            and len(bridge_tracks) < self.budget.minimum_bridge_tracks
+            and bridge_track_count < self.budget.minimum_bridge_tracks
         ):
             reason_codes.append("BRIDGE_TRACKS_BELOW_MINIMUM")
         if under_constraint_ordinals:
@@ -2142,8 +2361,8 @@ class ActiveTrackStore:
             "freezeThroughOrdinal": freeze_through_ordinal,
             "terminalFreeze": terminal_freeze,
             "candidateTrackCount": len(candidates),
-            "selectedTrackCount": len(selected),
-            "bridgeTrackCount": len(bridge_tracks),
+            "selectedTrackCount": selected_track_count,
+            "bridgeTrackCount": bridge_track_count,
             "selectionBudgetMultiplier": selection_budget_multiplier,
             "maximumActiveTracks": (
                 self.budget.maximum_active_tracks
@@ -2167,8 +2386,8 @@ class ActiveTrackStore:
             ),
             "observationCount": self.observation_count,
             "edgeCount": self.edge_count,
-            "selectedTrackUidsSha256": _canonical_sha256(selected_track_uids),
-            "bridgeTrackUidsSha256": _canonical_sha256(bridge_track_uids),
+            "selectedTrackUidsSha256": selected_track_uids_sha256,
+            "bridgeTrackUidsSha256": bridge_track_uids_sha256,
             "constraintsPerFrame": frame_constraints,
             "constraintExemptFrameIds": exempt_frame_ids,
             "constraintRequiredOrdinals": constraint_required_ordinals,
@@ -2274,55 +2493,40 @@ class ActiveTrackStore:
         ):
             raise ActiveTrackStoreError("release proposal identity differs")
         _require_sha256(accepted_journal_head, "accepted journal head")
-        release_uids = set(self._pending_release["uids"])
+        release_uid_values = self._pending_release["uids"]
+        release_uids = set(release_uid_values)
         released_frame_ids = {
             self._observations[uid].geometry_ordinal for uid in release_uids
         }
+        released_from_frames = set().union(
+            *(
+                self._observations_by_frame.get(frame_id, set())
+                for frame_id in released_frame_ids
+            )
+        )
+        if released_from_frames != release_uids:
+            raise ActiveTrackStoreError(
+                "active track release must own complete geometry frames"
+            )
         released_native_rows = None
         if self._native_graph is not None:
             if self._native_tensor_rows:
                 released_native_rows = self._native_graph.remove_nodes_with_rows(
-                    sorted(release_uids)
+                    release_uid_values
                 )
             else:
-                self._native_graph.remove_nodes(sorted(release_uids))
-        for uid in release_uids:
-            observation = self._observations.pop(uid)
-            frame_values = self._observations_by_frame[observation.geometry_ordinal]
-            frame_values.remove(uid)
-            if not frame_values:
-                del self._observations_by_frame[observation.geometry_ordinal]
-            bucket = self._spatial_bucket(observation)
-            frame_buckets = self._spatial_buckets_by_frame.get(
-                observation.geometry_ordinal
-            )
-            spatial_values = (
-                None if frame_buckets is None else frame_buckets.get(bucket)
-            )
-            if spatial_values is not None and uid in spatial_values:
-                spatial_values.remove(uid)
-                if not spatial_values:
-                    del frame_buckets[bucket]
-                if not frame_buckets:
-                    del self._spatial_buckets_by_frame[
-                        observation.geometry_ordinal
-                    ]
+                self._native_graph.remove_nodes(release_uid_values)
+        self._observations = {
+            uid: observation
+            for uid, observation in self._observations.items()
+            if observation.geometry_ordinal not in released_frame_ids
+        }
         for frame_id in released_frame_ids:
-            remaining_uids = sorted(
-                self._observations_by_frame.get(frame_id, ())
-            )
-            if not remaining_uids:
-                self._native_spatial_uids_by_frame.pop(frame_id, None)
-                self._native_spatial_x_by_frame.pop(frame_id, None)
-                self._native_spatial_y_by_frame.pop(frame_id, None)
-                continue
-            self._native_spatial_uids_by_frame[frame_id] = remaining_uids
-            self._native_spatial_x_by_frame[frame_id] = [
-                self._observations[uid].x for uid in remaining_uids
-            ]
-            self._native_spatial_y_by_frame[frame_id] = [
-                self._observations[uid].y for uid in remaining_uids
-            ]
+            self._observations_by_frame.pop(frame_id, None)
+            self._spatial_buckets_by_frame.pop(frame_id, None)
+            self._native_spatial_uids_by_frame.pop(frame_id, None)
+            self._native_spatial_x_by_frame.pop(frame_id, None)
+            self._native_spatial_y_by_frame.pop(frame_id, None)
         if self._native_graph is None:
             self._edges = {
                 key
