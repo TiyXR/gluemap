@@ -100,6 +100,7 @@ class SelectedTrackState:
 
     track_uid: str
     observations: tuple[TrackObservation, ...]
+    landmark_owner_ordinal: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +112,7 @@ class _NativeComponentBatch:
     offsets: Any
     component_uids: list[str]
     ordered_tensor_rows: Any
+    owner_ordinals: Any
 
     def __len__(self) -> int:
         return len(self.component_uids)
@@ -430,6 +432,7 @@ class ActiveTrackStore:
         self._edges: set[tuple[str, str]] = set()
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
+        self._landmark_owner_by_observation_uid: dict[str, int] = {}
         self._native_graph = self._create_native_graph()
         self._native_tensor_rows = self._supports_native_tensor_rows()
         self._last_accepted_journal_head: str | None = None
@@ -619,6 +622,58 @@ class ActiveTrackStore:
             "persistentObservationTensorReusedRows": table.reused_row_count,
         }
 
+    def frame_coverage_snapshot(self, geometry_ordinal: int) -> dict[str, Any]:
+        """Return bounded pre-ingest coverage for one source frame."""
+        if isinstance(geometry_ordinal, bool) or geometry_ordinal < 0:
+            raise ActiveTrackStoreError("coverage frame ordinal is invalid")
+        observation_uids = sorted(
+            self._observations_by_frame.get(geometry_ordinal, ())
+        )
+        if self._native_graph is not None and observation_uids:
+            component_uids = self._native_graph.component_uids(observation_uids)
+        else:
+            component_uids = [
+                self._component_uid_by_root[
+                    self._union_find.find(observation_uid)
+                ]
+                for observation_uid in observation_uids
+            ]
+        cells = {
+            self._grid_cell(self._observations[observation_uid])
+            for observation_uid in observation_uids
+        }
+        total_cells = (
+            self.budget.coverage_grid_columns * self.budget.coverage_grid_rows
+        )
+        return {
+            "geometryOrdinal": geometry_ordinal,
+            "observationCount": len(observation_uids),
+            "componentCount": len(set(component_uids)),
+            "occupiedGridCellCount": len(cells),
+            "coverageGridCellCount": total_cells,
+            "coverageGridFraction": len(cells) / total_cells,
+        }
+
+    def mark_landmark_owner(
+        self, observation_uids: Iterable[str], owner_ordinal: int
+    ) -> int:
+        """Persist a component owner even after its original frame is released."""
+        if isinstance(owner_ordinal, bool) or owner_ordinal < 0:
+            raise ActiveTrackStoreError("landmark owner ordinal is invalid")
+        uids = sorted(set(observation_uids))
+        if not uids or any(uid not in self._observations for uid in uids):
+            raise ActiveTrackStoreError("landmark owner observation is absent")
+        for uid in uids:
+            current = self._landmark_owner_by_observation_uid.get(uid)
+            self._landmark_owner_by_observation_uid[uid] = (
+                owner_ordinal if current is None else min(current, owner_ordinal)
+            )
+        if self._native_graph is not None and hasattr(
+            self._native_graph, "mark_landmark_owner"
+        ):
+            self._native_graph.mark_landmark_owner(uids, owner_ordinal)
+        return len(uids)
+
     def add_observations(self, values: Iterable[TrackObservation]) -> None:
         if self._pending_release is not None:
             raise ActiveTrackStoreError("cannot ingest while release is pending")
@@ -631,7 +686,12 @@ class ActiveTrackStore:
                 continue
             self._insert_observation(value)
 
-    def _insert_observation(self, value: TrackObservation) -> None:
+    def _insert_observation(
+        self,
+        value: TrackObservation,
+        *,
+        implicit_landmark_owner: bool = True,
+    ) -> None:
         """Insert one already validated, previously unseen observation."""
         frame_values = self._observations_by_frame[value.geometry_ordinal]
         if (
@@ -671,6 +731,10 @@ class ActiveTrackStore:
                 )
             else:
                 self._gpu_observation_table.queue(value)
+        if implicit_landmark_owner:
+            self.mark_landmark_owner(
+                [value.observation_uid], value.geometry_ordinal
+            )
 
     def _insert_observation_batch(
         self,
@@ -759,6 +823,7 @@ class ActiveTrackStore:
         values: Iterable[TrackObservation],
         *,
         assume_valid: bool = False,
+        implicit_landmark_owner: bool = True,
     ) -> list[str]:
         """Intern one deterministic Star batch without per-point API calls."""
         if self._pending_release is not None:
@@ -768,7 +833,10 @@ class ActiveTrackStore:
             for value in batch:
                 self._validate_observation(value)
         if self._spatial_intern_backend == "native-openmp" and batch:
-            return self._intern_observations_native(batch)
+            return self._intern_observations_native(
+                batch,
+                implicit_landmark_owner=implicit_landmark_owner,
+            )
         radius_squared = self.budget.intra_image_merge_radius_pixels**2
         candidates: list[tuple[float, str, str, int, str]] = []
         for index, value in enumerate(batch):
@@ -809,14 +877,20 @@ class ActiveTrackStore:
         for index, value in enumerate(batch):
             if resolved_uids[index] is not None:
                 continue
-            self._insert_observation(value)
+            self._insert_observation(
+                value,
+                implicit_landmark_owner=implicit_landmark_owner,
+            )
             resolved_uids[index] = value.observation_uid
         if any(value is None for value in resolved_uids):
             raise ActiveTrackStoreError("spatial intern result is incomplete")
         return [str(value) for value in resolved_uids]
 
     def _intern_observations_native(
-        self, values: list[TrackObservation]
+        self,
+        values: list[TrackObservation],
+        *,
+        implicit_landmark_owner: bool = True,
     ) -> list[str]:
         import numpy as np
         native = _load_track_native_module()
@@ -862,7 +936,10 @@ class ActiveTrackStore:
                 if existing != value:
                     raise ActiveTrackStoreError("observation identity was reused")
             else:
-                self._insert_observation(value)
+                self._insert_observation(
+                    value,
+                    implicit_landmark_owner=implicit_landmark_owner,
+                )
             resolved_uids.append(value.observation_uid)
         return resolved_uids
 
@@ -879,6 +956,7 @@ class ActiveTrackStore:
         *,
         image_width: int,
         image_height: int,
+        landmark_owner_ordinal: int | None = None,
         assume_valid: bool = False,
     ) -> list[str]:
         """Intern continuous Star columns before creating persistent objects.
@@ -975,11 +1053,15 @@ class ActiveTrackStore:
                 for index in range(count)
             ]
             resolved = self.intern_observations(
-                values, assume_valid=assume_valid
+                values,
+                assume_valid=assume_valid,
+                implicit_landmark_owner=False,
             )
             self._last_column_intern_phase_wall["newObservationInsert"] = (
                 time.perf_counter() - phase_started
             )
+            if landmark_owner_ordinal is not None and resolved:
+                self.mark_landmark_owner(resolved, landmark_owner_ordinal)
             return resolved
 
         phase_started = time.perf_counter()
@@ -1042,6 +1124,10 @@ class ActiveTrackStore:
         self._last_column_intern_phase_wall["newObservationInsert"] = (
             time.perf_counter() - phase_started
         )
+        if landmark_owner_ordinal is not None and resolved_uids:
+            self.mark_landmark_owner(
+                resolved_uids, landmark_owner_ordinal
+            )
         return resolved_uids
 
     def _spatial_bucket(self, value: TrackObservation) -> tuple[int, int]:
@@ -1220,12 +1306,61 @@ class ActiveTrackStore:
         if self._native_tensor_rows and self._gpu_observation_table is not None:
             import numpy as np
 
-            ordered, offsets, component_uids, ordered_rows = (
-                self._native_graph.group_component_rows(
-                    observation_uids,
-                    np.asarray(observation_frame_ids, dtype=np.int64),
+            frame_column = np.asarray(observation_frame_ids, dtype=np.int64)
+            if hasattr(self._native_graph, "group_owned_component_rows"):
+                ordered, offsets, component_uids, ordered_rows, owner_ordinals = (
+                    self._native_graph.group_owned_component_rows(
+                        observation_uids, frame_column
+                    )
                 )
-            )
+            else:
+                ordered, offsets, all_component_uids, ordered_rows = (
+                    self._native_graph.group_component_rows(
+                        observation_uids, frame_column
+                    )
+                )
+                ordered_values = ordered.tolist()
+                boundaries = offsets.tolist()
+                keep_groups: list[int] = []
+                owner_values: list[int] = []
+                for group in range(len(all_component_uids)):
+                    owners = [
+                        self._landmark_owner_by_observation_uid.get(
+                            observation_uids[ordered_values[position]], -1
+                        )
+                        for position in range(
+                            boundaries[group], boundaries[group + 1]
+                        )
+                    ]
+                    owners = [value for value in owners if value >= 0]
+                    if owners:
+                        keep_groups.append(group)
+                        owner_values.append(min(owners))
+                selected_positions = [
+                    position
+                    for group in keep_groups
+                    for position in range(
+                        boundaries[group], boundaries[group + 1]
+                    )
+                ]
+                ordered = np.asarray(
+                    [ordered_values[position] for position in selected_positions],
+                    dtype=np.int64,
+                )
+                ordered_rows = np.asarray(ordered_rows, dtype=np.int64)[
+                    selected_positions
+                ]
+                lengths = [
+                    boundaries[group + 1] - boundaries[group]
+                    for group in keep_groups
+                ]
+                offsets = np.asarray(
+                    [0, *np.cumsum(lengths).tolist()], dtype=np.int64
+                )
+                component_uids = [
+                    all_component_uids[group] for group in keep_groups
+                ]
+                owner_ordinals = np.asarray(owner_values, dtype=np.int64)
             return (
                 _NativeComponentBatch(
                     observation_uids=observation_uids,
@@ -1233,6 +1368,7 @@ class ActiveTrackStore:
                     offsets=offsets,
                     component_uids=component_uids,
                     ordered_tensor_rows=ordered_rows,
+                    owner_ordinals=owner_ordinals,
                 ),
                 source_observation_count,
             )
@@ -1251,7 +1387,15 @@ class ActiveTrackStore:
                     value.observation_uid,
                 )
             )
-        return dict(values), source_observation_count
+        owned_values: dict[str, list[TrackObservation]] = {}
+        for component_uid, observations in values.items():
+            if any(
+                observation.observation_uid
+                in self._landmark_owner_by_observation_uid
+                for observation in observations
+            ):
+                owned_values[component_uid] = observations
+        return owned_values, source_observation_count
 
     def _native_component_groups(
         self, observation_uids: list[str]
@@ -1625,6 +1769,24 @@ class ActiveTrackStore:
                     materialized.append(
                         SelectedTrackState(
                             track_uid=component_uid,
+                            landmark_owner_ordinal=(
+                                int(
+                                    component_values.owner_ordinals[
+                                        component_index
+                                    ]
+                                )
+                                if isinstance(
+                                    component_values, _NativeComponentBatch
+                                )
+                                else min(
+                                    self._landmark_owner_by_observation_uid[
+                                        value.observation_uid
+                                    ]
+                                    for value in component_observations
+                                    if value.observation_uid
+                                    in self._landmark_owner_by_observation_uid
+                                )
+                            ),
                             observations=tuple(observation_by_frame.values()),
                         )
                     )
@@ -2520,6 +2682,11 @@ class ActiveTrackStore:
             uid: observation
             for uid, observation in self._observations.items()
             if observation.geometry_ordinal not in released_frame_ids
+        }
+        self._landmark_owner_by_observation_uid = {
+            uid: owner
+            for uid, owner in self._landmark_owner_by_observation_uid.items()
+            if uid not in release_uids
         }
         for frame_id in released_frame_ids:
             self._observations_by_frame.pop(frame_id, None)

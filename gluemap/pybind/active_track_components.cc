@@ -531,6 +531,7 @@ public:
       uid_by_node_.push_back(uid);
       parents_.push_back(node);
       component_uids_.push_back(uid);
+      component_owner_ordinals_.push_back(-1);
       alive_.push_back(true);
       int64_t tensor_row = -1;
       if (!free_tensor_rows_.empty()) {
@@ -546,6 +547,19 @@ public:
       ++live_node_count_;
     }
     return static_cast<int64_t>(uids.size());
+  }
+
+  void MarkLandmarkOwner(const std::vector<std::string> &uids,
+                         int64_t owner_ordinal) {
+    if (owner_ordinal < 0) {
+      throw std::invalid_argument("landmark owner ordinal is invalid");
+    }
+    py::gil_scoped_release release;
+    for (const std::string &uid : uids) {
+      const int64_t root = Find(Node(uid));
+      int64_t &current = component_owner_ordinals_[static_cast<size_t>(root)];
+      current = current < 0 ? owner_ordinal : std::min(current, owner_ordinal);
+    }
   }
 
   int64_t AddEdges(const std::vector<std::string> &first_uids,
@@ -699,6 +713,78 @@ public:
                           VecToArray1D(std::move(ordered_rows)));
   }
 
+  py::tuple GroupOwnedComponentRows(
+      const std::vector<std::string> &uids,
+      py::array_t<int64_t, py::array::c_style> frame_ids) {
+    if (frame_ids.size() != static_cast<int64_t>(uids.size())) {
+      throw std::invalid_argument("active track component frame column differs");
+    }
+    std::vector<int64_t> ordered_indexes;
+    std::vector<int64_t> ordered_rows;
+    std::vector<int64_t> offsets;
+    std::vector<int64_t> owner_ordinals;
+    std::vector<std::string> component_uids;
+    {
+      py::gil_scoped_release release;
+      std::unordered_map<std::string, int64_t> group_by_component;
+      std::vector<std::vector<int64_t>> groups;
+      std::vector<std::vector<int64_t>> group_rows;
+      std::vector<std::unordered_set<int64_t>> seen_frames;
+      std::vector<int64_t> group_owners;
+      groups.reserve(uids.size());
+      group_rows.reserve(uids.size());
+      seen_frames.reserve(uids.size());
+      group_owners.reserve(uids.size());
+      const int64_t *frames = frame_ids.data();
+      for (size_t index = 0; index < uids.size(); ++index) {
+        const int64_t node = Node(uids[index]);
+        const int64_t root = Find(node);
+        const std::string &component_uid =
+            component_uids_[static_cast<size_t>(root)];
+        const auto inserted = group_by_component.emplace(
+            component_uid, static_cast<int64_t>(groups.size()));
+        if (inserted.second) {
+          groups.emplace_back();
+          group_rows.emplace_back();
+          seen_frames.emplace_back();
+          component_uids.push_back(component_uid);
+          group_owners.push_back(
+              component_owner_ordinals_[static_cast<size_t>(root)]);
+        }
+        const size_t group = static_cast<size_t>(inserted.first->second);
+        if (!seen_frames[group].insert(frames[index]).second) {
+          continue;
+        }
+        groups[group].push_back(static_cast<int64_t>(index));
+        group_rows[group].push_back(tensor_rows_[static_cast<size_t>(node)]);
+      }
+      std::vector<std::string> owned_component_uids;
+      owned_component_uids.reserve(component_uids.size());
+      ordered_indexes.reserve(uids.size());
+      ordered_rows.reserve(uids.size());
+      offsets.reserve(groups.size() + 1);
+      offsets.push_back(0);
+      for (size_t group = 0; group < groups.size(); ++group) {
+        if (group_owners[group] < 0) {
+          continue;
+        }
+        ordered_indexes.insert(ordered_indexes.end(), groups[group].begin(),
+                               groups[group].end());
+        ordered_rows.insert(ordered_rows.end(), group_rows[group].begin(),
+                            group_rows[group].end());
+        offsets.push_back(static_cast<int64_t>(ordered_indexes.size()));
+        owner_ordinals.push_back(group_owners[group]);
+        owned_component_uids.push_back(std::move(component_uids[group]));
+      }
+      component_uids = std::move(owned_component_uids);
+    }
+    return py::make_tuple(VecToArray1D(std::move(ordered_indexes)),
+                          VecToArray1D(std::move(offsets)),
+                          std::move(component_uids),
+                          VecToArray1D(std::move(ordered_rows)),
+                          VecToArray1D(std::move(owner_ordinals)));
+  }
+
   void RemoveNodes(const std::vector<std::string> &uids) {
     py::gil_scoped_release release;
     RemoveNodesImpl(uids, nullptr);
@@ -727,10 +813,13 @@ public:
     }
 
     std::vector<std::string> previous_components(uid_by_node_.size());
+    std::vector<int64_t> previous_owners(uid_by_node_.size(), -1);
     for (size_t node = 0; node < uid_by_node_.size(); ++node) {
       if (alive_[node]) {
-        previous_components[node] = component_uids_[
-            static_cast<size_t>(Find(static_cast<int64_t>(node)))];
+        const size_t root =
+            static_cast<size_t>(Find(static_cast<int64_t>(node)));
+        previous_components[node] = component_uids_[root];
+        previous_owners[node] = component_owner_ordinals_[root];
       }
     }
     for (size_t node = 0; node < uid_by_node_.size(); ++node) {
@@ -747,6 +836,7 @@ public:
       if (alive_[node]) {
         parents_[node] = static_cast<int64_t>(node);
         component_uids_[node] = previous_components[node];
+        component_owner_ordinals_[node] = previous_owners[node];
       }
     }
 
@@ -802,8 +892,18 @@ private:
     const std::string component_uid = std::min(
         component_uids_[static_cast<size_t>(first_root)],
         component_uids_[static_cast<size_t>(second_root)]);
+    const int64_t first_owner =
+        component_owner_ordinals_[static_cast<size_t>(first_root)];
+    const int64_t second_owner =
+        component_owner_ordinals_[static_cast<size_t>(second_root)];
+    const int64_t component_owner =
+        first_owner < 0 ? second_owner
+                        : (second_owner < 0 ? first_owner
+                                            : std::min(first_owner, second_owner));
     parents_[static_cast<size_t>(first_root)] = second_root;
     component_uids_[static_cast<size_t>(second_root)] = component_uid;
+    component_owner_ordinals_[static_cast<size_t>(second_root)] =
+        component_owner;
   }
 
   int64_t AddEdge(int64_t first, int64_t second) {
@@ -824,6 +924,7 @@ private:
   std::vector<std::string> uid_by_node_;
   std::vector<int64_t> parents_;
   std::vector<std::string> component_uids_;
+  std::vector<int64_t> component_owner_ordinals_;
   std::vector<bool> alive_;
   std::vector<int64_t> tensor_rows_;
   std::vector<int64_t> free_tensor_rows_;
@@ -903,12 +1004,17 @@ void BindActiveTrackGraph(py::module_ &module) {
       .def("add_star_edges", &ActiveTrackGraph::AddStarEdges,
            py::arg("track_indexes"), py::arg("view_indexes"),
            py::arg("resolved_uids"))
+      .def("mark_landmark_owner", &ActiveTrackGraph::MarkLandmarkOwner,
+           py::arg("uids"), py::arg("owner_ordinal"))
       .def("component_uids", &ActiveTrackGraph::ComponentUids,
            py::arg("uids"))
       .def("group_components", &ActiveTrackGraph::GroupComponents,
            py::arg("uids"))
       .def("group_component_rows", &ActiveTrackGraph::GroupComponentRows,
            py::arg("uids"), py::arg("frame_ids"))
+      .def("group_owned_component_rows",
+           &ActiveTrackGraph::GroupOwnedComponentRows, py::arg("uids"),
+           py::arg("frame_ids"))
       .def("remove_nodes", &ActiveTrackGraph::RemoveNodes,
            py::arg("uids"))
       .def("remove_nodes_with_rows", &ActiveTrackGraph::RemoveNodesWithRows,

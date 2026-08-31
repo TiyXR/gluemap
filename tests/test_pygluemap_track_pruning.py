@@ -90,6 +90,31 @@ def test_batch_observation_uids_match_the_python_contract():
     assert values == expected
 
 
+def test_landmark_owner_survives_owner_node_release_and_filters_ownerless_components():
+    graph = pygluemap_tracks.ActiveTrackGraph()
+    uids = ["owner-0", "owned-1", "owned-2", "unowned-0", "unowned-1"]
+    graph.add_nodes_with_rows(uids)
+    graph.add_edges(
+        ["owner-0", "owned-1", "unowned-0"],
+        ["owned-1", "owned-2", "unowned-1"],
+    )
+    graph.mark_landmark_owner(["owner-0"], 0)
+
+    grouped = graph.group_owned_component_rows(
+        uids, np.asarray([0, 1, 2, 0, 1], dtype=np.int64)
+    )
+    assert grouped[2] == ["owned-1"]
+    assert grouped[4].tolist() == [0]
+
+    graph.remove_nodes_with_rows(["owner-0"])
+    grouped = graph.group_owned_component_rows(
+        ["owned-1", "owned-2", "unowned-0", "unowned-1"],
+        np.asarray([1, 2, 0, 1], dtype=np.int64),
+    )
+    assert grouped[2] == ["owned-1"]
+    assert grouped[4].tolist() == [0]
+
+
 def test_active_track_graph_groups_unique_frame_rows_and_reuses_released_rows():
     graph = pygluemap_tracks.ActiveTrackGraph()
     rows = graph.add_nodes_with_rows(["a0", "a0-duplicate", "b1", "c2"])

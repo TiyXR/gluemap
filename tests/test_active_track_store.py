@@ -359,6 +359,40 @@ def test_column_intern_constructs_only_new_observation_rows():
     assert store.observation_count == 2
 
 
+def test_landmark_owner_filters_ba_tracks_without_deleting_observation_frames():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    uids = [f"candidate-{frame}" for frame in range(4)]
+    resolved = store.intern_observation_columns(
+        uids,
+        [0, 1, 2, 3],
+        [f"frame-{frame}" for frame in range(4)],
+        [0, 1, 2, 3],
+        [1, 1, 1, 1],
+        [10, 10, 10, 10],
+        [[10.0, 10.0], [20.0, 10.0], [30.0, 10.0], [40.0, 10.0]],
+        [1.0, 1.0, 1.0, 1.0],
+        image_width=200,
+        image_height=100,
+        assume_valid=True,
+    )
+    store.add_correspondence_pairs(zip(resolved[:-1], resolved[1:], strict=True))
+
+    ownerless = store.evaluate(
+        active_first_ordinal=0,
+        active_last_ordinal=3,
+        freeze_through_ordinal=1,
+    )
+    assert ownerless["selectedTrackCount"] == 0
+    assert ownerless["status"] == "failed"
+    assert store.frame_coverage_snapshot(2)["componentCount"] == 1
+
+    store.mark_landmark_owner([resolved[0]], 0)
+    owned, tracks = store.evaluate_batch_materialized([(0, 3, 1)])
+    assert owned[0]["status"] == "passed"
+    assert owned[0]["selectedTrackCount"] == 1
+    assert tracks[0][0].landmark_owner_ordinal == 0
+
+
 def test_fixed_gauge_is_not_a_visual_constraint_minimum():
     store = ActiveTrackStore(
         budget(parallax_backend_policy="cpu", minimum_constraints_per_keyframe=2)
