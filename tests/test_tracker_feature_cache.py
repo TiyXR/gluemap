@@ -77,6 +77,8 @@ def test_context_microbatch_deduplicates_overlapping_tracker_inputs():
     assert report["requestedFrameCount"] == 6
     assert report["cacheMissCount"] == 4
     assert report["microbatchReuseCount"] == 2
+    assert report["hitRate"] == 2 / 6
+    assert report["residentHitRate"] == 0.0
 
 
 def test_collated_frame_uids_remain_stable_tracker_cache_keys():

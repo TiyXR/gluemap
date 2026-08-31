@@ -178,7 +178,12 @@ class Pi3EncoderTokenCache:
             "residentFrameCount": len(self._entries),
             "peakResidentFrameCount": self.peak_entry_count,
             "peakResidentLogicalBytes": self.peak_logical_bytes,
-            "hitRate": self.hit_count / requests if requests else 0.0,
+            "hitRate": (
+                (self.hit_count + self.microbatch_reuse_count) / requests
+                if requests
+                else 0.0
+            ),
+            "residentHitRate": self.hit_count / requests if requests else 0.0,
             "preprocessingIdentity": self.PREPROCESSING_IDENTITY,
             "dtype": self.dtype,
             "device": self.device,
