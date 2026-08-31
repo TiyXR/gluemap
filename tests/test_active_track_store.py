@@ -333,6 +333,18 @@ def test_gpu_observation_rows_upload_once_and_reuse_released_slots():
     )
 
 
+def test_frame_set_gate_can_skip_ba_track_materialization():
+    store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
+    add_track(store, 0, [0, 1, 2])
+    add_track(store, 1, [0, 1, 2])
+
+    reports = store.evaluate_frame_sets([((0, 1, 2), 1)])
+
+    assert len(reports) == 1
+    assert reports[0]["status"] == "passed"
+    assert reports[0]["constraintsPerFrame"] == {"0": 2, "1": 2, "2": 2}
+
+
 def test_column_intern_constructs_only_new_observation_rows():
     store = ActiveTrackStore(budget(parallax_backend_policy="cpu"))
     existing = observation(0, 0, x=10.0, y=10.0)

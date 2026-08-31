@@ -1558,6 +1558,42 @@ class ActiveTrackStore:
             selection_budget_multiplier=selection_budget_multiplier,
         )
 
+    def evaluate_frame_sets(
+        self,
+        windows: Iterable[tuple[Iterable[int], int]],
+        *,
+        terminal: bool = False,
+        constraint_exempt_frame_ids: Iterable[int] = (),
+        selection_budget_multiplier: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Evaluate arbitrary frame sets without building BA track objects."""
+        values: list[tuple[int, ...]] = []
+        intervals: list[tuple[int, int, int]] = []
+        for frame_ids, freeze_through in windows:
+            ordered = tuple(sorted(set(int(value) for value in frame_ids)))
+            if (
+                len(ordered) < 2
+                or ordered[0] < 0
+                or freeze_through not in ordered
+                or (not terminal and freeze_through == ordered[-1])
+            ):
+                raise ActiveTrackStoreError(
+                    "active frame-set/freeze identity is invalid"
+                )
+            values.append(ordered)
+            intervals.append((ordered[0], ordered[-1], freeze_through))
+        reports, _ = self._evaluate_batch_impl(
+            intervals,
+            materialize_tracks=False,
+            active_frame_sets=values,
+            allow_terminal_freeze=terminal,
+            constraint_exempt_frame_ids={
+                int(value) for value in constraint_exempt_frame_ids
+            },
+            selection_budget_multiplier=selection_budget_multiplier,
+        )
+        return reports
+
     def _evaluate_batch_impl(
         self,
         intervals: Iterable[tuple[int, int, int]],
