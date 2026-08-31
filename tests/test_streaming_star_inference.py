@@ -44,6 +44,19 @@ class FakeBatchInference:
             "nested": [torch.tensor([center + 1])],
             "_forward_time": 0.25,
             "_track_time": 0.5,
+            "_covisibility_report": {
+                "contractId": "jarailsense.gluemap-covisibility/v1",
+                "graphPolicy": "planned-star",
+                "batchCount": 1,
+                "viewCount": 2,
+                "evaluatedDirectedPairCount": 3,
+                "denseEquivalentDirectedPairCount": 4,
+                "virtualTrackDepthNoiseRatio": 0.1,
+                "virtualTrackNoiseSeed": 20260831,
+                "virtualTrackNoiseSeedPolicy": (
+                    "sha256-base-seed-and-star-indexes/v1"
+                ),
+            },
         }
 
 
@@ -199,6 +212,9 @@ def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
     assert report["pi3EncoderInvocationFrameCount"] == 4
     assert report["duplicateEncoderFrameInvocationCount"] == 2
     assert report["hotPathEmptyCacheCount"] == 0
+    assert report["covisibilityGraph"]["evaluatedDirectedPairCount"] == 6
+    assert report["covisibilityGraph"]["denseEquivalentDirectedPairCount"] == 8
+    assert report["covisibilityGraph"]["evaluatedToDenseRatio"] == 0.75
     assert report["timingSummary"]["forward"]["count"] == 2
     assert sum(value["starCount"] for value in report["cudaTimeline"]) == 2
 

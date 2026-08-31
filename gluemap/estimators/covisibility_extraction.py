@@ -1,3 +1,5 @@
+import hashlib
+
 import einops
 import networkx as nx
 import torch
@@ -64,10 +66,27 @@ class CovisibilityExtraction:
         check_consistency: bool = False,
         include_track: bool = True,
         return_cpu: bool = True,
+        graph_policy: str = "dense-transitive",
+        virtual_track_depth_noise_ratio: float = 0.1,
+        virtual_track_noise_seed: int = 0,
     ) -> None:
+        if graph_policy not in {"dense-transitive", "planned-star"}:
+            raise ValueError(
+                f"unsupported covisibility graph policy: {graph_policy}"
+            )
+        if virtual_track_depth_noise_ratio < 0:
+            raise ValueError(
+                "virtual track depth noise ratio must be non-negative"
+            )
+        if virtual_track_noise_seed < 0:
+            raise ValueError("virtual track noise seed must be non-negative")
         self.check_consistency = check_consistency
         self.include_track = include_track
         self.return_cpu = return_cpu
+        self.graph_policy = graph_policy
+        self.virtual_track_depth_noise_ratio = virtual_track_depth_noise_ratio
+        self.virtual_track_noise_seed = virtual_track_noise_seed
+        self.last_report: dict[str, int | float | str] = {}
 
     def main(
         self,
@@ -109,23 +128,55 @@ class CovisibilityExtraction:
             predictions["depth"], extrinsics, intrinsics
         )
 
+        verify = (
+            self._verify_by_reprojection_n2
+            if self.graph_policy == "dense-transitive"
+            else self._verify_by_reprojection_star
+        )
         if self.check_consistency:
-            scores, valid_mask = self._verify_by_reprojection_n2(
+            scores, valid_mask = verify(
                 depth_transformed,
                 extrinsics,
                 intrinsics,
                 conf=predictions["depth_conf"],
             )
         else:
-            scores, valid_mask = self._verify_by_reprojection_n2(
+            scores, valid_mask = verify(
                 depth_transformed, extrinsics, intrinsics
             )
 
         tracks_virtual, points3d_virtual, isnegative_virtual, valid_virtual = (
             self._calculate_virtual_tracks(
-                predictions["depth"], extrinsics, intrinsics, valid_mask
+                predictions["depth"],
+                extrinsics,
+                intrinsics,
+                valid_mask,
+                indexes,
             )
         )
+
+        batch_count, view_count = indexes.shape[:2]
+        dense_pair_count = int(batch_count * view_count * view_count)
+        evaluated_pair_count = (
+            dense_pair_count
+            if self.graph_policy == "dense-transitive"
+            else int(batch_count * (1 + 2 * max(0, view_count - 1)))
+        )
+        self.last_report = {
+            "contractId": "jarailsense.gluemap-covisibility/v1",
+            "graphPolicy": self.graph_policy,
+            "batchCount": int(batch_count),
+            "viewCount": int(view_count),
+            "evaluatedDirectedPairCount": evaluated_pair_count,
+            "denseEquivalentDirectedPairCount": dense_pair_count,
+            "virtualTrackDepthNoiseRatio": float(
+                self.virtual_track_depth_noise_ratio
+            ),
+            "virtualTrackNoiseSeed": int(self.virtual_track_noise_seed),
+            "virtualTrackNoiseSeedPolicy": (
+                "sha256-base-seed-and-star-indexes/v1"
+            ),
+        }
 
         if "track" in predictions and self.include_track:
             for i in range(indexes.shape[0]):
@@ -152,14 +203,15 @@ class CovisibilityExtraction:
         extrinsics: torch.Tensor,
         intrinsic: torch.Tensor,
         valid_mask: torch.Tensor,
+        indexes: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample a coarse grid of virtual tracks from the reference depth map.
 
         Filters the reference-view depth to its inter-quartile range, draws
-        noisy depth samples on a 14-pixel-stride grid, unprojects to
-        camera/world points, and projects through ``project_tracks`` to
-        obtain virtual track positions across all views.
+        reproducibly perturbed depth samples on a 14-pixel-stride grid,
+        unprojects to camera/world points, and projects through
+        ``project_tracks`` to obtain virtual track positions across all views.
 
         Args:
             depth: Per-view depth map of shape ``(B, N, H, W, 1)``.
@@ -228,9 +280,34 @@ class CovisibilityExtraction:
             valid_depth_mask, depth[:, 0][..., 0], median_depth
         ).unsqueeze(-1)  # (B, H, W, 1)
         selected_depth = ori_depth[:, 7::14, 7::14]
-        # Add noise to the depth with 10% of the current depth as the noise
-        noise = torch.randn_like(selected_depth) * 0.1 * selected_depth
-        sampled_depth = selected_depth + noise
+        sampled_depth = selected_depth
+        if self.virtual_track_depth_noise_ratio > 0:
+            noise_rows = []
+            for batch_index in range(B):
+                ordered_indexes = ",".join(
+                    str(int(value))
+                    for value in indexes[batch_index].detach().cpu().tolist()
+                )
+                identity = (
+                    f"{self.virtual_track_noise_seed}:{ordered_indexes}"
+                ).encode()
+                seed = int.from_bytes(
+                    hashlib.sha256(identity).digest()[:8], "little"
+                ) % (2**63 - 1)
+                generator = torch.Generator(device=selected_depth.device)
+                generator.manual_seed(seed)
+                noise_rows.append(
+                    torch.randn(
+                        selected_depth[batch_index].shape,
+                        dtype=selected_depth.dtype,
+                        device=selected_depth.device,
+                        generator=generator,
+                    )
+                )
+            noise = torch.stack(noise_rows, dim=0)
+            sampled_depth = selected_depth + (
+                noise * self.virtual_track_depth_noise_ratio * selected_depth
+            )
 
         camera_points = world_points * sampled_depth  # (B, H // 4, W // 14, 3)
 
@@ -476,6 +553,7 @@ class CovisibilityExtraction:
         return_seperate_scores: bool = False,
         images_change: torch.Tensor | None = None,
         images_shape_ori: torch.Tensor | None = None,
+        symmetric_scores: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Score reference-frame consistency via round-trip reprojection error.
@@ -528,8 +606,12 @@ class CovisibilityExtraction:
                 images_shape_ori=images_shape_ori,
             )
         )
-        image_points_j, world_points_i_prime, invalid_i2j, _ = (
-            self._project_point(
+        (
+            image_points_j,
+            world_points_i_prime,
+            invalid_i2j,
+            valid_number_reverse,
+        ) = self._project_point(
                 world_points,
                 extrinsics,
                 intrinsic,
@@ -537,7 +619,6 @@ class CovisibilityExtraction:
                 images_change=images_change,
                 images_shape_ori=images_shape_ori,
             )
-        )
 
         # Check the different between the projected points and the original grid
         grid_x, grid_y = torch.meshgrid(
@@ -556,7 +637,51 @@ class CovisibilityExtraction:
         valid = (errors_i < threshold_reproj) * (~invalid_j2i)
         scores = valid.flatten(-2, -1).sum(dim=-1) / valid_number
 
+        if symmetric_scores:
+            errors_j = torch.norm(
+                image_points_j - grids.unsqueeze(0).unsqueeze(1), dim=-1
+            )
+            valid_reverse = (errors_j < threshold_reproj) * (~invalid_i2j)
+            scores_reverse = (
+                valid_reverse.flatten(-2, -1).sum(dim=-1)
+                / valid_number_reverse
+            )
+            scores = torch.maximum(scores, scores_reverse)
+
         return scores, valid
+
+    def _verify_by_reprojection_star(
+        self,
+        world_points: torch.Tensor,
+        extrinsics: torch.Tensor,
+        intrinsic: torch.Tensor,
+        threshold_reproj: float = 4.0,
+        consistent_threshold: float = 0.1,
+        lambda_conf: float = 0.05,
+        images_change: torch.Tensor | None = None,
+        images_shape_ori: torch.Tensor | None = None,
+        **_unused: object,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Score only center-neighbor edges while preserving both directions.
+
+        The explicit pair plan already defines every edge in a streaming Star.
+        One batched center sweep therefore evaluates the center-to-neighbor and
+        neighbor-to-center round trips without constructing the dense neighbor
+        graph or running a CPU shortest-path pass.
+        """
+
+        return self._verify_by_reprojection(
+            world_points,
+            extrinsics,
+            intrinsic,
+            threshold_reproj,
+            consistent_threshold,
+            lambda_conf,
+            False,
+            images_change,
+            images_shape_ori,
+            symmetric_scores=True,
+        )
 
     def _verify_by_reprojection_n2(
         self,
@@ -568,6 +693,7 @@ class CovisibilityExtraction:
         lambda_conf: float = 0.05,
         images_change: torch.Tensor | None = None,
         images_shape_ori: torch.Tensor | None = None,
+        conf: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         N^2 covisibility scoring across every pair of views.

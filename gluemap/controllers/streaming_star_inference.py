@@ -192,6 +192,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         forward_seconds: list[float] = []
         tracking_seconds: list[float] = []
         covisibility_seconds: list[float] = []
+        covisibility_reports: list[dict[str, Any]] = []
         data_wait_seconds: list[float] = []
         output_transfer_seconds: list[float] = []
         sink_seconds: list[float] = []
@@ -240,6 +241,12 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                     covisibility_seconds.append(
                         float(timings.get("covisibility_times", 0.0))
                     )
+                    covisibility_report = timings.get("covisibility_reports")
+                    if (
+                        isinstance(covisibility_report, dict)
+                        and covisibility_report
+                    ):
+                        covisibility_reports.append(covisibility_report)
                     raw_indexes = output.get("indexes", batch.get("indexes"))
                     if isinstance(raw_indexes, torch.Tensor):
                         indexes = [
@@ -348,6 +355,46 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             "outputTransfer": timing_summary(output_transfer_seconds),
             "sink": timing_summary(sink_seconds),
         }
+        covisibility_graph_report = None
+        if covisibility_reports:
+            identity_keys = (
+                "graphPolicy",
+                "virtualTrackDepthNoiseRatio",
+                "virtualTrackNoiseSeed",
+                "virtualTrackNoiseSeedPolicy",
+            )
+            identity = {
+                key: covisibility_reports[0].get(key) for key in identity_keys
+            }
+            if any(
+                any(report.get(key) != value for key, value in identity.items())
+                for report in covisibility_reports[1:]
+            ):
+                raise StreamingStarInferenceError(
+                    "covisibility policy changed during one streaming run"
+                )
+            covisibility_graph_report = {
+                "contractId": "jarailsense.gluemap-covisibility-run/v1",
+                **identity,
+                "starCount": len(covisibility_reports),
+                "evaluatedDirectedPairCount": sum(
+                    int(report["evaluatedDirectedPairCount"])
+                    for report in covisibility_reports
+                ),
+                "denseEquivalentDirectedPairCount": sum(
+                    int(report["denseEquivalentDirectedPairCount"])
+                    for report in covisibility_reports
+                ),
+            }
+            dense_count = int(
+                covisibility_graph_report["denseEquivalentDirectedPairCount"]
+            )
+            covisibility_graph_report["evaluatedToDenseRatio"] = (
+                float(covisibility_graph_report["evaluatedDirectedPairCount"])
+                / dense_count
+                if dense_count
+                else 0.0
+            )
         return {
             "profileContractId": PROFILE_CONTRACT_ID,
             "starCount": expected_center,
@@ -376,6 +423,7 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             ),
             "encoderTokenCache": token_cache_report,
             "trackerFeatureCache": tracker_feature_cache_report,
+            "covisibilityGraph": covisibility_graph_report,
             "synchronizationCount": (
                 self._stream_synchronization_count
                 + batch_synchronization_count

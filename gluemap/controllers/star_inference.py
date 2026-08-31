@@ -85,6 +85,9 @@ class BatchInferenceStar:
         encoder_token_cache_frames: int = 0,
         tracker_feature_cache_frames: int = 0,
         defer_output_to_sink: bool = False,
+        covisibility_graph_policy: str = "dense-transitive",
+        virtual_track_depth_noise_ratio: float = 0.1,
+        virtual_track_noise_seed: int = 0,
     ):
         self.model = model
         self.model_type = model_type
@@ -110,7 +113,10 @@ class BatchInferenceStar:
             model_track, device, tracker_feature_cache_frames
         )
         self.covisibility_extraction = CovisibilityExtraction(
-            return_cpu=not defer_output_to_sink
+            return_cpu=not defer_output_to_sink,
+            graph_policy=covisibility_graph_policy,
+            virtual_track_depth_noise_ratio=virtual_track_depth_noise_ratio,
+            virtual_track_noise_seed=virtual_track_noise_seed,
         )
 
     def _synchronize(self) -> None:
@@ -185,6 +191,9 @@ class BatchInferenceStar:
             "_forward_time": forward_time,
             "_track_time": track_time,
             "_covisibility_time": covisibility_time,
+            "_covisibility_report": getattr(
+                self.covisibility_extraction, "last_report", {}
+            ),
         }
 
         if include_track:
@@ -314,6 +323,15 @@ class StarInferencePipeline(BaseInferencePipeline):
             defer_output_to_sink=getattr(
                 self.args, "defer_output_to_sink", False
             ),
+            covisibility_graph_policy=getattr(
+                self.args, "covisibility_graph_policy", "dense-transitive"
+            ),
+            virtual_track_depth_noise_ratio=getattr(
+                self.args, "virtual_track_depth_noise_ratio", 0.1
+            ),
+            virtual_track_noise_seed=getattr(
+                self.args, "virtual_track_noise_seed", 0
+            ),
         )
 
     def _run_batch_step(
@@ -327,6 +345,7 @@ class StarInferencePipeline(BaseInferencePipeline):
             "forward_times": outputs.pop("_forward_time", 0.0),
             "tracking_times": outputs.pop("_track_time", 0.0),
             "covisibility_times": outputs.pop("_covisibility_time", 0.0),
+            "covisibility_reports": outputs.pop("_covisibility_report", {}),
         }
         return outputs, extras
 
