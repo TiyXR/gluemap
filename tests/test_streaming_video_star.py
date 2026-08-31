@@ -69,6 +69,7 @@ def test_star_stream_waits_for_lookahead_and_releases_finished_frames() -> None:
         [3, 2, 4],
         [4, 3],
     ]
+    assert items[1]["frame_uids"] == ["frame-1", "frame-0", "frame-2"]
     assert dataset.peak_resident_frames <= 3
     assert dataset.released_frame_count == 5
     assert dataset.emitted_star_count == 5

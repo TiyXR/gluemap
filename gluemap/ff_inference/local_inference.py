@@ -40,6 +40,7 @@ def create_local_inference(
     model_type: str,
     device: str | torch.device = "cuda",
     dtype: torch.dtype = torch.bfloat16,
+    encoder_token_cache_frames: int = 0,
 ) -> LocalInference:
     """Factory to create the appropriate :class:`LocalInference` subclass.
 
@@ -60,7 +61,12 @@ def create_local_inference(
     if model_type in ("pi3", "pi3x"):
         from gluemap.ff_inference.pi3_inference import Pi3LocalInference
 
-        return Pi3LocalInference(model, device, dtype)
+        return Pi3LocalInference(
+            model,
+            device,
+            dtype,
+            encoder_token_cache_frames=encoder_token_cache_frames,
+        )
     elif model_type == "vggt":
         from gluemap.ff_inference.vggt_inference import VGGTLocalInference
 

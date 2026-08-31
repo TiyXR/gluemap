@@ -320,6 +320,19 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
         batch_synchronization_count = int(
             getattr(batch_inference, "synchronization_count", 0)
         )
+        token_cache_report = None
+        local_inference = getattr(batch_inference, "local_inference", None)
+        if local_inference is not None and hasattr(
+            local_inference, "encoder_token_cache_report"
+        ):
+            token_cache_report = (
+                local_inference.encoder_token_cache_report()
+            )
+        actual_encoder_invocations = (
+            int(token_cache_report["encodedFrameCount"])
+            if token_cache_report is not None
+            else frame_invocation_count
+        )
         stage_timings = {
             "dataWait": timing_summary(data_wait_seconds),
             "inference": timing_summary(batch_seconds),
@@ -345,12 +358,17 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
             "timingSummary": stage_timings,
             "cudaTimelineBucketSeconds": cuda_timeline.bucket_seconds,
             "cudaTimeline": cuda_timeline.to_json(),
-            "encoderAccountingMode": "current-star-full-forward/v1",
-            "pi3EncoderUniqueFrameCount": len(unique_frame_indexes),
-            "pi3EncoderInvocationFrameCount": frame_invocation_count,
-            "duplicateEncoderFrameInvocationCount": (
-                frame_invocation_count - len(unique_frame_indexes)
+            "encoderAccountingMode": (
+                "frame-token-cache/v1"
+                if token_cache_report is not None
+                else "current-star-full-forward/v1"
             ),
+            "pi3EncoderUniqueFrameCount": len(unique_frame_indexes),
+            "pi3EncoderInvocationFrameCount": actual_encoder_invocations,
+            "duplicateEncoderFrameInvocationCount": (
+                actual_encoder_invocations - len(unique_frame_indexes)
+            ),
+            "encoderTokenCache": token_cache_report,
             "synchronizationCount": (
                 self._stream_synchronization_count
                 + batch_synchronization_count

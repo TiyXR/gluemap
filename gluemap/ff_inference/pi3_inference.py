@@ -1,4 +1,6 @@
 # Functions are adpated from https://github.com/yyfz/Pi3/issues/29
+from collections import OrderedDict
+from dataclasses import dataclass
 from functools import partial
 
 import numpy as np
@@ -9,8 +11,204 @@ from scipy.optimize import least_squares
 from gluemap.ff_inference.local_inference import LocalInference
 
 
+@dataclass(frozen=True)
+class EncoderTokenKey:
+    model_identity: str
+    preprocessing_identity: str
+    frame_uid: str
+    image_height: int
+    image_width: int
+    dtype: str
+    device: str
+
+
+class Pi3EncoderTokenCache:
+    """Bounded GPU-resident LRU for context-independent Pi3 frame tokens."""
+
+    PREPROCESSING_IDENTITY = "pi3-imagenet-normalize/v1"
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        capacity_frames: int,
+        device: str | torch.device,
+        dtype: torch.dtype,
+    ) -> None:
+        if capacity_frames < 1:
+            raise ValueError("Pi3 encoder token cache capacity must be positive")
+        self.model_identity = (
+            f"{model.__class__.__module__}.{model.__class__.__qualname__}:"
+            f"{id(model)}"
+        )
+        self.capacity_frames = capacity_frames
+        self.device = str(device)
+        self.dtype = str(dtype)
+        self._entries: OrderedDict[EncoderTokenKey, torch.Tensor] = (
+            OrderedDict()
+        )
+        self.requested_frame_count = 0
+        self.hit_count = 0
+        self.miss_count = 0
+        self.encoded_frame_count = 0
+        self.eviction_count = 0
+        self.peak_entry_count = 0
+        self.peak_logical_bytes = 0
+
+    def _key(
+        self, frame_uid: str, image_height: int, image_width: int
+    ) -> EncoderTokenKey:
+        return EncoderTokenKey(
+            model_identity=self.model_identity,
+            preprocessing_identity=self.PREPROCESSING_IDENTITY,
+            frame_uid=frame_uid,
+            image_height=image_height,
+            image_width=image_width,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+    def encode_context(
+        self,
+        model: torch.nn.Module,
+        images: torch.Tensor,
+        frame_uids: list[str],
+    ):
+        if images.ndim != 5 or images.shape[0] != 1:
+            raise ValueError("Pi3 token cache currently requires batch size one")
+        if images.shape[1] != len(frame_uids):
+            raise ValueError("Pi3 token cache frame UID count differs")
+        if images.shape[1] > self.capacity_frames:
+            raise ValueError("Pi3 context exceeds encoder token cache capacity")
+
+        height, width = int(images.shape[-2]), int(images.shape[-1])
+        keys = [self._key(value, height, width) for value in frame_uids]
+        context_tokens: list[torch.Tensor | None] = [None] * len(keys)
+        missing_positions: list[int] = []
+        self.requested_frame_count += len(keys)
+        for position, key in enumerate(keys):
+            token = self._entries.pop(key, None)
+            if token is None:
+                self.miss_count += 1
+                missing_positions.append(position)
+            else:
+                self.hit_count += 1
+                self._entries[key] = token
+                context_tokens[position] = token
+
+        if missing_positions:
+            missing_images = images[:, missing_positions].contiguous()
+            encoded = model.encode_frames(missing_images)
+            if encoded.tokens.shape[1] != len(missing_positions):
+                raise ValueError("Pi3 encoder returned an unexpected frame count")
+            self.encoded_frame_count += len(missing_positions)
+            for encoded_position, context_position in enumerate(
+                missing_positions
+            ):
+                token = encoded.tokens[
+                    :, encoded_position : encoded_position + 1
+                ]
+                key = keys[context_position]
+                self._entries[key] = token
+                context_tokens[context_position] = token
+                while len(self._entries) > self.capacity_frames:
+                    self._entries.popitem(last=False)
+                    self.eviction_count += 1
+
+        if any(value is None for value in context_tokens):
+            raise RuntimeError("Pi3 token cache failed to assemble a context")
+        tokens = torch.cat(context_tokens, dim=1)
+        encoded_type = type(encoded) if missing_positions else None
+        if encoded_type is None:
+            from pi3.models.pi3 import Pi3EncodedFrames
+
+            encoded_type = Pi3EncodedFrames
+        result = encoded_type(
+            tokens=tokens,
+            image_height=height,
+            image_width=width,
+        )
+        self.peak_entry_count = max(
+            self.peak_entry_count, len(self._entries)
+        )
+        logical_bytes = sum(
+            value.numel() * value.element_size()
+            for value in self._entries.values()
+        )
+        self.peak_logical_bytes = max(
+            self.peak_logical_bytes, logical_bytes
+        )
+        return result
+
+    def report(self) -> dict[str, int | float | str]:
+        requests = self.requested_frame_count
+        return {
+            "contractId": "jarailsense.pi3-encoder-token-cache/v1",
+            "capacityFrames": self.capacity_frames,
+            "requestedFrameCount": requests,
+            "cacheHitCount": self.hit_count,
+            "cacheMissCount": self.miss_count,
+            "encodedFrameCount": self.encoded_frame_count,
+            "evictionCount": self.eviction_count,
+            "residentFrameCount": len(self._entries),
+            "peakResidentFrameCount": self.peak_entry_count,
+            "peakResidentLogicalBytes": self.peak_logical_bytes,
+            "hitRate": self.hit_count / requests if requests else 0.0,
+            "preprocessingIdentity": self.PREPROCESSING_IDENTITY,
+            "dtype": self.dtype,
+            "device": self.device,
+        }
+
+
 class Pi3LocalInference(LocalInference):
     """Local inference for Pi3 / Pi3X backbones."""
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        device: str | torch.device = "cuda",
+        dtype: torch.dtype = torch.bfloat16,
+        *,
+        encoder_token_cache_frames: int = 0,
+    ) -> None:
+        super().__init__(model, device, dtype)
+        self.encoder_token_cache = (
+            Pi3EncoderTokenCache(
+                model, encoder_token_cache_frames, device, dtype
+            )
+            if encoder_token_cache_frames > 0
+            and hasattr(model, "encode_frames")
+            and hasattr(model, "decode_context")
+            and hasattr(model, "decode_heads")
+            else None
+        )
+
+    @staticmethod
+    def _frame_uids(batch: dict, frame_count: int) -> list[str]:
+        raw = batch.get("frame_uids")
+        if isinstance(raw, (list, tuple)) and len(raw) == frame_count:
+            values = []
+            for value in raw:
+                if isinstance(value, str):
+                    values.append(value)
+                elif (
+                    isinstance(value, (list, tuple))
+                    and len(value) == 1
+                    and isinstance(value[0], str)
+                ):
+                    values.append(value[0])
+                else:
+                    break
+            if len(values) == frame_count:
+                return values
+        indexes = batch.get("indexes")
+        if isinstance(indexes, torch.Tensor) and indexes.numel() == frame_count:
+            return [f"geometry-{int(value)}" for value in indexes.flatten()]
+        raise ValueError("Pi3 token cache requires stable frame identities")
+
+    def encoder_token_cache_report(self) -> dict | None:
+        if self.encoder_token_cache is None:
+            return None
+        return self.encoder_token_cache.report()
 
     def predict(self, batch: dict) -> dict:
         """Run the Pi3/Pi3X backbone on a batch of images.
@@ -28,7 +226,15 @@ class Pi3LocalInference(LocalInference):
         images = batch["images"].to(self.device).contiguous()
 
         with torch.cuda.amp.autocast(dtype=self.dtype):
-            predictions = self.model(images)
+            if self.encoder_token_cache is None:
+                predictions = self.model(images)
+            else:
+                frame_uids = self._frame_uids(batch, images.shape[1])
+                encoded = self.encoder_token_cache.encode_context(
+                    self.model, images, frame_uids
+                )
+                decoded = self.model.decode_context(encoded)
+                predictions = self.model.decode_heads(decoded)
 
         # Rename depth confidence to avoid collision with tracker confidence
         if "conf" in predictions and "depth_conf" not in predictions:

@@ -47,6 +47,30 @@ class FakeBatchInference:
         }
 
 
+class FakeTokenCacheLocalInference:
+    def encoder_token_cache_report(self):
+        return {
+            "contractId": "jarailsense.pi3-encoder-token-cache/v1",
+            "capacityFrames": 4,
+            "requestedFrameCount": 4,
+            "cacheHitCount": 2,
+            "cacheMissCount": 2,
+            "encodedFrameCount": 2,
+            "evictionCount": 0,
+            "residentFrameCount": 2,
+            "peakResidentFrameCount": 2,
+            "peakResidentLogicalBytes": 128,
+            "hitRate": 0.5,
+            "preprocessingIdentity": "pi3-imagenet-normalize/v1",
+            "dtype": "torch.bfloat16",
+            "device": "cpu",
+        }
+
+
+class FakeTokenCacheBatchInference(FakeBatchInference):
+    local_inference = FakeTokenCacheLocalInference()
+
+
 class FakePipeline(StreamingStarInferencePipeline):
     def _load_models(self):
         self.models = {
@@ -57,6 +81,11 @@ class FakePipeline(StreamingStarInferencePipeline):
 
     def _create_batch_inference(self, models):
         return FakeBatchInference()
+
+
+class FakeTokenCachePipeline(FakePipeline):
+    def _create_batch_inference(self, models):
+        return FakeTokenCacheBatchInference()
 
 
 def args(**overrides):
@@ -172,6 +201,20 @@ def test_streaming_pipeline_emits_contiguous_outputs_without_global_list():
     assert report["hotPathEmptyCacheCount"] == 0
     assert report["timingSummary"]["forward"]["count"] == 2
     assert sum(value["starCount"] for value in report["cudaTimeline"]) == 2
+
+
+def test_streaming_profile_uses_actual_token_cache_encoder_count():
+    pipeline = FakeTokenCachePipeline(
+        args(), 1, 0, file_name="unused.pth", device="cpu"
+    )
+    report = pipeline.run_to_sink(
+        FakeDataset(), lambda _center, _output: None
+    )
+    assert report["encoderAccountingMode"] == "frame-token-cache/v1"
+    assert report["pi3EncoderUniqueFrameCount"] == 2
+    assert report["pi3EncoderInvocationFrameCount"] == 2
+    assert report["duplicateEncoderFrameInvocationCount"] == 0
+    assert report["encoderTokenCache"]["hitRate"] == 0.5
 
 
 def test_timing_summary_reports_linear_percentiles():

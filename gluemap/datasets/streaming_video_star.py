@@ -258,6 +258,7 @@ class StreamingVideoStarDataset(IterableDataset):
             "image_paths": [
                 f"video://{value.route.frame_uid}" for value in frames
             ],
+            "frame_uids": [value.route.frame_uid for value in frames],
             "star_indexes": center,
             "indexes": indexes,
             "query_points": self._query_points(images_1024[:1]),
