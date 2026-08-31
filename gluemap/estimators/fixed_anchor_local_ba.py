@@ -106,6 +106,7 @@ def refine_fixed_anchor_window(
     prior_device_policy: str = "cuda-preferred",
     prior_relative_rank_threshold: float = 1e-10,
     prior_maximum_condition_estimate: float | None = None,
+    prior_condition_estimate_policy: str = "raw-eigenvalue",
     prior_expected_nullity: int | None = None,
     persistent_ba_session: PersistentFixedLagBaSession | None = None,
 ) -> FixedAnchorLocalBaSolution:
@@ -412,6 +413,7 @@ def refine_fixed_anchor_window(
             device_policy=prior_device_policy,
             relative_rank_threshold=prior_relative_rank_threshold,
             maximum_condition_estimate=prior_maximum_condition_estimate,
+            condition_estimate_policy=prior_condition_estimate_policy,
             expected_nullity=prior_expected_nullity,
         )
 

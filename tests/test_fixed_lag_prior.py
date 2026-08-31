@@ -185,6 +185,60 @@ def test_pose_only_batch_schur_matches_sequential_elimination_on_cpu():
     )
 
 
+def test_camera_block_jacobi_condition_gate_ignores_pose_coordinate_scale():
+    prior = _pose_only_batch_fixture(camera_count=4)
+    coordinate_scale = torch.ones(24, dtype=torch.float64)
+    coordinate_scale[6:9] = 1e-3
+    coordinate_scale[9:12] = 1e3
+    coordinate_scale[12:15] = 1e-2
+    coordinate_scale[15:18] = 1e2
+    coordinate_scale[18:21] = 1e-1
+    coordinate_scale[21:24] = 1e1
+    transform = torch.diag(coordinate_scale)
+    scaled_factor = prior.factor @ transform
+    scaled = FejPriorState(
+        camera_ids=prior.camera_ids,
+        linearization_points=prior.linearization_points,
+        hessian=transform.T @ prior.hessian @ transform,
+        gradient=transform.T @ prior.gradient,
+        factor=scaled_factor,
+        factor_residual=prior.factor_residual,
+        report={},
+    )
+
+    raw = marginalize_pose_prior_batch(
+        scaled,
+        eliminate_camera_ids=(10,),
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        maximum_condition_estimate=1e8,
+        condition_estimate_policy="raw-eigenvalue",
+        expected_nullity=1,
+    )
+    equilibrated = marginalize_pose_prior_batch(
+        scaled,
+        eliminate_camera_ids=(10,),
+        device_policy="cpu",
+        relative_rank_threshold=1e-12,
+        maximum_condition_estimate=1e8,
+        condition_estimate_policy="camera-block-jacobi",
+        expected_nullity=1,
+    )
+
+    assert raw.report["status"] == "failed"
+    assert "prior-condition-exceeded" in raw.report["reasonCodes"]
+    assert equilibrated.report["status"] == "passed"
+    assert equilibrated.report["priorConditionEstimatePolicy"] == (
+        "camera-block-jacobi"
+    )
+    assert equilibrated.report["priorRawConditionEstimate"] > 1e8
+    assert equilibrated.report["priorConditionEstimate"] < 1e8
+    assert equilibrated.report["priorEquilibratedRank"] == (
+        equilibrated.report["priorRank"]
+    )
+    assert equilibrated.report["priorEquilibratedNullity"] == 1
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 def test_pose_only_batch_schur_matches_cpu_on_cuda():
     prior = _pose_only_batch_fixture()

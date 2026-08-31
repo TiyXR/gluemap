@@ -129,6 +129,7 @@ class SchurFejFixedLagRunner:
         ba_problem_policy: str = "rebuild-every-window",
         prior_relative_rank_threshold: float = 1e-10,
         prior_maximum_condition_estimate: float | None = None,
+        prior_condition_estimate_policy: str = "raw-eigenvalue",
         prior_expected_nullity: int | None = 1,
     ) -> None:
         if not fixed_gauge_frame_ids:
@@ -173,6 +174,13 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "triangulation solver fallback threshold is invalid"
             )
+        if prior_condition_estimate_policy not in {
+            "raw-eigenvalue",
+            "camera-block-jacobi",
+        }:
+            raise SchurFejFixedLagRunnerError(
+                "prior condition estimate policy is invalid"
+            )
         self.fixed_gauge_frame_ids = set(fixed_gauge_frame_ids)
         self.camera_model = camera_model
         self.triangulation_device_policy = triangulation_device_policy
@@ -203,6 +211,7 @@ class SchurFejFixedLagRunner:
         self.ba_problem_policy = ba_problem_policy
         self.prior_relative_rank_threshold = prior_relative_rank_threshold
         self.prior_maximum_condition_estimate = prior_maximum_condition_estimate
+        self.prior_condition_estimate_policy = prior_condition_estimate_policy
         self.prior_expected_nullity = prior_expected_nullity
         self._prior: FejPriorState | None = None
         self._poses: _PoseState | None = None
@@ -515,6 +524,9 @@ class SchurFejFixedLagRunner:
             prior_maximum_condition_estimate=(
                 self.prior_maximum_condition_estimate
             ),
+            prior_condition_estimate_policy=(
+                self.prior_condition_estimate_policy
+            ),
             prior_expected_nullity=self.prior_expected_nullity,
             persistent_ba_session=self._persistent_ba_session,
         )
@@ -531,6 +543,9 @@ class SchurFejFixedLagRunner:
                 relative_rank_threshold=self.prior_relative_rank_threshold,
                 maximum_condition_estimate=(
                     self.prior_maximum_condition_estimate
+                ),
+                condition_estimate_policy=(
+                    self.prior_condition_estimate_policy
                 ),
                 expected_nullity=self.prior_expected_nullity,
             )
@@ -705,6 +720,9 @@ class SchurFejFixedLagRunner:
                 relative_rank_threshold=self.prior_relative_rank_threshold,
                 maximum_condition_estimate=(
                     self.prior_maximum_condition_estimate
+                ),
+                condition_estimate_policy=(
+                    self.prior_condition_estimate_policy
                 ),
                 expected_nullity=self.prior_expected_nullity,
             )

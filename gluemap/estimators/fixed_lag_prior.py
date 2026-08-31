@@ -293,6 +293,115 @@ def _symmetric_pseudoinverse(
     return inverse, values, accepted
 
 
+def _prior_condition_metrics(
+    hessian: torch.Tensor,
+    eigenvalues: torch.Tensor,
+    accepted: torch.Tensor,
+    *,
+    relative_rank_threshold: float,
+    policy: str,
+) -> dict[str, Any]:
+    """Measure prior conditioning without changing its FEJ normal form.
+
+    The raw eigenvalue ratio is coordinate-scale dependent.  In particular,
+    pose translation Jacobians acquire a growing rotation/translation lever arm
+    as a forward-only trajectory moves away from the global origin.  A block
+    Jacobi congruence normalizes each 6-DoF camera block before measuring the
+    spectrum while preserving the original Hessian used to build the prior.
+    """
+    if policy not in {"raw-eigenvalue", "camera-block-jacobi"}:
+        raise FixedLagPriorError("prior condition estimate policy is invalid")
+    if hessian.ndim != 2 or hessian.shape[0] != hessian.shape[1]:
+        raise FixedLagPriorError("prior Hessian shape is invalid")
+    if hessian.shape[0] % 6 != 0:
+        raise FixedLagPriorError("prior Hessian is not camera-block aligned")
+
+    positive_values = eigenvalues[accepted]
+    raw_rank = int(accepted.sum().item())
+    raw_nullity = int(len(eigenvalues) - raw_rank)
+    raw_condition = (
+        float((positive_values.max() / positive_values.min()).item())
+        if raw_rank
+        else float("inf")
+    )
+    result: dict[str, Any] = {
+        "policy": policy,
+        "rawRank": raw_rank,
+        "rawNullity": raw_nullity,
+        "rawConditionEstimate": raw_condition,
+        "equilibratedRank": None,
+        "equilibratedNullity": None,
+        "equilibratedConditionEstimate": None,
+        "maximumCameraBlockConditionEstimate": None,
+    }
+    if policy == "raw-eigenvalue":
+        result["selectedConditionEstimate"] = raw_condition
+        return result
+
+    camera_count = hessian.shape[0] // 6
+    blocks = torch.stack(
+        tuple(
+            hessian[index * 6 : (index + 1) * 6, index * 6 : (index + 1) * 6]
+            for index in range(camera_count)
+        )
+    )
+    blocks = (blocks + blocks.transpose(-1, -2)) * 0.5
+    block_values, block_vectors = torch.linalg.eigh(blocks)
+    block_maximum = block_values.amax(dim=-1).clamp_min(
+        torch.finfo(hessian.dtype).eps
+    )
+    block_floor = block_maximum * relative_rank_threshold
+    inverse_square_root_values = torch.rsqrt(
+        torch.maximum(block_values, block_floor[:, None])
+    )
+    whiteners = (
+        block_vectors * inverse_square_root_values[:, None, :]
+    ) @ block_vectors.transpose(-1, -2)
+    whitening = torch.block_diag(*whiteners.unbind())
+    equilibrated = whitening @ hessian @ whitening.T
+    equilibrated = (equilibrated + equilibrated.T) * 0.5
+    equilibrated_values = torch.linalg.eigvalsh(equilibrated)
+    equilibrated_maximum = equilibrated_values.max().clamp_min(
+        torch.finfo(hessian.dtype).eps
+    )
+    equilibrated_accepted = (
+        equilibrated_values
+        > equilibrated_maximum * relative_rank_threshold
+    )
+    equilibrated_positive = equilibrated_values[equilibrated_accepted]
+    equilibrated_rank = int(equilibrated_accepted.sum().item())
+    equilibrated_nullity = int(len(equilibrated_values) - equilibrated_rank)
+    equilibrated_condition = (
+        float(
+            (
+                equilibrated_positive.max()
+                / equilibrated_positive.min()
+            ).item()
+        )
+        if equilibrated_rank
+        else float("inf")
+    )
+    block_accepted = block_values > block_floor[:, None]
+    block_minimum = torch.where(
+        block_accepted,
+        block_values,
+        torch.full_like(block_values, float("inf")),
+    ).amin(dim=-1)
+    block_condition = block_maximum / block_minimum
+    result.update(
+        {
+            "equilibratedRank": equilibrated_rank,
+            "equilibratedNullity": equilibrated_nullity,
+            "equilibratedConditionEstimate": equilibrated_condition,
+            "maximumCameraBlockConditionEstimate": float(
+                block_condition.max().item()
+            ),
+            "selectedConditionEstimate": equilibrated_condition,
+        }
+    )
+    return result
+
+
 def _validate_prior_identity(
     previous: FejPriorState,
     camera_ids: tuple[int, ...],
@@ -318,6 +427,7 @@ def marginalize_pose_prior(
     device_policy: str = "cuda-preferred",
     relative_rank_threshold: float = 1e-10,
     maximum_condition_estimate: float | None = None,
+    condition_estimate_policy: str = "raw-eigenvalue",
     expected_nullity: int | None = None,
 ) -> FejPriorState:
     """Schur-eliminate one pose directly from an existing FEJ prior.
@@ -334,6 +444,7 @@ def marginalize_pose_prior(
         device_policy=device_policy,
         relative_rank_threshold=relative_rank_threshold,
         maximum_condition_estimate=maximum_condition_estimate,
+        condition_estimate_policy=condition_estimate_policy,
         expected_nullity=expected_nullity,
     )
 
@@ -345,6 +456,7 @@ def marginalize_pose_prior_batch(
     device_policy: str = "cuda-preferred",
     relative_rank_threshold: float = 1e-10,
     maximum_condition_estimate: float | None = None,
+    condition_estimate_policy: str = "raw-eigenvalue",
     expected_nullity: int | None = None,
 ) -> FejPriorState:
     """Schur-eliminate multiple retained poses with one dense solve.
@@ -430,18 +542,27 @@ def marginalize_pose_prior_batch(
     gradient_error = float(
         torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
     )
-    rank = int(accepted.sum().item())
-    nullity = int(len(eigenvalues) - rank)
-    condition = (
-        float((positive_values.max() / positive_values.min()).item())
-        if rank
-        else float("inf")
+    condition_metrics = _prior_condition_metrics(
+        retained_hessian,
+        eigenvalues,
+        accepted,
+        relative_rank_threshold=relative_rank_threshold,
+        policy=condition_estimate_policy,
     )
+    rank = condition_metrics["rawRank"]
+    nullity = condition_metrics["rawNullity"]
+    condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
+    if (
+        condition_metrics["equilibratedRank"] is not None
+        and condition_metrics["equilibratedRank"] != rank
+    ):
+        status = "failed"
+        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -485,6 +606,20 @@ def marginalize_pose_prior_batch(
         "priorRank": rank,
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
+        "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawConditionEstimate": condition_metrics[
+            "rawConditionEstimate"
+        ],
+        "priorEquilibratedRank": condition_metrics["equilibratedRank"],
+        "priorEquilibratedNullity": condition_metrics[
+            "equilibratedNullity"
+        ],
+        "priorEquilibratedConditionEstimate": condition_metrics[
+            "equilibratedConditionEstimate"
+        ],
+        "priorMaximumCameraBlockConditionEstimate": condition_metrics[
+            "maximumCameraBlockConditionEstimate"
+        ],
         "factorGradientMaximumAbsoluteError": gradient_error,
         "cpuSparseNormalWallSeconds": 0.0,
         "resolvedSchurWallSeconds": wall,
@@ -516,6 +651,7 @@ def marginalize_linearized_tracks(
     device_policy: str = "cuda-preferred",
     relative_rank_threshold: float = 1e-10,
     maximum_condition_estimate: float | None = None,
+    condition_estimate_policy: str = "raw-eigenvalue",
     expected_nullity: int | None = None,
 ) -> FejPriorState:
     """Eliminate every point and one oldest pose without forming a point Hessian.
@@ -697,18 +833,27 @@ def marginalize_linearized_tracks(
     gradient_error = float(
         torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
     )
-    rank = int(accepted.sum().item())
-    nullity = int(len(eigenvalues) - rank)
-    condition = (
-        float((positive_values.max() / positive_values.min()).item())
-        if rank
-        else float("inf")
+    condition_metrics = _prior_condition_metrics(
+        retained_hessian,
+        eigenvalues,
+        accepted,
+        relative_rank_threshold=relative_rank_threshold,
+        policy=condition_estimate_policy,
     )
+    rank = condition_metrics["rawRank"]
+    nullity = condition_metrics["rawNullity"]
+    condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
+    if (
+        condition_metrics["equilibratedRank"] is not None
+        and condition_metrics["equilibratedRank"] != rank
+    ):
+        status = "failed"
+        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -736,6 +881,20 @@ def marginalize_linearized_tracks(
         "priorRank": rank,
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
+        "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawConditionEstimate": condition_metrics[
+            "rawConditionEstimate"
+        ],
+        "priorEquilibratedRank": condition_metrics["equilibratedRank"],
+        "priorEquilibratedNullity": condition_metrics[
+            "equilibratedNullity"
+        ],
+        "priorEquilibratedConditionEstimate": condition_metrics[
+            "equilibratedConditionEstimate"
+        ],
+        "priorMaximumCameraBlockConditionEstimate": condition_metrics[
+            "maximumCameraBlockConditionEstimate"
+        ],
         "factorGradientMaximumAbsoluteError": gradient_error,
         "reasonCodes": reasons,
     }
@@ -764,6 +923,7 @@ def marginalize_ceres_linearization(
     device_policy: str = "cuda-preferred",
     relative_rank_threshold: float = 1e-10,
     maximum_condition_estimate: float | None = None,
+    condition_estimate_policy: str = "raw-eigenvalue",
     expected_nullity: int | None = None,
 ) -> FejPriorState:
     """Convert a solved Ceres CRS directly into the next pose-only FEJ prior."""
@@ -1066,18 +1226,27 @@ def marginalize_ceres_linearization(
     factor_residual = (
         positive_vectors.T @ retained_gradient
     ) / positive_values.sqrt()
-    rank = int(accepted.sum().item())
-    nullity = int(len(eigenvalues) - rank)
-    condition = (
-        float((positive_values.max() / positive_values.min()).item())
-        if rank
-        else float("inf")
+    condition_metrics = _prior_condition_metrics(
+        retained_hessian,
+        eigenvalues,
+        accepted,
+        relative_rank_threshold=relative_rank_threshold,
+        policy=condition_estimate_policy,
     )
+    rank = condition_metrics["rawRank"]
+    nullity = condition_metrics["rawNullity"]
+    condition = condition_metrics["selectedConditionEstimate"]
     status = "passed"
     reasons: list[str] = []
     if expected_nullity is not None and nullity != expected_nullity:
         status = "failed"
         reasons.append("unexpected-prior-nullity")
+    if (
+        condition_metrics["equilibratedRank"] is not None
+        and condition_metrics["equilibratedRank"] != rank
+    ):
+        status = "failed"
+        reasons.append("prior-equilibrated-rank-differs")
     if (
         maximum_condition_estimate is not None
         and condition > maximum_condition_estimate
@@ -1110,6 +1279,20 @@ def marginalize_ceres_linearization(
         "priorRank": rank,
         "priorNullity": nullity,
         "priorConditionEstimate": condition,
+        "priorConditionEstimatePolicy": condition_metrics["policy"],
+        "priorRawConditionEstimate": condition_metrics[
+            "rawConditionEstimate"
+        ],
+        "priorEquilibratedRank": condition_metrics["equilibratedRank"],
+        "priorEquilibratedNullity": condition_metrics[
+            "equilibratedNullity"
+        ],
+        "priorEquilibratedConditionEstimate": condition_metrics[
+            "equilibratedConditionEstimate"
+        ],
+        "priorMaximumCameraBlockConditionEstimate": condition_metrics[
+            "maximumCameraBlockConditionEstimate"
+        ],
         "scaleGaugeProjectionApplied": scale_projection_applied,
         "scaleGaugeUnconstrainedRelativeRayleigh": scale_relative_rayleigh,
         "scaleGaugeUnconstrainedSmallestEigenvectorCosine": (
