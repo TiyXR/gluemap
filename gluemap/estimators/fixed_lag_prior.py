@@ -436,6 +436,21 @@ def _prior_factorization(
     return factor, factor_residual, result
 
 
+def _canonical_normal_from_factor(
+    factor: torch.Tensor,
+    factor_residual: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the exact normal form represented by the solver prior.
+
+    Spectrum truncation is part of the prior contract.  Propagating the
+    pre-truncation normal form would reintroduce modes that Ceres never saw and
+    lets round-off-level negative eigenvalues accumulate across long runs.
+    """
+    hessian = factor.T @ factor
+    hessian = (hessian + hessian.T) * 0.5
+    return hessian, factor.T @ factor_residual
+
+
 def _validate_prior_identity(
     previous: FejPriorState,
     camera_ids: tuple[int, ...],
@@ -608,9 +623,14 @@ def marginalize_pose_prior_batch(
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
-    reconstructed_gradient = factor.T @ factor_residual
+    canonical_hessian, canonical_gradient = _canonical_normal_from_factor(
+        factor, factor_residual
+    )
+    hessian_error = float(
+        torch.max(torch.abs(canonical_hessian - retained_hessian)).item()
+    )
     gradient_error = float(
-        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
+        torch.max(torch.abs(canonical_gradient - retained_gradient)).item()
     )
     rank = condition_metrics["selectedRank"]
     nullity = condition_metrics["selectedNullity"]
@@ -674,6 +694,8 @@ def marginalize_pose_prior_batch(
             "maximumCameraBlockConditionEstimate"
         ],
         "factorGradientMaximumAbsoluteError": gradient_error,
+        "factorHessianMaximumAbsoluteError": hessian_error,
+        "normalFormCanonicalizedFromFactor": True,
         "scaleGaugeProjectionApplied": scale_projection_applied,
         "scaleGaugeRemovedGradient": removed_scale_gradient,
         "cpuSparseNormalWallSeconds": 0.0,
@@ -685,8 +707,8 @@ def marginalize_pose_prior_batch(
     return FejPriorState(
         camera_ids=retained_camera_ids,
         linearization_points=retained_points,
-        hessian=retained_hessian,
-        gradient=retained_gradient,
+        hessian=canonical_hessian,
+        gradient=canonical_gradient,
         factor=factor,
         factor_residual=factor_residual,
         report=report,
@@ -887,9 +909,14 @@ def marginalize_linearized_tracks(
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
-    reconstructed_gradient = factor.T @ factor_residual
+    canonical_hessian, canonical_gradient = _canonical_normal_from_factor(
+        factor, factor_residual
+    )
+    hessian_error = float(
+        torch.max(torch.abs(canonical_hessian - retained_hessian)).item()
+    )
     gradient_error = float(
-        torch.max(torch.abs(reconstructed_gradient - retained_gradient)).item()
+        torch.max(torch.abs(canonical_gradient - retained_gradient)).item()
     )
     rank = condition_metrics["selectedRank"]
     nullity = condition_metrics["selectedNullity"]
@@ -943,6 +970,8 @@ def marginalize_linearized_tracks(
             "maximumCameraBlockConditionEstimate"
         ],
         "factorGradientMaximumAbsoluteError": gradient_error,
+        "factorHessianMaximumAbsoluteError": hessian_error,
+        "normalFormCanonicalizedFromFactor": True,
         "reasonCodes": reasons,
     }
     retained_camera_ids = tuple(
@@ -954,8 +983,8 @@ def marginalize_linearized_tracks(
     return FejPriorState(
         camera_ids=retained_camera_ids,
         linearization_points=retained_points,
-        hessian=retained_hessian,
-        gradient=retained_gradient,
+        hessian=canonical_hessian,
+        gradient=canonical_gradient,
         factor=factor,
         factor_residual=factor_residual,
         report=report,
@@ -1276,6 +1305,15 @@ def marginalize_ceres_linearization(
         relative_rank_threshold=relative_rank_threshold,
         policy=condition_estimate_policy,
     )
+    canonical_hessian, canonical_gradient = _canonical_normal_from_factor(
+        factor, factor_residual
+    )
+    hessian_error = float(
+        torch.max(torch.abs(canonical_hessian - retained_hessian)).item()
+    )
+    gradient_error = float(
+        torch.max(torch.abs(canonical_gradient - retained_gradient)).item()
+    )
     rank = condition_metrics["selectedRank"]
     nullity = condition_metrics["selectedNullity"]
     condition = condition_metrics["selectedConditionEstimate"]
@@ -1338,6 +1376,9 @@ def marginalize_ceres_linearization(
             scale_smallest_eigenvector_cosine
         ),
         "scaleGaugeRemovedGradient": removed_scale_gradient,
+        "factorGradientMaximumAbsoluteError": gradient_error,
+        "factorHessianMaximumAbsoluteError": hessian_error,
+        "normalFormCanonicalizedFromFactor": True,
         "priorUnconstrainedSmallestRelativeEigenvalues": [
             float(value)
             for value in (
@@ -1360,8 +1401,8 @@ def marginalize_ceres_linearization(
         linearization_points=_as_tensor(
             target_points, dtype=dtype, device=device
         ),
-        hessian=retained_hessian,
-        gradient=retained_gradient,
+        hessian=canonical_hessian,
+        gradient=canonical_gradient,
         factor=factor,
         factor_residual=factor_residual,
         report=report,

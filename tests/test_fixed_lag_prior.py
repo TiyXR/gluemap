@@ -17,6 +17,22 @@ from gluemap.estimators.fixed_lag_ceres_linearization import (
 )
 
 
+def _assert_normal_matches_factor(prior):
+    torch.testing.assert_close(
+        prior.hessian,
+        prior.factor.T @ prior.factor,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    torch.testing.assert_close(
+        prior.gradient,
+        prior.factor.T @ prior.factor_residual,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    assert prior.report["normalFormCanonicalizedFromFactor"] is True
+
+
 def _fixture(dtype=torch.float64):
     generator = torch.Generator().manual_seed(9127)
     camera_ids = (10, 11, 12)
@@ -108,6 +124,7 @@ def test_pose_only_prior_schur_eliminates_one_tail_pose_on_cuda():
     assert result.report["pointCount"] == 0
     assert result.report["priorRank"] == 11
     assert result.report["priorNullity"] == 1
+    _assert_normal_matches_factor(result)
     torch.testing.assert_close(
         result.factor.T @ result.factor,
         result.hessian,
@@ -184,6 +201,34 @@ def test_pose_only_batch_schur_matches_sequential_elimination_on_cpu():
     torch.testing.assert_close(
         batched.gradient, sequential.gradient, rtol=1e-9, atol=1e-9
     )
+    _assert_normal_matches_factor(batched)
+    _assert_normal_matches_factor(sequential)
+
+
+def test_pose_only_prior_does_not_propagate_truncated_normal_modes():
+    prior = _pose_only_batch_fixture(camera_count=5)
+    perturbation = torch.zeros_like(prior.hessian)
+    perturbation[0, 0] = -1e-8
+    perturbed = FejPriorState(
+        camera_ids=prior.camera_ids,
+        linearization_points=prior.linearization_points,
+        hessian=prior.hessian + perturbation,
+        gradient=prior.gradient,
+        factor=prior.factor,
+        factor_residual=prior.factor_residual,
+        report={},
+    )
+
+    result = marginalize_pose_prior_batch(
+        perturbed,
+        eliminate_camera_ids=(10, 11),
+        device_policy="cpu",
+        relative_rank_threshold=1e-10,
+        condition_estimate_policy="camera-block-jacobi",
+    )
+
+    _assert_normal_matches_factor(result)
+    assert result.report["factorHessianMaximumAbsoluteError"] >= 0.0
 
 
 def test_pose_only_batch_schur_removes_accumulated_scale_information():
