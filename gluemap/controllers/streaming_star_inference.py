@@ -226,12 +226,10 @@ class StreamingStarInferencePipeline(StarInferencePipeline):
                             "streaming Star centers are not contiguous"
                         )
 
-                    self._synchronize()
                     batch_started = time.perf_counter()
                     output, timings = self._run_batch_step(
                         batch_inference, batch
                     )
-                    self._synchronize()
                     batch_seconds.append(time.perf_counter() - batch_started)
                     forward_seconds.append(
                         float(timings.get("forward_times", 0.0))

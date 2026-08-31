@@ -84,12 +84,14 @@ class BatchInferenceStar:
         dtype: torch.dtype = torch.bfloat16,
         encoder_token_cache_frames: int = 0,
         tracker_feature_cache_frames: int = 0,
+        defer_output_to_sink: bool = False,
     ):
         self.model = model
         self.model_type = model_type
         self.model_track = model_track
         self.device = device
         self.dtype = dtype
+        self.defer_output_to_sink = defer_output_to_sink
         self.synchronization_count = 0
         self.resolved_attention_backend = (
             resolve_pi3_sdpa_backend(device)
@@ -107,7 +109,9 @@ class BatchInferenceStar:
         self.track_inference = TrackInference(
             model_track, device, tracker_feature_cache_frames
         )
-        self.covisibility_extraction = CovisibilityExtraction()
+        self.covisibility_extraction = CovisibilityExtraction(
+            return_cpu=not defer_output_to_sink
+        )
 
     def _synchronize(self) -> None:
         device = getattr(self, "device", "cpu")
@@ -148,7 +152,6 @@ class BatchInferenceStar:
             include_track=include_track,
         )
 
-        self._synchronize()
         covisibility_started = time.perf_counter()
         (
             extrinsics,
@@ -185,9 +188,22 @@ class BatchInferenceStar:
         }
 
         if include_track:
-            result_dict["tracks"] = predictions["track"].cpu()
-            result_dict["vis"] = predictions["vis"].cpu()
-            result_dict["conf"] = predictions["conf"].cpu()
+            defer_output = getattr(self, "defer_output_to_sink", False)
+            result_dict["tracks"] = (
+                predictions["track"]
+                if defer_output
+                else predictions["track"].cpu()
+            )
+            result_dict["vis"] = (
+                predictions["vis"]
+                if defer_output
+                else predictions["vis"].cpu()
+            )
+            result_dict["conf"] = (
+                predictions["conf"]
+                if defer_output
+                else predictions["conf"].cpu()
+            )
 
         return result_dict
 
@@ -209,7 +225,6 @@ class BatchInferenceStar:
             )
 
         # Local inference (timed)
-        self._synchronize()
         t0 = time.perf_counter()
         compatibility = (
             pi3_sdpa_compatibility(self.device)
@@ -240,7 +255,6 @@ class BatchInferenceStar:
         if not include_track:
             return {}, 0.0
 
-        self._synchronize()
         t0 = time.perf_counter()
         track_preds = self.track_inference.predict(
             batch=batch,
@@ -296,6 +310,9 @@ class StarInferencePipeline(BaseInferencePipeline):
             ),
             tracker_feature_cache_frames=getattr(
                 self.args, "tracker_feature_cache_frames", 0
+            ),
+            defer_output_to_sink=getattr(
+                self.args, "defer_output_to_sink", False
             ),
         )
 

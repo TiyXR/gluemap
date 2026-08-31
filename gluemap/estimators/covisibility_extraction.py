@@ -63,9 +63,11 @@ class CovisibilityExtraction:
         self,
         check_consistency: bool = False,
         include_track: bool = True,
+        return_cpu: bool = True,
     ) -> None:
         self.check_consistency = check_consistency
         self.include_track = include_track
+        self.return_cpu = return_cpu
 
     def main(
         self,
@@ -132,14 +134,17 @@ class CovisibilityExtraction:
                         tracks_virtual[i, j], images_change[i][j]
                     )
 
-        return (
-            extrinsics.cpu(),
-            intrinsics.cpu(),
-            scores.cpu(),
-            tracks_virtual.cpu(),
-            points3d_virtual.cpu(),
-            valid_virtual.cpu(),
+        outputs = (
+            extrinsics,
+            intrinsics,
+            scores,
+            tracks_virtual,
+            points3d_virtual,
+            valid_virtual,
         )
+        if self.return_cpu:
+            return tuple(value.cpu() for value in outputs)
+        return outputs
 
     def _calculate_virtual_tracks(
         self,

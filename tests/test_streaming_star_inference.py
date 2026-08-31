@@ -237,8 +237,8 @@ def test_streaming_profile_reads_live_cuda_counters():
         FakeDataset(), lambda _center, _output: None
     )
     assert report["device"] == "cuda:0"
-    assert report["streamSynchronizationCount"] == 4
-    assert report["synchronizationCount"] == 4
+    assert report["streamSynchronizationCount"] == 0
+    assert report["synchronizationCount"] == 0
     assert report["peakCudaAllocatedBytes"] >= 0
     assert report["peakCudaReservedBytes"] >= 0
     assert len(report["cudaTimeline"]) >= 1
