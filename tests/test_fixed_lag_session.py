@@ -131,6 +131,32 @@ def test_group_commit_releases_only_after_one_accepted_batch_head():
     assert result["releasedCacheShardIndexes"] == [0]
 
 
+def test_cancelled_batch_allows_future_ingest_without_advancing_watermark():
+    value = session()
+    for _ in range(10):
+        value.ingest_next()
+    proposal = value.propose_advance()
+    cancelled = value.cancel_batch(proposal["proposalUid"])
+    assert cancelled["logicalAdvanceCount"] == 1
+    assert value.finalized_count == 0
+    assert value.last_accepted_index_head is None
+    assert value.released_cache_shards == set()
+    ingested = value.ingest_next()
+    assert ingested["geometryOrdinal"] == 10
+    replayed = value.propose_advance()
+    assert replayed["proposalUid"] != proposal["proposalUid"]
+
+
+def test_cancelled_batch_rejects_an_unrelated_token():
+    value = session()
+    for _ in range(10):
+        value.ingest_next()
+    proposal = value.propose_advance()
+    with pytest.raises(FixedLagSessionError, match="identity"):
+        value.cancel_batch("unrelated")
+    value.commit_advance(proposal["proposalUid"], "c" * 64)
+
+
 def test_checkpoint_from_other_frame_identity_is_rejected():
     first = session()
     first.ingest_next()

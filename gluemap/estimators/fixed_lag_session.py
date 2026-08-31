@@ -306,6 +306,19 @@ class FixedLagSession:
             "stateAfter": self.role_state(),
         }
 
+    def cancel_batch(self, proposal_uid: str) -> dict[str, Any]:
+        """Discard one uncommitted proposal so more future frames may ingest."""
+        if proposal_uid != self._pending_proposal_uid:
+            raise FixedLagSessionError("cancelled proposal identity differs")
+        logical_advance_count = self._pending_batch_count
+        self._pending_proposal_uid = None
+        self._pending_batch_count = 0
+        return {
+            "proposalUid": proposal_uid,
+            "logicalAdvanceCount": logical_advance_count,
+            "stateAfter": self.role_state(),
+        }
+
     def role_state(self) -> dict[str, Any]:
         resident = list(range(self.finalized_count, self.next_ingest_ordinal))
         active = resident[: self.window_size_keyframes]
