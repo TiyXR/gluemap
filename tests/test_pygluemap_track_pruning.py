@@ -90,6 +90,46 @@ def test_batch_observation_uids_match_the_python_contract():
     assert values == expected
 
 
+def test_active_track_graph_groups_unique_frame_rows_and_reuses_released_rows():
+    graph = pygluemap_tracks.ActiveTrackGraph()
+    rows = graph.add_nodes_with_rows(["a0", "a0-duplicate", "b1", "c2"])
+    assert rows.tolist() == [0, 1, 2, 3]
+    graph.add_edges(["a0", "a0"], ["a0-duplicate", "b1"])
+
+    ordered, offsets, component_uids, ordered_rows = (
+        graph.group_component_rows(
+            ["a0", "a0-duplicate", "b1", "c2"],
+            np.asarray([0, 0, 1, 2], dtype=np.int64),
+        )
+    )
+    assert ordered.tolist() == [0, 2, 3]
+    assert offsets.tolist() == [0, 2, 3]
+    assert component_uids == ["a0", "c2"]
+    assert ordered_rows.tolist() == [0, 2, 3]
+
+    released = graph.remove_nodes_with_rows(["a0-duplicate", "c2"])
+    assert released.tolist() == [1, 3]
+    reused = graph.add_nodes_with_rows(["d3", "e4"])
+    assert reused.tolist() == [3, 1]
+
+
+def test_active_track_graph_preserves_component_identity_after_bridge_release():
+    graph = pygluemap_tracks.ActiveTrackGraph()
+    graph.add_nodes_with_rows(["a0", "bridge", "b2"])
+    graph.add_edges(["a0", "bridge"], ["bridge", "b2"])
+    graph.remove_nodes_with_rows(["bridge"])
+
+    ordered, offsets, component_uids, ordered_rows = (
+        graph.group_component_rows(
+            ["a0", "b2"], np.asarray([0, 2], dtype=np.int64)
+        )
+    )
+    assert ordered.tolist() == [0, 1]
+    assert offsets.tolist() == [0, 2]
+    assert component_uids == ["a0"]
+    assert ordered_rows.tolist() == [0, 2]
+
+
 def _pair_key(a, b):
     lo, hi = (a, b) if a < b else (b, a)
     return (np.uint64(lo) << np.uint64(32)) | np.uint64(hi)
