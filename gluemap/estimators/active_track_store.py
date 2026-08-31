@@ -100,6 +100,20 @@ class SelectedTrackState:
     observations: tuple[TrackObservation, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _NativeComponentBatch:
+    """Compact stable-component CSR with rows owned by the native graph."""
+
+    observation_uids: list[str]
+    ordered_indexes: Any
+    offsets: Any
+    component_uids: list[str]
+    ordered_tensor_rows: Any
+
+    def __len__(self) -> int:
+        return len(self.component_uids)
+
+
 class _PersistentObservationTensorTable:
     """GPU-resident observation columns with reusable released rows.
 
@@ -122,6 +136,9 @@ class _PersistentObservationTensorTable:
         self._free_rows: deque[int] = deque()
         self._row_by_uid: dict[str, int] = {}
         self._pending: list[tuple[int, str, TrackObservation]] = []
+        self._native_pending_columns: list[tuple[Any, ...]] = []
+        self._native_resident_row_count = 0
+        self._native_row_high_water = 0
         self.uploaded_row_count = 0
         self.reused_row_count = 0
         self.coordinates = torch.empty((0, 2), dtype=torch.float32, device=device)
@@ -132,11 +149,13 @@ class _PersistentObservationTensorTable:
 
     @property
     def resident_row_count(self) -> int:
-        return len(self._row_by_uid)
+        return len(self._row_by_uid) + self._native_resident_row_count
 
     @property
     def pending_row_count(self) -> int:
-        return len(self._pending)
+        return len(self._pending) + sum(
+            len(value[0]) for value in self._native_pending_columns
+        )
 
     def queue(self, value: TrackObservation) -> None:
         if value.observation_uid in self._row_by_uid:
@@ -172,6 +191,57 @@ class _PersistentObservationTensorTable:
         self._next_row = next_row
         self.reused_row_count += reused
 
+    def queue_native_columns(
+        self,
+        rows: Any,
+        geometry_ordinals: Any,
+        coordinates: Any,
+        scores: Any,
+        seconds: Any,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> None:
+        """Queue one compact native-row batch without rebuilding Python objects."""
+        import numpy as np
+
+        rows = np.asarray(rows, dtype=np.int64)
+        geometry_ordinals = np.asarray(geometry_ordinals, dtype=np.int64)
+        coordinates = np.asarray(coordinates, dtype=np.float32)
+        scores = np.asarray(scores, dtype=np.float64)
+        seconds = np.asarray(seconds, dtype=np.float64)
+        count = len(rows)
+        if (
+            rows.shape != (count,)
+            or geometry_ordinals.shape != (count,)
+            or coordinates.shape != (count, 2)
+            or scores.shape != (count,)
+            or seconds.shape != (count,)
+            or (count and int(rows.min()) < 0)
+        ):
+            raise ActiveTrackStoreError("native observation tensor columns differ")
+        if not count:
+            return
+        previous_high_water = self._native_row_high_water
+        self.reused_row_count += int((rows < previous_high_water).sum())
+        self._native_row_high_water = max(
+            previous_high_water, int(rows.max()) + 1
+        )
+        dimensions = np.empty((count, 2), dtype=np.float32)
+        dimensions[:, 0] = image_width
+        dimensions[:, 1] = image_height
+        self._native_pending_columns.append(
+            (
+                np.ascontiguousarray(rows),
+                np.ascontiguousarray(coordinates),
+                np.ascontiguousarray(geometry_ordinals),
+                dimensions,
+                np.ascontiguousarray(scores),
+                np.ascontiguousarray(seconds),
+            )
+        )
+        self._native_resident_row_count += count
+
     def row(self, observation_uid: str) -> int:
         return self._row_by_uid[observation_uid]
 
@@ -192,6 +262,30 @@ class _PersistentObservationTensorTable:
                 dtype=np.int64,
                 count=len(observations),
             )
+        return result
+
+    @staticmethod
+    def padded_rows_from_csr(
+        ordered_rows: Any, offsets: Any, maximum_observations: int
+    ) -> Any:
+        import numpy as np
+
+        ordered_rows = np.asarray(ordered_rows, dtype=np.int64)
+        offsets = np.asarray(offsets, dtype=np.int64)
+        component_count = len(offsets) - 1
+        result = np.full(
+            (component_count, maximum_observations), -1, dtype=np.int64
+        )
+        if not len(ordered_rows):
+            return result
+        lengths = np.diff(offsets)
+        group_indexes = np.repeat(
+            np.arange(component_count, dtype=np.int64), lengths
+        )
+        within_group = np.arange(len(ordered_rows), dtype=np.int64) - np.repeat(
+            offsets[:-1], lengths
+        )
+        result[group_indexes, within_group] = ordered_rows
         return result
 
     def _grow(self, required: int) -> None:
@@ -224,6 +318,28 @@ class _PersistentObservationTensorTable:
     def flush(self) -> None:
         import numpy as np
         import torch
+
+        native_pending = self._native_pending_columns
+        self._native_pending_columns = []
+        if native_pending:
+            rows = np.concatenate([value[0] for value in native_pending])
+            coordinates = np.concatenate([value[1] for value in native_pending])
+            ordinals = np.concatenate([value[2] for value in native_pending])
+            dimensions = np.concatenate([value[3] for value in native_pending])
+            scores = np.concatenate([value[4] for value in native_pending])
+            seconds = np.concatenate([value[5] for value in native_pending])
+            self._grow(int(rows.max()) + 1)
+            indexes = torch.from_numpy(rows).to(self.device)
+            self.coordinates[indexes] = torch.from_numpy(coordinates).to(
+                self.device
+            )
+            self.ordinals[indexes] = torch.from_numpy(ordinals).to(self.device)
+            self.dimensions[indexes] = torch.from_numpy(dimensions).to(
+                self.device
+            )
+            self.scores[indexes] = torch.from_numpy(scores).to(self.device)
+            self.seconds[indexes] = torch.from_numpy(seconds).to(self.device)
+            self.uploaded_row_count += len(rows)
 
         pending = [
             (row, uid, value)
@@ -280,6 +396,12 @@ class _PersistentObservationTensorTable:
             if row is not None:
                 self._free_rows.append(row)
 
+    def discard_native_rows(self, rows: Any) -> None:
+        count = len(rows)
+        if count > self._native_resident_row_count:
+            raise ActiveTrackStoreError("native observation row release differs")
+        self._native_resident_row_count -= count
+
 
 class ActiveTrackStore:
     """Own candidate tracks only while their observations are in the lag.
@@ -307,6 +429,7 @@ class ActiveTrackStore:
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
         self._native_graph = self._create_native_graph()
+        self._native_tensor_rows = self._supports_native_tensor_rows()
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
         self._parallax_backend = self._resolve_parallax_backend()
@@ -321,6 +444,17 @@ class ActiveTrackStore:
         self._last_gate_phase_wall: dict[str, float] = {}
         self._last_gate_metric_phase_wall: dict[str, float] = {}
         self.store_identity_sha256 = _canonical_sha256(asdict(budget))
+
+    def _supports_native_tensor_rows(self) -> bool:
+        graph = self._native_graph
+        return graph is not None and all(
+            hasattr(graph, name)
+            for name in (
+                "add_nodes_with_rows",
+                "group_component_rows",
+                "remove_nodes_with_rows",
+            )
+        )
 
     @staticmethod
     def _resolve_component_rebuild_backend() -> str:
@@ -503,16 +637,36 @@ class ActiveTrackStore:
         )
         self._native_spatial_x_by_frame[value.geometry_ordinal].append(value.x)
         self._native_spatial_y_by_frame[value.geometry_ordinal].append(value.y)
+        native_rows = None
         if self._native_graph is not None:
-            self._native_graph.add_nodes([value.observation_uid])
+            if self._native_tensor_rows:
+                native_rows = self._native_graph.add_nodes_with_rows(
+                    [value.observation_uid]
+                )
+            else:
+                self._native_graph.add_nodes([value.observation_uid])
         else:
             root = self._union_find.find(value.observation_uid)
             self._component_uid_by_root[root] = value.observation_uid
         if self._gpu_observation_table is not None:
-            self._gpu_observation_table.queue(value)
+            if native_rows is not None:
+                self._gpu_observation_table.queue_native_columns(
+                    native_rows,
+                    [value.geometry_ordinal],
+                    [(value.x, value.y)],
+                    [value.score],
+                    [value.seconds],
+                    image_width=value.image_width,
+                    image_height=value.image_height,
+                )
+            else:
+                self._gpu_observation_table.queue(value)
 
     def _insert_observation_batch(
-        self, values: list[TrackObservation]
+        self,
+        values: list[TrackObservation],
+        *,
+        tensor_columns: tuple[Any, Any, Any, Any] | None = None,
     ) -> None:
         """Insert one already validated native-intern result without call churn."""
         if not values:
@@ -538,13 +692,17 @@ class ActiveTrackStore:
         maintain_python_buckets = self._spatial_intern_backend != "native-openmp"
         table = self._gpu_observation_table
         native_graph = self._native_graph
+        native_rows = None
         if native_graph is not None:
             incoming_uids = [value.observation_uid for value in values]
             if len(set(incoming_uids)) != len(incoming_uids) or any(
                 uid in observations for uid in incoming_uids
             ):
                 raise ActiveTrackStoreError("observation identity was reused")
-            native_graph.add_nodes(incoming_uids)
+            if self._native_tensor_rows:
+                native_rows = native_graph.add_nodes_with_rows(incoming_uids)
+            else:
+                native_graph.add_nodes(incoming_uids)
         for value in values:
             uid = value.observation_uid
             if uid in observations or uid in union_parent:
@@ -561,7 +719,30 @@ class ActiveTrackStore:
                 union_parent[uid] = uid
                 component_uid_by_root[uid] = uid
         if table is not None:
-            table.queue_batch(values)
+            if native_rows is not None:
+                if tensor_columns is None:
+                    table.queue_native_columns(
+                        native_rows,
+                        [value.geometry_ordinal for value in values],
+                        [(value.x, value.y) for value in values],
+                        [value.score for value in values],
+                        [value.seconds for value in values],
+                        image_width=values[0].image_width,
+                        image_height=values[0].image_height,
+                    )
+                else:
+                    ordinals, coordinates, scores, seconds = tensor_columns
+                    table.queue_native_columns(
+                        native_rows,
+                        ordinals,
+                        coordinates,
+                        scores,
+                        seconds,
+                        image_width=values[0].image_width,
+                        image_height=values[0].image_height,
+                    )
+            else:
+                table.queue_batch(values)
 
     def intern_observations(
         self,
@@ -795,6 +976,7 @@ class ActiveTrackStore:
         existing_count = len(existing_uids)
         resolved_uids: list[str] = []
         new_values: list[TrackObservation] = []
+        new_indexes: list[int] = []
         for index, representative in enumerate(representatives.tolist()):
             if representative < existing_count:
                 resolved_uids.append(existing_uids[representative])
@@ -824,8 +1006,29 @@ class ActiveTrackStore:
                     raise ActiveTrackStoreError("observation identity was reused")
             else:
                 new_values.append(value)
+                new_indexes.append(index)
             resolved_uids.append(value.observation_uid)
-        self._insert_observation_batch(new_values)
+        if new_indexes:
+            indexes = np.asarray(new_indexes, dtype=np.int64)
+            seconds = (
+                pts_values[indexes].astype(np.float64)
+                * time_base_numerators[indexes].astype(np.float64)
+                / time_base_denominators[indexes].astype(np.float64)
+            )
+            tensor_columns = (
+                geometry_ordinals[indexes],
+                coordinates[indexes],
+                scores[indexes],
+                seconds,
+            )
+        else:
+            tensor_columns = None
+        if self._native_tensor_rows and self._gpu_observation_table is not None:
+            self._insert_observation_batch(
+                new_values, tensor_columns=tensor_columns
+            )
+        else:
+            self._insert_observation_batch(new_values)
         self._last_column_intern_phase_wall["newObservationInsert"] = (
             time.perf_counter() - phase_started
         )
@@ -988,7 +1191,7 @@ class ActiveTrackStore:
 
     def _components_for_frames(
         self, frame_ids: Iterable[int]
-    ) -> tuple[dict[str, list[TrackObservation]], int]:
+    ) -> tuple[dict[str, list[TrackObservation]] | _NativeComponentBatch, int]:
         """Build component views from the active frame index only.
 
         Long-running stores deliberately retain observations until a durable
@@ -998,11 +1201,31 @@ class ActiveTrackStore:
         """
         values: dict[str, list[TrackObservation]] = defaultdict(list)
         observation_uids: list[str] = []
+        observation_frame_ids: list[int] = []
         for frame_id in sorted(set(int(value) for value in frame_ids)):
-            observation_uids.extend(
-                sorted(self._observations_by_frame.get(frame_id, ()))
-            )
+            frame_uids = sorted(self._observations_by_frame.get(frame_id, ()))
+            observation_uids.extend(frame_uids)
+            observation_frame_ids.extend([frame_id] * len(frame_uids))
         source_observation_count = len(observation_uids)
+        if self._native_tensor_rows and self._gpu_observation_table is not None:
+            import numpy as np
+
+            ordered, offsets, component_uids, ordered_rows = (
+                self._native_graph.group_component_rows(
+                    observation_uids,
+                    np.asarray(observation_frame_ids, dtype=np.int64),
+                )
+            )
+            return (
+                _NativeComponentBatch(
+                    observation_uids=observation_uids,
+                    ordered_indexes=ordered,
+                    offsets=offsets,
+                    component_uids=component_uids,
+                    ordered_tensor_rows=ordered_rows,
+                ),
+                source_observation_count,
+            )
         if self._native_graph is not None:
             values = self._native_component_groups(observation_uids)
         else:
@@ -1272,9 +1495,25 @@ class ActiveTrackStore:
             if materialize_tracks:
                 active_frames = set(frame_sets[index])
                 for candidate in selected:
-                    component_uid, component_observations = component_values[
-                        candidate["componentIndex"]
-                    ]
+                    component_index = candidate["componentIndex"]
+                    if isinstance(component_values, _NativeComponentBatch):
+                        begin = int(component_values.offsets[component_index])
+                        end = int(component_values.offsets[component_index + 1])
+                        component_uid = component_values.component_uids[
+                            component_index
+                        ]
+                        component_observations = [
+                            self._observations[
+                                component_values.observation_uids[
+                                    int(component_values.ordered_indexes[position])
+                                ]
+                            ]
+                            for position in range(begin, end)
+                        ]
+                    else:
+                        component_uid, component_observations = component_values[
+                            component_index
+                        ]
                     observation_by_frame: dict[int, TrackObservation] = {}
                     for observation in component_observations:
                         if observation.geometry_ordinal in active_frames:
@@ -1338,7 +1577,7 @@ class ActiveTrackStore:
 
     def _batch_component_metrics(
         self,
-        components: dict[str, list[TrackObservation]],
+        components: dict[str, list[TrackObservation]] | _NativeComponentBatch,
         intervals: list[tuple[int, int, int]],
         frame_sets: list[tuple[int, ...]],
     ) -> tuple[
@@ -1346,7 +1585,7 @@ class ActiveTrackStore:
         list[Counter[str]],
         Any,
         Any,
-        list[tuple[str, list[TrackObservation]]],
+        Any,
     ]:
         """Compute every read-only component/window metric as one tensor batch."""
         import numpy as np
@@ -1355,20 +1594,38 @@ class ActiveTrackStore:
         phase_wall: dict[str, float] = {}
         phase_started = time.perf_counter()
         active_frame_union = set().union(*(set(value) for value in frame_sets))
-        component_values: list[tuple[str, list[TrackObservation]]] = []
-        for component_uid, observations in components.items():
-            observation_by_frame: dict[int, TrackObservation] = {}
-            for observation in observations:
-                if observation.geometry_ordinal in active_frame_union:
-                    observation_by_frame.setdefault(
-                        observation.geometry_ordinal, observation
+        native_components = isinstance(components, _NativeComponentBatch)
+        if native_components:
+            component_values: Any = components
+            component_uids = components.component_uids
+            lengths = np.diff(
+                np.asarray(components.offsets, dtype=np.int64)
+            )
+            maximum_observations = int(lengths.max()) if len(lengths) else 0
+            active_observation_count = int(lengths.sum())
+        else:
+            component_values = []
+            for component_uid, observations in components.items():
+                observation_by_frame: dict[int, TrackObservation] = {}
+                for observation in observations:
+                    if observation.geometry_ordinal in active_frame_union:
+                        observation_by_frame.setdefault(
+                            observation.geometry_ordinal, observation
+                        )
+                if observation_by_frame:
+                    component_values.append(
+                        (component_uid, list(observation_by_frame.values()))
                     )
-            if observation_by_frame:
-                component_values.append(
-                    (component_uid, list(observation_by_frame.values()))
-                )
+            component_uids = [value[0] for value in component_values]
+            maximum_observations = max(
+                (len(observations) for _, observations in component_values),
+                default=0,
+            )
+            active_observation_count = sum(
+                len(observations) for _, observations in component_values
+            )
         phase_wall["componentPrepare"] = time.perf_counter() - phase_started
-        if not component_values:
+        if not component_uids:
             self._last_gate_metric_phase_wall = phase_wall
             device = self._parallax_backend
             self._last_gate_tensor_report = {
@@ -1385,25 +1642,29 @@ class ActiveTrackStore:
                 ),
                 [],
             )
-        component_uids = [value[0] for value in component_values]
-        maximum_observations = max(
-            len(observations) for _, observations in component_values
-        )
         device = self._parallax_backend
         self._last_gate_tensor_report = {
-            "activeTensorComponentCount": len(component_values),
+            "activeTensorComponentCount": len(component_uids),
             "activeTensorMaximumObservations": maximum_observations,
             "activeTensorFrameUnionCount": len(active_frame_union),
-            "activeComponentSourceObservationCount": sum(
-                len(observations) for observations in components.values()
-            ),
+            "activeComponentSourceObservationCount": active_observation_count,
         }
         phase_started = time.perf_counter()
         if self._gpu_observation_table is not None:
             table = self._gpu_observation_table
             table.flush()
+            if native_components:
+                padded_rows = table.padded_rows_from_csr(
+                    component_values.ordered_tensor_rows,
+                    component_values.offsets,
+                    maximum_observations,
+                )
+            else:
+                padded_rows = table.padded_rows(
+                    component_values, maximum_observations
+                )
             row_indexes = torch.from_numpy(
-                table.padded_rows(component_values, maximum_observations)
+                padded_rows
             ).to(device)
             valid_rows = row_indexes >= 0
             safe_rows = row_indexes.clamp_min(0)
@@ -1950,8 +2211,14 @@ class ActiveTrackStore:
         released_frame_ids = {
             self._observations[uid].geometry_ordinal for uid in release_uids
         }
+        released_native_rows = None
         if self._native_graph is not None:
-            self._native_graph.remove_nodes(sorted(release_uids))
+            if self._native_tensor_rows:
+                released_native_rows = self._native_graph.remove_nodes_with_rows(
+                    sorted(release_uids)
+                )
+            else:
+                self._native_graph.remove_nodes(sorted(release_uids))
         for uid in release_uids:
             observation = self._observations.pop(uid)
             frame_values = self._observations_by_frame[observation.geometry_ordinal]
@@ -1996,7 +2263,12 @@ class ActiveTrackStore:
                 if key[0] not in release_uids and key[1] not in release_uids
             }
         if self._gpu_observation_table is not None:
-            self._gpu_observation_table.discard(release_uids)
+            if released_native_rows is not None:
+                self._gpu_observation_table.discard_native_rows(
+                    released_native_rows
+                )
+            else:
+                self._gpu_observation_table.discard(release_uids)
         if self._native_graph is None:
             self._rebuild_components()
         result = {

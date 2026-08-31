@@ -236,6 +236,23 @@ class ActiveTrackGraph {
 public:
   int64_t AddNodes(const std::vector<std::string> &uids) {
     py::gil_scoped_release release;
+    AddNodesImpl(uids, nullptr);
+    return static_cast<int64_t>(uids.size());
+  }
+
+  py::array_t<int64_t>
+  AddNodesWithRows(const std::vector<std::string> &uids) {
+    std::vector<int64_t> rows;
+    {
+      py::gil_scoped_release release;
+      rows.reserve(uids.size());
+      AddNodesImpl(uids, &rows);
+    }
+    return VecToArray1D(std::move(rows));
+  }
+
+  int64_t AddNodesImpl(const std::vector<std::string> &uids,
+                       std::vector<int64_t> *rows) {
     for (const std::string &uid : uids) {
       if (uid.empty() || node_by_uid_.find(uid) != node_by_uid_.end()) {
         throw std::invalid_argument("active track graph node is invalid");
@@ -250,6 +267,17 @@ public:
       parents_.push_back(node);
       component_uids_.push_back(uid);
       alive_.push_back(true);
+      int64_t tensor_row = -1;
+      if (!free_tensor_rows_.empty()) {
+        tensor_row = free_tensor_rows_.back();
+        free_tensor_rows_.pop_back();
+      } else {
+        tensor_row = next_tensor_row_++;
+      }
+      tensor_rows_.push_back(tensor_row);
+      if (rows != nullptr) {
+        rows->push_back(tensor_row);
+      }
       ++live_node_count_;
     }
     return static_cast<int64_t>(uids.size());
@@ -348,8 +376,82 @@ public:
                           std::move(component_uids));
   }
 
+  py::tuple GroupComponentRows(
+      const std::vector<std::string> &uids,
+      py::array_t<int64_t, py::array::c_style> frame_ids) {
+    if (frame_ids.size() != static_cast<int64_t>(uids.size())) {
+      throw std::invalid_argument("active track component frame column differs");
+    }
+    std::vector<int64_t> ordered_indexes;
+    std::vector<int64_t> ordered_rows;
+    std::vector<int64_t> offsets;
+    std::vector<std::string> component_uids;
+    {
+      py::gil_scoped_release release;
+      std::unordered_map<std::string, int64_t> group_by_component;
+      std::vector<std::vector<int64_t>> groups;
+      std::vector<std::vector<int64_t>> group_rows;
+      std::vector<std::unordered_set<int64_t>> seen_frames;
+      groups.reserve(uids.size());
+      group_rows.reserve(uids.size());
+      seen_frames.reserve(uids.size());
+      const int64_t *frames = frame_ids.data();
+      for (size_t index = 0; index < uids.size(); ++index) {
+        const int64_t node = Node(uids[index]);
+        const int64_t root = Find(node);
+        const std::string &component_uid =
+            component_uids_[static_cast<size_t>(root)];
+        const auto inserted = group_by_component.emplace(
+            component_uid, static_cast<int64_t>(groups.size()));
+        if (inserted.second) {
+          groups.emplace_back();
+          group_rows.emplace_back();
+          seen_frames.emplace_back();
+          component_uids.push_back(component_uid);
+        }
+        const size_t group = static_cast<size_t>(inserted.first->second);
+        if (!seen_frames[group].insert(frames[index]).second) {
+          continue;
+        }
+        groups[group].push_back(static_cast<int64_t>(index));
+        group_rows[group].push_back(tensor_rows_[static_cast<size_t>(node)]);
+      }
+      ordered_indexes.reserve(uids.size());
+      ordered_rows.reserve(uids.size());
+      offsets.reserve(groups.size() + 1);
+      offsets.push_back(0);
+      for (size_t group = 0; group < groups.size(); ++group) {
+        ordered_indexes.insert(ordered_indexes.end(), groups[group].begin(),
+                               groups[group].end());
+        ordered_rows.insert(ordered_rows.end(), group_rows[group].begin(),
+                            group_rows[group].end());
+        offsets.push_back(static_cast<int64_t>(ordered_indexes.size()));
+      }
+    }
+    return py::make_tuple(VecToArray1D(std::move(ordered_indexes)),
+                          VecToArray1D(std::move(offsets)),
+                          std::move(component_uids),
+                          VecToArray1D(std::move(ordered_rows)));
+  }
+
   void RemoveNodes(const std::vector<std::string> &uids) {
     py::gil_scoped_release release;
+    RemoveNodesImpl(uids, nullptr);
+  }
+
+  py::array_t<int64_t>
+  RemoveNodesWithRows(const std::vector<std::string> &uids) {
+    std::vector<int64_t> rows;
+    {
+      py::gil_scoped_release release;
+      rows.reserve(uids.size());
+      RemoveNodesImpl(uids, &rows);
+    }
+    return VecToArray1D(std::move(rows));
+  }
+
+  void RemoveNodesImpl(const std::vector<std::string> &uids,
+                       std::vector<int64_t> *rows) {
     std::vector<uint8_t> remove(uid_by_node_.size(), 0);
     for (const std::string &uid : uids) {
       const int64_t node = Node(uid);
@@ -368,6 +470,11 @@ public:
     }
     for (size_t node = 0; node < uid_by_node_.size(); ++node) {
       if (remove[node] != 0) {
+        const int64_t tensor_row = tensor_rows_[node];
+        free_tensor_rows_.push_back(tensor_row);
+        if (rows != nullptr) {
+          rows->push_back(tensor_row);
+        }
         alive_[node] = false;
         node_by_uid_.erase(uid_by_node_[node]);
         --live_node_count_;
@@ -453,6 +560,9 @@ private:
   std::vector<int64_t> parents_;
   std::vector<std::string> component_uids_;
   std::vector<bool> alive_;
+  std::vector<int64_t> tensor_rows_;
+  std::vector<int64_t> free_tensor_rows_;
+  int64_t next_tensor_row_ = 0;
   std::unordered_set<uint64_t> edges_;
   int64_t live_node_count_ = 0;
 };
@@ -463,6 +573,8 @@ void BindActiveTrackGraph(py::module_ &module) {
   py::class_<ActiveTrackGraph>(module, "ActiveTrackGraph")
       .def(py::init<>())
       .def("add_nodes", &ActiveTrackGraph::AddNodes, py::arg("uids"))
+      .def("add_nodes_with_rows", &ActiveTrackGraph::AddNodesWithRows,
+           py::arg("uids"))
       .def("add_edges", &ActiveTrackGraph::AddEdges,
            py::arg("first_uids"), py::arg("second_uids"))
       .def("add_star_edges", &ActiveTrackGraph::AddStarEdges,
@@ -472,7 +584,11 @@ void BindActiveTrackGraph(py::module_ &module) {
            py::arg("uids"))
       .def("group_components", &ActiveTrackGraph::GroupComponents,
            py::arg("uids"))
+      .def("group_component_rows", &ActiveTrackGraph::GroupComponentRows,
+           py::arg("uids"), py::arg("frame_ids"))
       .def("remove_nodes", &ActiveTrackGraph::RemoveNodes,
+           py::arg("uids"))
+      .def("remove_nodes_with_rows", &ActiveTrackGraph::RemoveNodesWithRows,
            py::arg("uids"))
       .def_property_readonly("node_count", &ActiveTrackGraph::NodeCount)
       .def_property_readonly("edge_count", &ActiveTrackGraph::EdgeCount);
