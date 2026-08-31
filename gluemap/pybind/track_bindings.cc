@@ -30,7 +30,10 @@ std::vector<std::string> BatchObservationUidsWrapper(
     py::array_t<int64_t, py::array::c_style> view_indexes,
     const std::vector<std::string> &frame_uids);
 
+void BindActiveTrackGraph(py::module_ &module);
+
 PYBIND11_MODULE(pygluemap_tracks, module) {
+  BindActiveTrackGraph(module);
   module.def(
       "compute_connected_components", &ComputeConnectedComponentsWrapper,
       py::arg("node_count"), py::arg("edge_first"), py::arg("edge_second"),

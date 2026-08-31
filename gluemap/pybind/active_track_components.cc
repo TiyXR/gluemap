@@ -1,5 +1,7 @@
 #include "pybind_utils.h"
 
+#include <pybind11/stl.h>
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -10,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -229,7 +232,214 @@ std::vector<std::string> BatchObservationUids(
   return result;
 }
 
+class ActiveTrackGraph {
+public:
+  int64_t AddNodes(const std::vector<std::string> &uids) {
+    py::gil_scoped_release release;
+    for (const std::string &uid : uids) {
+      if (uid.empty() || node_by_uid_.find(uid) != node_by_uid_.end()) {
+        throw std::invalid_argument("active track graph node is invalid");
+      }
+      if (uid_by_node_.size() >=
+          static_cast<size_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::invalid_argument("active track graph node limit exceeded");
+      }
+      const int64_t node = static_cast<int64_t>(uid_by_node_.size());
+      node_by_uid_.emplace(uid, node);
+      uid_by_node_.push_back(uid);
+      parents_.push_back(node);
+      component_uids_.push_back(uid);
+      alive_.push_back(true);
+      ++live_node_count_;
+    }
+    return static_cast<int64_t>(uids.size());
+  }
+
+  int64_t AddEdges(const std::vector<std::string> &first_uids,
+                   const std::vector<std::string> &second_uids) {
+    if (first_uids.size() != second_uids.size()) {
+      throw std::invalid_argument("active track graph edge columns differ");
+    }
+    py::gil_scoped_release release;
+    int64_t inserted = 0;
+    for (size_t index = 0; index < first_uids.size(); ++index) {
+      inserted += AddEdge(Node(first_uids[index]), Node(second_uids[index]));
+    }
+    return inserted;
+  }
+
+  int64_t AddStarEdges(
+      py::array_t<int64_t, py::array::c_style> track_indexes,
+      py::array_t<int64_t, py::array::c_style> view_indexes,
+      const std::vector<std::string> &resolved_uids) {
+    if (track_indexes.size() != view_indexes.size() ||
+        track_indexes.size() != static_cast<int64_t>(resolved_uids.size())) {
+      throw std::invalid_argument("active track Star columns differ");
+    }
+    py::gil_scoped_release release;
+    const int64_t *tracks = track_indexes.data();
+    const int64_t *views = view_indexes.data();
+    int64_t current_track = -1;
+    int64_t center_node = -1;
+    int64_t inserted = 0;
+    for (int64_t index = 0; index < track_indexes.size(); ++index) {
+      const int64_t node = Node(resolved_uids[static_cast<size_t>(index)]);
+      if (tracks[index] != current_track) {
+        if (views[index] != 0) {
+          throw std::invalid_argument(
+              "active track Star does not start at its center");
+        }
+        current_track = tracks[index];
+        center_node = node;
+      } else {
+        if (views[index] == 0 || center_node < 0) {
+          throw std::invalid_argument("active track Star view is invalid");
+        }
+        inserted += AddEdge(center_node, node);
+      }
+    }
+    return inserted;
+  }
+
+  std::vector<std::string>
+  ComponentUids(const std::vector<std::string> &uids) {
+    py::gil_scoped_release release;
+    std::vector<std::string> result;
+    result.reserve(uids.size());
+    for (const std::string &uid : uids) {
+      const int64_t node = Node(uid);
+      result.push_back(component_uids_[static_cast<size_t>(Find(node))]);
+    }
+    return result;
+  }
+
+  void RemoveNodes(const std::vector<std::string> &uids) {
+    py::gil_scoped_release release;
+    std::vector<uint8_t> remove(uid_by_node_.size(), 0);
+    for (const std::string &uid : uids) {
+      const int64_t node = Node(uid);
+      if (remove[static_cast<size_t>(node)] != 0) {
+        throw std::invalid_argument("active track graph node repeats");
+      }
+      remove[static_cast<size_t>(node)] = 1;
+    }
+
+    std::vector<std::string> previous_components(uid_by_node_.size());
+    for (size_t node = 0; node < uid_by_node_.size(); ++node) {
+      if (alive_[node]) {
+        previous_components[node] = component_uids_[
+            static_cast<size_t>(Find(static_cast<int64_t>(node)))];
+      }
+    }
+    for (size_t node = 0; node < uid_by_node_.size(); ++node) {
+      if (remove[node] != 0) {
+        alive_[node] = false;
+        node_by_uid_.erase(uid_by_node_[node]);
+        --live_node_count_;
+      }
+      if (alive_[node]) {
+        parents_[node] = static_cast<int64_t>(node);
+        component_uids_[node] = previous_components[node];
+      }
+    }
+
+    std::unordered_set<uint64_t> retained_edges;
+    retained_edges.reserve(edges_.size());
+    for (const uint64_t edge : edges_) {
+      const int64_t first = static_cast<int64_t>(edge >> 32);
+      const int64_t second = static_cast<int64_t>(edge & 0xffffffffULL);
+      if (alive_[static_cast<size_t>(first)] &&
+          alive_[static_cast<size_t>(second)]) {
+        retained_edges.insert(edge);
+      }
+    }
+    edges_ = std::move(retained_edges);
+    for (const uint64_t edge : edges_) {
+      Union(static_cast<int64_t>(edge >> 32),
+            static_cast<int64_t>(edge & 0xffffffffULL));
+    }
+  }
+
+  int64_t NodeCount() const { return live_node_count_; }
+  int64_t EdgeCount() const { return static_cast<int64_t>(edges_.size()); }
+
+private:
+  int64_t Node(const std::string &uid) const {
+    const auto found = node_by_uid_.find(uid);
+    if (found == node_by_uid_.end() ||
+        !alive_[static_cast<size_t>(found->second)]) {
+      throw std::invalid_argument("active track graph node is absent");
+    }
+    return found->second;
+  }
+
+  int64_t Find(int64_t node) {
+    int64_t root = node;
+    while (parents_[static_cast<size_t>(root)] != root) {
+      root = parents_[static_cast<size_t>(root)];
+    }
+    while (parents_[static_cast<size_t>(node)] != node) {
+      const int64_t parent = parents_[static_cast<size_t>(node)];
+      parents_[static_cast<size_t>(node)] = root;
+      node = parent;
+    }
+    return root;
+  }
+
+  void Union(int64_t first, int64_t second) {
+    const int64_t first_root = Find(first);
+    const int64_t second_root = Find(second);
+    if (first_root == second_root) {
+      return;
+    }
+    const std::string component_uid = std::min(
+        component_uids_[static_cast<size_t>(first_root)],
+        component_uids_[static_cast<size_t>(second_root)]);
+    parents_[static_cast<size_t>(first_root)] = second_root;
+    component_uids_[static_cast<size_t>(second_root)] = component_uid;
+  }
+
+  int64_t AddEdge(int64_t first, int64_t second) {
+    if (first == second) {
+      throw std::invalid_argument("active track graph self edge is invalid");
+    }
+    const uint64_t low = static_cast<uint64_t>(std::min(first, second));
+    const uint64_t high = static_cast<uint64_t>(std::max(first, second));
+    const uint64_t edge = (low << 32) | high;
+    if (!edges_.insert(edge).second) {
+      return 0;
+    }
+    Union(first, second);
+    return 1;
+  }
+
+  std::unordered_map<std::string, int64_t> node_by_uid_;
+  std::vector<std::string> uid_by_node_;
+  std::vector<int64_t> parents_;
+  std::vector<std::string> component_uids_;
+  std::vector<bool> alive_;
+  std::unordered_set<uint64_t> edges_;
+  int64_t live_node_count_ = 0;
+};
+
 } // namespace
+
+void BindActiveTrackGraph(py::module_ &module) {
+  py::class_<ActiveTrackGraph>(module, "ActiveTrackGraph")
+      .def(py::init<>())
+      .def("add_nodes", &ActiveTrackGraph::AddNodes, py::arg("uids"))
+      .def("add_edges", &ActiveTrackGraph::AddEdges,
+           py::arg("first_uids"), py::arg("second_uids"))
+      .def("add_star_edges", &ActiveTrackGraph::AddStarEdges,
+           py::arg("track_indexes"), py::arg("view_indexes"),
+           py::arg("resolved_uids"))
+      .def("component_uids", &ActiveTrackGraph::ComponentUids,
+           py::arg("uids"))
+      .def("remove_nodes", &ActiveTrackGraph::RemoveNodes,
+           py::arg("uids"))
+      .def_property_readonly("node_count", &ActiveTrackGraph::NodeCount)
+      .def_property_readonly("edge_count", &ActiveTrackGraph::EdgeCount);
+}
 
 py::array_t<int64_t> ComputeConnectedComponentsWrapper(
     int64_t node_count,

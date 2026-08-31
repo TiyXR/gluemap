@@ -306,6 +306,7 @@ class ActiveTrackStore:
         self._edges: set[tuple[str, str]] = set()
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
+        self._native_graph = self._create_native_graph()
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
         self._parallax_backend = self._resolve_parallax_backend()
@@ -331,6 +332,15 @@ class ActiveTrackStore:
         except (ImportError, OSError):
             pass
         return "python"
+
+    @staticmethod
+    def _create_native_graph() -> Any | None:
+        try:
+            native = _load_track_native_module()
+            graph_type = getattr(native, "ActiveTrackGraph", None)
+            return None if graph_type is None else graph_type()
+        except (ImportError, OSError):
+            return None
 
     @staticmethod
     def _resolve_spatial_intern_backend() -> str:
@@ -421,6 +431,8 @@ class ActiveTrackStore:
 
     @property
     def edge_count(self) -> int:
+        if self._native_graph is not None:
+            return int(self._native_graph.edge_count)
         return len(self._edges)
 
     @property
@@ -491,8 +503,11 @@ class ActiveTrackStore:
         )
         self._native_spatial_x_by_frame[value.geometry_ordinal].append(value.x)
         self._native_spatial_y_by_frame[value.geometry_ordinal].append(value.y)
-        root = self._union_find.find(value.observation_uid)
-        self._component_uid_by_root[root] = value.observation_uid
+        if self._native_graph is not None:
+            self._native_graph.add_nodes([value.observation_uid])
+        else:
+            root = self._union_find.find(value.observation_uid)
+            self._component_uid_by_root[root] = value.observation_uid
         if self._gpu_observation_table is not None:
             self._gpu_observation_table.queue(value)
 
@@ -522,6 +537,14 @@ class ActiveTrackStore:
         component_uid_by_root = self._component_uid_by_root
         maintain_python_buckets = self._spatial_intern_backend != "native-openmp"
         table = self._gpu_observation_table
+        native_graph = self._native_graph
+        if native_graph is not None:
+            incoming_uids = [value.observation_uid for value in values]
+            if len(set(incoming_uids)) != len(incoming_uids) or any(
+                uid in observations for uid in incoming_uids
+            ):
+                raise ActiveTrackStoreError("observation identity was reused")
+            native_graph.add_nodes(incoming_uids)
         for value in values:
             uid = value.observation_uid
             if uid in observations or uid in union_parent:
@@ -534,8 +557,9 @@ class ActiveTrackStore:
             native_uids_by_frame[frame_id].append(uid)
             native_x_by_frame[frame_id].append(value.x)
             native_y_by_frame[frame_id].append(value.y)
-            union_parent[uid] = uid
-            component_uid_by_root[uid] = uid
+            if native_graph is None:
+                union_parent[uid] = uid
+                component_uid_by_root[uid] = uid
         if table is not None:
             table.queue_batch(values)
 
@@ -858,6 +882,22 @@ class ActiveTrackStore:
     ) -> None:
         if self._pending_release is not None:
             raise ActiveTrackStoreError("cannot ingest while release is pending")
+        if self._native_graph is not None:
+            pairs = list(values)
+            for first, second in pairs:
+                if (
+                    first == second
+                    or first not in self._observations
+                    or second not in self._observations
+                ):
+                    raise ActiveTrackStoreError(
+                        "track correspondence is invalid"
+                    )
+            self._native_graph.add_edges(
+                [value[0] for value in pairs],
+                [value[1] for value in pairs],
+            )
+            return
         for first, second in values:
             if (
                 first == second
@@ -888,8 +928,68 @@ class ActiveTrackStore:
             self._component_uid_by_root[new_root] = component_uid
             self._edges.add(key)
 
+    def add_star_correspondence_columns(
+        self,
+        track_indexes: Any,
+        view_indexes: Any,
+        resolved_uids: list[str],
+    ) -> None:
+        """Add one Star's center edges without Python tuple materialization."""
+        if self._pending_release is not None:
+            raise ActiveTrackStoreError("cannot ingest while release is pending")
+        if self._native_graph is not None:
+            try:
+                self._native_graph.add_star_edges(
+                    track_indexes,
+                    view_indexes,
+                    resolved_uids,
+                )
+            except (RuntimeError, ValueError) as error:
+                raise ActiveTrackStoreError(
+                    "track correspondence columns are invalid"
+                ) from error
+            return
+        edges: list[tuple[str, str]] = []
+        current_track_index = -1
+        center_uid = ""
+        for track_index, view_index, uid in zip(
+            track_indexes.tolist(),
+            view_indexes.tolist(),
+            resolved_uids,
+            strict=True,
+        ):
+            if track_index != current_track_index:
+                if view_index != 0:
+                    raise ActiveTrackStoreError(
+                        "track correspondence columns do not start at center"
+                    )
+                current_track_index = track_index
+                center_uid = uid
+            else:
+                edges.append((center_uid, uid))
+        self.add_correspondence_pairs(edges)
+
     def _components(self) -> dict[str, list[TrackObservation]]:
         values: dict[str, list[TrackObservation]] = defaultdict(list)
+        if self._native_graph is not None:
+            observation_uids = list(self._observations)
+            component_uids = self._native_graph.component_uids(
+                observation_uids
+            )
+            for observation_uid, component_uid in zip(
+                observation_uids, component_uids, strict=True
+            ):
+                values[component_uid].append(
+                    self._observations[observation_uid]
+                )
+            for observations in values.values():
+                observations.sort(
+                    key=lambda value: (
+                        value.geometry_ordinal,
+                        value.observation_uid,
+                    )
+                )
+            return dict(values)
         for observation_uid, observation in self._observations.items():
             root = self._union_find.find(observation_uid)
             values[self._component_uid_by_root[root]].append(observation)
@@ -913,12 +1013,24 @@ class ActiveTrackStore:
         observation and discarding almost all of them afterwards.
         """
         values: dict[str, list[TrackObservation]] = defaultdict(list)
-        source_observation_count = 0
+        observation_uids: list[str] = []
         for frame_id in sorted(set(int(value) for value in frame_ids)):
-            for observation_uid in sorted(
-                self._observations_by_frame.get(frame_id, ())
+            observation_uids.extend(
+                sorted(self._observations_by_frame.get(frame_id, ()))
+            )
+        source_observation_count = len(observation_uids)
+        if self._native_graph is not None:
+            component_uids = self._native_graph.component_uids(
+                observation_uids
+            )
+            for observation_uid, component_uid in zip(
+                observation_uids, component_uids, strict=True
             ):
-                source_observation_count += 1
+                values[component_uid].append(
+                    self._observations[observation_uid]
+                )
+        else:
+            for observation_uid in observation_uids:
                 root = self._union_find.find(observation_uid)
                 values[self._component_uid_by_root[root]].append(
                     self._observations[observation_uid]
@@ -1841,6 +1953,8 @@ class ActiveTrackStore:
         released_frame_ids = {
             self._observations[uid].geometry_ordinal for uid in release_uids
         }
+        if self._native_graph is not None:
+            self._native_graph.remove_nodes(sorted(release_uids))
         for uid in release_uids:
             observation = self._observations.pop(uid)
             frame_values = self._observations_by_frame[observation.geometry_ordinal]
@@ -1878,14 +1992,16 @@ class ActiveTrackStore:
             self._native_spatial_y_by_frame[frame_id] = [
                 self._observations[uid].y for uid in remaining_uids
             ]
-        self._edges = {
-            key
-            for key in self._edges
-            if key[0] not in release_uids and key[1] not in release_uids
-        }
+        if self._native_graph is None:
+            self._edges = {
+                key
+                for key in self._edges
+                if key[0] not in release_uids and key[1] not in release_uids
+            }
         if self._gpu_observation_table is not None:
             self._gpu_observation_table.discard(release_uids)
-        self._rebuild_components()
+        if self._native_graph is None:
+            self._rebuild_components()
         result = {
             "contractId": "jarailsense.gluemap-active-track-release/v1",
             "status": "passed",

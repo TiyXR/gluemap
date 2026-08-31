@@ -54,6 +54,8 @@ std::vector<std::string> BatchObservationUidsWrapper(
     py::array_t<int64_t, py::array::c_style> view_indexes,
     const std::vector<std::string> &frame_uids);
 
+void BindActiveTrackGraph(py::module_ &module);
+
 // Helper function to create a ProductManifold for 7D pose (quat + trans)
 ceres::Manifold *CreatePoseManifold() {
   return new ceres::ProductManifold<ceres::EigenQuaternionManifold,
@@ -576,6 +578,7 @@ py::dict EvaluateConnectedCRS(
 }
 
 PYBIND11_MODULE(pygluemap, m) {
+  BindActiveTrackGraph(m);
   py::module_::import("pyceres");
 
   m.def("RotationGeodesicError",
