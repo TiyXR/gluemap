@@ -973,23 +973,7 @@ class ActiveTrackStore:
         values: dict[str, list[TrackObservation]] = defaultdict(list)
         if self._native_graph is not None:
             observation_uids = list(self._observations)
-            component_uids = self._native_graph.component_uids(
-                observation_uids
-            )
-            for observation_uid, component_uid in zip(
-                observation_uids, component_uids, strict=True
-            ):
-                values[component_uid].append(
-                    self._observations[observation_uid]
-                )
-            for observations in values.values():
-                observations.sort(
-                    key=lambda value: (
-                        value.geometry_ordinal,
-                        value.observation_uid,
-                    )
-                )
-            return dict(values)
+            return self._native_component_groups(observation_uids)
         for observation_uid, observation in self._observations.items():
             root = self._union_find.find(observation_uid)
             values[self._component_uid_by_root[root]].append(observation)
@@ -1020,15 +1004,7 @@ class ActiveTrackStore:
             )
         source_observation_count = len(observation_uids)
         if self._native_graph is not None:
-            component_uids = self._native_graph.component_uids(
-                observation_uids
-            )
-            for observation_uid, component_uid in zip(
-                observation_uids, component_uids, strict=True
-            ):
-                values[component_uid].append(
-                    self._observations[observation_uid]
-                )
+            values = self._native_component_groups(observation_uids)
         else:
             for observation_uid in observation_uids:
                 root = self._union_find.find(observation_uid)
@@ -1043,6 +1019,27 @@ class ActiveTrackStore:
                 )
             )
         return dict(values), source_observation_count
+
+    def _native_component_groups(
+        self, observation_uids: list[str]
+    ) -> dict[str, list[TrackObservation]]:
+        if self._native_graph is None:
+            raise ActiveTrackStoreError("native active graph is unavailable")
+        ordered_indexes, offsets, component_uids = (
+            self._native_graph.group_components(observation_uids)
+        )
+        ordered = ordered_indexes.tolist()
+        boundaries = offsets.tolist()
+        if len(boundaries) != len(component_uids) + 1:
+            raise ActiveTrackStoreError("native component CSR differs")
+        observations = self._observations
+        return {
+            component_uid: [
+                observations[observation_uids[ordered[index]]]
+                for index in range(boundaries[group], boundaries[group + 1])
+            ]
+            for group, component_uid in enumerate(component_uids)
+        }
 
     def _grid_cell(self, observation: TrackObservation) -> tuple[int, int]:
         column = min(

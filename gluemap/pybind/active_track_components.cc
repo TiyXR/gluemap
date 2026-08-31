@@ -313,6 +313,41 @@ public:
     return result;
   }
 
+  py::tuple GroupComponents(const std::vector<std::string> &uids) {
+    std::vector<int64_t> ordered_indexes;
+    std::vector<int64_t> offsets;
+    std::vector<std::string> component_uids;
+    {
+      py::gil_scoped_release release;
+      std::unordered_map<std::string, int64_t> group_by_component;
+      std::vector<std::vector<int64_t>> groups;
+      groups.reserve(uids.size());
+      for (size_t index = 0; index < uids.size(); ++index) {
+        const int64_t root = Find(Node(uids[index]));
+        const std::string &component_uid =
+            component_uids_[static_cast<size_t>(root)];
+        const auto inserted = group_by_component.emplace(
+            component_uid, static_cast<int64_t>(groups.size()));
+        if (inserted.second) {
+          groups.emplace_back();
+          component_uids.push_back(component_uid);
+        }
+        groups[static_cast<size_t>(inserted.first->second)].push_back(
+            static_cast<int64_t>(index));
+      }
+      ordered_indexes.reserve(uids.size());
+      offsets.reserve(groups.size() + 1);
+      offsets.push_back(0);
+      for (const auto &group : groups) {
+        ordered_indexes.insert(ordered_indexes.end(), group.begin(), group.end());
+        offsets.push_back(static_cast<int64_t>(ordered_indexes.size()));
+      }
+    }
+    return py::make_tuple(VecToArray1D(std::move(ordered_indexes)),
+                          VecToArray1D(std::move(offsets)),
+                          std::move(component_uids));
+  }
+
   void RemoveNodes(const std::vector<std::string> &uids) {
     py::gil_scoped_release release;
     std::vector<uint8_t> remove(uid_by_node_.size(), 0);
@@ -434,6 +469,8 @@ void BindActiveTrackGraph(py::module_ &module) {
            py::arg("track_indexes"), py::arg("view_indexes"),
            py::arg("resolved_uids"))
       .def("component_uids", &ActiveTrackGraph::ComponentUids,
+           py::arg("uids"))
+      .def("group_components", &ActiveTrackGraph::GroupComponents,
            py::arg("uids"))
       .def("remove_nodes", &ActiveTrackGraph::RemoveNodes,
            py::arg("uids"))
