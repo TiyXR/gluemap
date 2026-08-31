@@ -6,7 +6,7 @@
 	url = https://github.com/doppelgangers25/doppelgangers-plusplus.git
 [submodule "thirdparty/pi3"]
 	path = thirdparty/pi3
-	url = https://github.com/yyfz/Pi3
+	url = https://github.com/TiyXR/Pi3
 [submodule "thirdparty/vggt"]
 	path = thirdparty/vggt
 	url = https://github.com/facebookresearch/vggt.git
