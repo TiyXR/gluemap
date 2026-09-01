@@ -12,6 +12,8 @@ from gluemap.estimators.schur_fej_fixed_lag_runner import (
     SchurFejFixedLagRunner,
     SchurFejFixedLagRunnerError,
     SchurFejPriorQualityError,
+    _CachedTrackPoint,
+    _cache_reuse_kind,
 )
 
 
@@ -22,6 +24,34 @@ def test_prior_quality_error_preserves_the_failed_prior_report():
 
     assert error.report is report
     assert isinstance(error, SchurFejFixedLagRunnerError)
+
+
+def test_track_point_cache_requires_exact_or_two_observation_overlap():
+    cached = _CachedTrackPoint(
+        xyz=np.array((1.0, 2.0, 3.0)),
+        observation_signature="a" * 64,
+        observation_uids=frozenset({"a", "b", "c"}),
+        estimated_bytes=512,
+    )
+
+    assert _cache_reuse_kind(
+        cached,
+        observation_signature="a" * 64,
+        observation_uids=frozenset({"z"}),
+        minimum_shared_observations=2,
+    ) == "exact-observation-identity"
+    assert _cache_reuse_kind(
+        cached,
+        observation_signature="b" * 64,
+        observation_uids=frozenset({"b", "c", "d"}),
+        minimum_shared_observations=2,
+    ) == "overlap-compatible"
+    assert _cache_reuse_kind(
+        cached,
+        observation_signature="b" * 64,
+        observation_uids=frozenset({"c", "d", "e"}),
+        minimum_shared_observations=2,
+    ) is None
 
 
 def _observation(track: int, frame: int, point, center, intrinsics):
@@ -307,16 +337,19 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
         "refined-point-cache"
     )
     assert len(checkpoint["trackPointCache"]) == 64
-    assert second.report["triangulation"]["cacheReusedTrackCount"] == 32
+    assert second.report["triangulation"]["cacheReusedTrackCount"] == 64
     assert second.report["triangulation"][
         "cacheRejectedObservationIdentityCount"
+    ] == 0
+    assert second.report["triangulation"][
+        "cacheReusedOverlapCompatibleCount"
     ] == 32
-    assert second.report["triangulation"]["dltInputTrackCount"] == 32
+    assert second.report["triangulation"]["dltInputTrackCount"] == 0
     assert sum(
         value.initialization_source == "refined-ba-cache"
         for value in second.triangulated_tracks
-    ) == 32
-    assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 32
+    ) == 64
+    assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 0
     np.testing.assert_allclose(
         resumed_second.finalized_center,
         second.finalized_center,
@@ -410,6 +443,82 @@ def test_refined_point_cache_evicts_tracks_outside_the_active_window():
         row[0].startswith("track-") and int(row[0].split("-")[1]) >= 32
         for row in checkpoint["trackPointCache"]
     )
+
+
+def test_refined_point_cache_rejects_same_uid_without_two_shared_observations():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(9)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
+    second_tracks = [
+        SelectedTrackState(
+            track_uid=value.track_uid,
+            observations=tuple(
+                observation
+                for observation in value.observations
+                if observation.geometry_ordinal in {0, 5}
+            ),
+        )
+        for value in second_tracks
+    ]
+    runner = SchurFejFixedLagRunner(
+        fixed_gauge_frame_ids={0},
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        triangulation_initialization_policy="refined-point-cache",
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+
+    runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+    second = runner.advance(
+        second_coarse, second_tracks, marginalize_frame_id=2
+    )
+
+    assert second.report["triangulation"]["cacheReusedTrackCount"] == 0
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 64
+    assert second.report["triangulation"]["dltInputTrackCount"] == 64
+
+
+def test_refined_point_cache_respects_explicit_memory_budget():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(5)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    coarse, tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
+    runner = SchurFejFixedLagRunner(
+        fixed_gauge_frame_ids={0},
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        triangulation_initialization_policy="refined-point-cache",
+        triangulation_cache_budget_bytes=2048,
+        ba_device_policy="cpu",
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+
+    solved = runner.advance(coarse, tracks, marginalize_frame_id=1)
+    report = solved.report["triangulation"]
+
+    assert report["cacheBudgetBytes"] == 2048
+    assert report["cacheResidentBytesAfter"] <= 2048
+    assert report["cacheDroppedByMemoryBudgetCount"] > 0
+    assert report["cacheResidentTrackCountAfter"] < 64
 
 
 def test_two_advances_reuse_persistent_ceres_problem() -> None:

@@ -7,8 +7,11 @@ import math
 import os
 from pathlib import Path
 
+import psutil
+
 
 CPU_BUDGET_RATIO = 0.95
+MEMORY_BUDGET_RATIO = 0.90
 
 
 def _linux_cpu_quota_cores() -> float | None:
@@ -62,3 +65,53 @@ def calculate_native_thread_count(
 def resolve_native_thread_count() -> int:
     """Resolve and cache the startup thread budget for this process."""
     return calculate_native_thread_count(probe_logical_processor_capacity())
+
+
+def calculate_memory_cache_budget(
+    *,
+    physical_memory_bytes: int,
+    startup_used_memory_bytes: int,
+    cache_headroom_ratio: float,
+    memory_budget_ratio: float = MEMORY_BUDGET_RATIO,
+) -> dict[str, int | float | str]:
+    """Allocate one cache from currently safe system-memory headroom."""
+    if (
+        physical_memory_bytes <= 0
+        or startup_used_memory_bytes < 0
+        or startup_used_memory_bytes > physical_memory_bytes
+        or not 0.0 < memory_budget_ratio <= 1.0
+        or not 0.0 < cache_headroom_ratio <= 1.0
+    ):
+        raise ValueError("memory cache budget input is invalid")
+    system_memory_limit_bytes = math.floor(
+        physical_memory_bytes * memory_budget_ratio
+    )
+    startup_headroom_bytes = max(
+        0, system_memory_limit_bytes - startup_used_memory_bytes
+    )
+    cache_budget_bytes = math.floor(
+        startup_headroom_bytes * cache_headroom_ratio
+    )
+    return {
+        "contractId": "jarailsense.gluemap-memory-cache-budget/v1",
+        "probeTiming": "runner-construction",
+        "physicalMemoryBytes": physical_memory_bytes,
+        "startupUsedMemoryBytes": startup_used_memory_bytes,
+        "memoryBudgetRatio": memory_budget_ratio,
+        "systemMemoryLimitBytes": system_memory_limit_bytes,
+        "startupHeadroomBytes": startup_headroom_bytes,
+        "cacheHeadroomRatio": cache_headroom_ratio,
+        "cacheBudgetBytes": cache_budget_bytes,
+    }
+
+
+def probe_memory_cache_budget(
+    *, cache_headroom_ratio: float
+) -> dict[str, int | float | str]:
+    """Resolve a cache budget from live host memory once at construction."""
+    memory = psutil.virtual_memory()
+    return calculate_memory_cache_budget(
+        physical_memory_bytes=int(memory.total),
+        startup_used_memory_bytes=int(memory.total - memory.available),
+        cache_headroom_ratio=cache_headroom_ratio,
+    )
