@@ -24,6 +24,9 @@ class PersistentFixedLagBaError(ValueError):
     """Raised when a persistent BA delta violates the active-window identity."""
 
 
+AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS = 100
+
+
 @dataclass
 class PersistentFixedLagBaSession:
     """Runner-owned, non-durable holder rebuilt after process recovery."""
@@ -87,11 +90,15 @@ def _solver_configuration(
     if linear_solver_policy in solver_types:
         solver_options.linear_solver_type = solver_types[linear_solver_policy]
     elif linear_solver_policy == "auto":
-        # Fixed-lag railway windows retain thousands of points behind a small
-        # camera frontier.  Keep the observed production choice explicit and
-        # avoid routing Ceres configuration through PyCOLMAP's separately
-        # linked Ceres instance.
-        solver_options.linear_solver_type = pyceres.LinearSolverType.SPARSE_SCHUR
+        # Ceres recommends dense Schur for BA frontiers of roughly one hundred
+        # cameras or fewer.  The forward-only railway window normally stays in
+        # that range even though the complete video contains thousands of
+        # cameras.  Switch on the active frontier, not the full-video size.
+        solver_options.linear_solver_type = (
+            pyceres.LinearSolverType.DENSE_SCHUR
+            if frame_count <= AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS
+            else pyceres.LinearSolverType.SPARSE_SCHUR
+        )
     elif linear_solver_policy != "auto":
         raise PersistentFixedLagBaError("persistent BA solver policy is invalid")
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:

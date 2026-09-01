@@ -468,6 +468,27 @@ def refine_fixed_anchor_window(
         )
         for summary in summaries
     )
+    ceres_summaries = [
+        getattr(summary, "ceres_summary", summary) for summary in summaries
+    ]
+    ceres_preprocessor_wall = sum(
+        float(value.preprocessor_time_in_seconds) for value in ceres_summaries
+    )
+    ceres_residual_evaluation_wall = sum(
+        float(value.residual_evaluation_time_in_seconds)
+        for value in ceres_summaries
+    )
+    ceres_jacobian_evaluation_wall = sum(
+        float(value.jacobian_evaluation_time_in_seconds)
+        for value in ceres_summaries
+    )
+    ceres_linear_solver_wall = sum(
+        float(value.linear_solver_time_in_seconds)
+        for value in ceres_summaries
+    )
+    ceres_postprocessor_wall = sum(
+        float(value.postprocessor_time_in_seconds) for value in ceres_summaries
+    )
     linearization_capture_wall = sum(
         float(value.report["captureWallSeconds"])
         for value in captured_linearization
@@ -496,6 +517,25 @@ def refine_fixed_anchor_window(
         "nativeThreadCount": resolve_native_thread_count(),
         "ceresThreadsGiven": int(ceres.num_threads_given),
         "ceresThreadsUsed": int(ceres.num_threads_used),
+        "ceresLinearSolverTypeGiven": str(ceres.linear_solver_type_given),
+        "ceresLinearSolverTypeUsed": str(ceres.linear_solver_type_used),
+        "ceresPreconditionerTypeGiven": str(ceres.preconditioner_type_given),
+        "ceresPreconditionerTypeUsed": str(ceres.preconditioner_type_used),
+        "ceresSuccessfulStepCount": sum(
+            int(value.num_successful_steps) for value in ceres_summaries
+        ),
+        "ceresUnsuccessfulStepCount": sum(
+            int(value.num_unsuccessful_steps) for value in ceres_summaries
+        ),
+        "ceresLinearSolveCount": sum(
+            int(value.num_linear_solves) for value in ceres_summaries
+        ),
+        "ceresResidualEvaluationCount": sum(
+            int(value.num_residual_evaluations) for value in ceres_summaries
+        ),
+        "ceresJacobianEvaluationCount": sum(
+            int(value.num_jacobian_evaluations) for value in ceres_summaries
+        ),
         "linearSolverPolicy": linear_solver_policy,
         "linearSolverOrderingPolicy": linear_solver_ordering_policy,
         "refinementPassCount": refinement_passes,
@@ -521,6 +561,13 @@ def refine_fixed_anchor_window(
         ),
         "solveWallSeconds": solve_wall,
         "ceresSolveWallSeconds": ceres_solve_wall,
+        "ceresPreprocessorWallSeconds": ceres_preprocessor_wall,
+        "ceresResidualEvaluationWallSeconds": (
+            ceres_residual_evaluation_wall
+        ),
+        "ceresJacobianEvaluationWallSeconds": ceres_jacobian_evaluation_wall,
+        "ceresLinearSolverWallSeconds": ceres_linear_solver_wall,
+        "ceresPostprocessorWallSeconds": ceres_postprocessor_wall,
         "linearizationCaptureWallSeconds": linearization_capture_wall,
         "linearizationSelectionWallSeconds": linearization_selection_wall,
         "linearizationEvaluationWallSeconds": linearization_evaluation_wall,

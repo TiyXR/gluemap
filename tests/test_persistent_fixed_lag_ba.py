@@ -8,7 +8,9 @@ from gluemap.estimators.fixed_lag_ceres_linearization import (
 from gluemap.estimators.fixed_lag_prior import marginalize_ceres_linearization
 from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
 from gluemap.estimators.persistent_fixed_lag_ba import (
+    AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS,
     PersistentFixedLagBaProblem,
+    _solver_configuration,
 )
 from gluemap.utils.colmap import camera_from_intrinsics_matrix
 
@@ -59,6 +61,36 @@ def _tracks(frame_ids, centers, intrinsics):
             )
         )
     return values
+
+
+def test_auto_solver_tracks_the_active_camera_frontier() -> None:
+    import pyceres
+
+    problem = pyceres.Problem()
+    parameter = np.zeros((3,), dtype=np.float64)
+    problem.add_parameter_block(parameter, 3)
+
+    dense_options, requested_threads, use_gpu = _solver_configuration(
+        problem,
+        frame_count=AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS,
+        max_num_iterations=100,
+        linear_solver_policy="auto",
+        device_policy="cpu",
+        ceres_cuda_available=False,
+    )
+    sparse_options, _, _ = _solver_configuration(
+        problem,
+        frame_count=AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS + 1,
+        max_num_iterations=100,
+        linear_solver_policy="auto",
+        device_policy="cpu",
+        ceres_cuda_available=False,
+    )
+
+    assert dense_options.linear_solver_type == pyceres.LinearSolverType.DENSE_SCHUR
+    assert sparse_options.linear_solver_type == pyceres.LinearSolverType.SPARSE_SCHUR
+    assert requested_threads >= 1
+    assert use_gpu is False
 
 
 def test_persistent_problem_applies_native_visual_enter_leave_delta() -> None:
