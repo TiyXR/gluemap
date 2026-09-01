@@ -58,10 +58,16 @@ class SchurFejWindowRunner:
         *,
         fixed_gauge_frame_id: int,
         coarse_solver: FixedAnchorApproximationSolver | Any | None = None,
+        coarse_warm_start_enabled: bool = True,
         **fixed_lag_options: Any,
     ) -> None:
         self.fixed_gauge_frame_id = int(fixed_gauge_frame_id)
         self.coarse_solver = coarse_solver or FixedAnchorApproximationSolver()
+        if not isinstance(coarse_warm_start_enabled, bool):
+            raise SchurFejWindowRunnerError(
+                "coarse warm start policy is invalid"
+            )
+        self.coarse_warm_start_enabled = coarse_warm_start_enabled
         self.fixed_lag = SchurFejFixedLagRunner(
             fixed_gauge_frame_ids={self.fixed_gauge_frame_id},
             **fixed_lag_options,
@@ -167,9 +173,17 @@ class SchurFejWindowRunner:
         coarse = self.coarse_solver.solve(
             predictions,
             frame_ids,
-            initial_rotations=(previous_rotations or None),
-            initial_centers=(previous_centers or None),
-            fixed_pose_ids=overlap,
+            initial_rotations=(
+                previous_rotations
+                if self.coarse_warm_start_enabled and previous_rotations
+                else None
+            ),
+            initial_centers=(
+                previous_centers
+                if self.coarse_warm_start_enabled and previous_centers
+                else None
+            ),
+            fixed_pose_ids=(overlap if self.coarse_warm_start_enabled else set()),
         )
         coarse_wall = time.perf_counter() - coarse_started
         solved = self.fixed_lag.advance_batch(
@@ -208,7 +222,10 @@ class SchurFejWindowRunner:
             "logicalAdvanceCount": solve_every_advances,
             "marginalizedFrameIds": list(marginalize_frame_ids),
             "fixedGaugeFrameId": self.fixed_gauge_frame_id,
-            "coarseFixedWarmStartCount": len(overlap),
+            "coarseWarmStartEnabled": self.coarse_warm_start_enabled,
+            "coarseFixedWarmStartCount": (
+                len(overlap) if self.coarse_warm_start_enabled else 0
+            ),
             "actualBaCameraFrameUids": frame_uids,
             "actualBaCameraFrameUidsSha256": _canonical_sha256(frame_uids),
             "nonKeyframeBaCameraCount": 0,

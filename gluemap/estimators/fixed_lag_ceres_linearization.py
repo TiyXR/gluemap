@@ -127,6 +127,7 @@ def capture_explicit_ceres_problem_linearization(
     residual_seed_parameters: list[np.ndarray] | None = None,
     apply_loss_function: bool = True,
     build_normal_blocks: bool = False,
+    native_thread_count_override: int | None = None,
 ) -> CeresProblemLinearization:
     """Capture CRS from explicit stable blocks owned by a persistent problem."""
     started = time.perf_counter()
@@ -161,7 +162,21 @@ def capture_explicit_ceres_problem_linearization(
             "Ceres tangent parameter layout differs"
         )
 
-    native_thread_count = resolve_native_thread_count()
+    if (
+        native_thread_count_override is not None
+        and (
+            isinstance(native_thread_count_override, bool)
+            or native_thread_count_override < 1
+        )
+    ):
+        raise FixedLagCeresLinearizationError(
+            "native linearization thread count is invalid"
+        )
+    native_thread_count = (
+        resolve_native_thread_count()
+        if native_thread_count_override is None
+        else int(native_thread_count_override)
+    )
     connected_residual_block_count = None
     if residual_seed_parameters is None:
         options = pyceres.EvaluateOptions()

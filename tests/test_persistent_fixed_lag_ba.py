@@ -295,6 +295,12 @@ def test_native_normal_blocks_match_crs_prior() -> None:
     normal_blocks = capture_explicit_ceres_problem_linearization(
         problem.problem, build_normal_blocks=True, **capture_arguments
     )
+    single_thread_normal_blocks = capture_explicit_ceres_problem_linearization(
+        problem.problem,
+        build_normal_blocks=True,
+        native_thread_count_override=1,
+        **capture_arguments,
+    )
 
     crs_prior = marginalize_ceres_linearization(
         crs, eliminate_camera_id=camera_ids[0], device_policy="cpu"
@@ -307,6 +313,7 @@ def test_native_normal_blocks_match_crs_prior() -> None:
 
     assert normal_blocks.report["representation"] == "native-normal-blocks"
     assert normal_blocks.report["nativeNormalBuildWallSeconds"] >= 0.0
+    assert single_thread_normal_blocks.report["nativeThreadCount"] == 1
     np.testing.assert_allclose(
         normal_prior.hessian.numpy(),
         crs_prior.hessian.numpy(),

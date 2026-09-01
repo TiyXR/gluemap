@@ -26,7 +26,14 @@ class _CoarseSolver:
         initial_centers,
         fixed_pose_ids,
     ):
-        self.calls.append((tuple(frame_ids), set(fixed_pose_ids)))
+        self.calls.append(
+            (
+                tuple(frame_ids),
+                set(fixed_pose_ids),
+                initial_rotations is not None,
+                initial_centers is not None,
+            )
+        )
         rotations = {frame: np.eye(3) for frame in frame_ids}
         centers = {frame: self.centers[frame].copy() for frame in frame_ids}
         if initial_rotations is not None:
@@ -114,9 +121,9 @@ def test_true_window_keeps_only_gauge_fixed_and_marginalizes_one_body_pose():
     assert first.solved.finalized_frame_id == 1
     assert second.solved.finalized_frame_id == 2
     assert coarse.calls == [
-        ((0, 1, 2, 3, 4), set()),
-        ((0, 2, 3, 4, 5), {0, 2, 3, 4}),
-        ((0, 3, 4, 5, 6), {0, 3, 4, 5}),
+        ((0, 1, 2, 3, 4), set(), False, False),
+        ((0, 2, 3, 4, 5), {0, 2, 3, 4}, True, True),
+        ((0, 3, 4, 5, 6), {0, 3, 4, 5}, True, True),
     ]
     assert second.report["coarseFixedWarmStartCount"] == 4
     assert second.report["localBa"]["fixedPoseCount"] == 1
@@ -167,8 +174,8 @@ def test_batched_window_drops_the_previous_finalized_batch():
     assert second.solved.prior.camera_ids == (7, 8, 9, 10, 11)
     assert runner.next_window_ordinal == 6
     assert coarse.calls == [
-        (tuple(first_ids), set()),
-        (tuple(second_ids), {0, 4, 5, 6, 7, 8}),
+        (tuple(first_ids), set(), False, False),
+        (tuple(second_ids), {0, 4, 5, 6, 7, 8}, True, True),
     ]
     assert second.report["advanceStepKeyframes"] == 1
     assert second.report["baSolveEveryAdvances"] == 3
@@ -179,6 +186,47 @@ def test_batched_window_drops_the_previous_finalized_batch():
         f"frame-{value}" for value in second_ids
     ]
     assert second.report["minimumConstraintCount"] == 64
+
+
+def test_coarse_warm_start_can_be_disabled_independently():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    coarse = _CoarseSolver(centers, intrinsics)
+    runner = SchurFejWindowRunner(
+        fixed_gauge_frame_id=0,
+        coarse_solver=coarse,
+        coarse_warm_start_enabled=False,
+        camera_model="PINHOLE",
+        triangulation_device_policy="cuda-required",
+        ba_device_policy="cpu",
+        ba_problem_policy="native-rebuild-every-window",
+        ba_native_normal_equation_assembly=True,
+        ba_parallel_normal_equation_assembly=False,
+        ceres_cuda_available=False,
+        prior_device_policy="cuda-required",
+        prior_expected_nullity=1,
+    )
+    first_ids = [0, 1, 2, 3, 4]
+    second_ids = [0, 2, 3, 4, 5]
+
+    runner.advance({}, first_ids, _tracks(first_ids, centers, intrinsics))
+    second = runner.advance(
+        {}, second_ids, _tracks(second_ids, centers, intrinsics)
+    )
+
+    assert coarse.calls[-1] == (tuple(second_ids), set(), False, False)
+    assert second.report["coarseWarmStartEnabled"] is False
+    assert second.report["coarseFixedWarmStartCount"] == 0
+    assert second.report["localBa"][
+        "nativeNormalEquationAssemblyEnabled"
+    ] is True
+    assert second.report["localBa"][
+        "parallelNormalEquationAssemblyEnabled"
+    ] is False
 
 
 def test_large_batched_window_is_bounded_by_the_active_body_not_a_fixed_cap():

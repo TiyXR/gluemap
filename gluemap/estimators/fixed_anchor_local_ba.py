@@ -113,6 +113,8 @@ def refine_fixed_anchor_window(
     prior_condition_estimate_policy: str = "raw-eigenvalue",
     prior_expected_nullity: int | None = None,
     persistent_ba_session: PersistentFixedLagBaSession | None = None,
+    native_normal_equation_assembly: bool | None = None,
+    parallel_normal_equation_assembly: bool = True,
 ) -> FixedAnchorLocalBaSolution:
     """Run local BA over one fixed-lag window with canonical overlap poses."""
     frame_ids = tuple(coarse.frame_ids)
@@ -129,6 +131,17 @@ def refine_fixed_anchor_window(
         raise FixedAnchorLocalBaError("BA refinement pass count is invalid")
     if not tracks:
         raise FixedAnchorLocalBaError("triangulated track set is empty")
+    if (
+        native_normal_equation_assembly is not None
+        and not isinstance(native_normal_equation_assembly, bool)
+    ):
+        raise FixedAnchorLocalBaError(
+            "native normal equation assembly policy is invalid"
+        )
+    if not isinstance(parallel_normal_equation_assembly, bool):
+        raise FixedAnchorLocalBaError(
+            "parallel normal equation assembly policy is invalid"
+        )
     if previous_prior is not None and set(previous_prior.camera_ids) & fixed_pose_ids:
         raise FixedAnchorLocalBaError("FEJ prior pose cannot also be fixed")
     if previous_prior is not None and set(previous_prior.camera_ids) - frame_id_set:
@@ -392,6 +405,8 @@ def refine_fixed_anchor_window(
                 )
                 use_native_normal_blocks = (
                     persistent_problem.policy == "native-rebuild-every-window"
+                    if native_normal_equation_assembly is None
+                    else native_normal_equation_assembly
                 )
                 captured_linearization.append(
                     capture_explicit_ceres_problem_linearization(
@@ -415,6 +430,11 @@ def refine_fixed_anchor_window(
                             else None
                         ),
                         build_normal_blocks=use_native_normal_blocks,
+                        native_thread_count_override=(
+                            None
+                            if parallel_normal_equation_assembly
+                            else 1
+                        ),
                     )
                 )
         summaries.append(summary)
@@ -554,6 +574,23 @@ def refine_fixed_anchor_window(
         "doglegPolicy": dogleg_policy,
         "useNonmonotonicSteps": use_nonmonotonic_steps,
         "linearSolverOrderingPolicy": linear_solver_ordering_policy,
+        "nativeNormalEquationAssemblyEnabled": (
+            persistent_problem is not None
+            and (
+                persistent_problem.policy == "native-rebuild-every-window"
+                if native_normal_equation_assembly is None
+                else native_normal_equation_assembly
+            )
+        ),
+        "parallelNormalEquationAssemblyEnabled": (
+            persistent_problem is not None
+            and (
+                persistent_problem.policy == "native-rebuild-every-window"
+                if native_normal_equation_assembly is None
+                else native_normal_equation_assembly
+            )
+            and parallel_normal_equation_assembly
+        ),
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,
         "baProblemPolicy": (

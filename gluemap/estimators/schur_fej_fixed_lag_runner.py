@@ -183,6 +183,8 @@ class SchurFejFixedLagRunner:
         prior_maximum_condition_estimate: float | None = None,
         prior_condition_estimate_policy: str = "raw-eigenvalue",
         prior_expected_nullity: int | None = 1,
+        ba_native_normal_equation_assembly: bool | None = None,
+        ba_parallel_normal_equation_assembly: bool = True,
     ) -> None:
         if not fixed_gauge_frame_ids:
             raise SchurFejFixedLagRunnerError("fixed gauge pose set is empty")
@@ -331,6 +333,12 @@ class SchurFejFixedLagRunner:
         self.prior_maximum_condition_estimate = prior_maximum_condition_estimate
         self.prior_condition_estimate_policy = prior_condition_estimate_policy
         self.prior_expected_nullity = prior_expected_nullity
+        self.ba_native_normal_equation_assembly = (
+            ba_native_normal_equation_assembly
+        )
+        self.ba_parallel_normal_equation_assembly = (
+            ba_parallel_normal_equation_assembly
+        )
         self._prior: FejPriorState | None = None
         self._poses: _PoseState | None = None
         self._frozen_intrinsics: np.ndarray | None = None
@@ -671,6 +679,12 @@ class SchurFejFixedLagRunner:
             ),
             prior_expected_nullity=self.prior_expected_nullity,
             persistent_ba_session=self._persistent_ba_session,
+            native_normal_equation_assembly=(
+                self.ba_native_normal_equation_assembly
+            ),
+            parallel_normal_equation_assembly=(
+                self.ba_parallel_normal_equation_assembly
+            ),
         )
         if refined.report["status"] != "passed" or refined.next_prior is None:
             raise SchurFejFixedLagRunnerError("fixed-lag BA/prior did not pass")
