@@ -97,6 +97,7 @@ def refine_fixed_anchor_window(
     max_num_iterations: int = 50,
     refinement_passes: int = 1,
     linear_solver_policy: str = "auto",
+    dense_linear_algebra_policy: str = "auto",
     linear_solver_ordering_policy: str = "auto",
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
@@ -320,6 +321,7 @@ def refine_fixed_anchor_window(
                 max_num_iterations=max_num_iterations,
                 loss_type_normal="huber",
                 linear_solver_type=linear_solver_policy,
+                dense_linear_algebra_policy=dense_linear_algebra_policy,
                 fixed_pose_ids={
                     image_id_by_frame[value] for value in fixed_pose_ids
                 },
@@ -356,6 +358,7 @@ def refine_fixed_anchor_window(
                 summary, persistent_solve_report = persistent_problem.solve(
                     max_num_iterations=max_num_iterations,
                     linear_solver_policy=linear_solver_policy,
+                    dense_linear_algebra_policy=dense_linear_algebra_policy,
                     linear_solver_ordering_policy=(
                         linear_solver_ordering_policy
                     ),
@@ -537,6 +540,7 @@ def refine_fixed_anchor_window(
             int(value.num_jacobian_evaluations) for value in ceres_summaries
         ),
         "linearSolverPolicy": linear_solver_policy,
+        "denseLinearAlgebraPolicy": dense_linear_algebra_policy,
         "linearSolverOrderingPolicy": linear_solver_ordering_policy,
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,

@@ -73,6 +73,7 @@ def _solver_configuration(
     frame_count: int,
     max_num_iterations: int,
     linear_solver_policy: str,
+    dense_linear_algebra_policy: str,
     device_policy: str,
     ceres_cuda_available: bool | None,
 ) -> tuple[pyceres.SolverOptions, int, bool]:
@@ -106,7 +107,23 @@ def _solver_configuration(
     cuda_available = ceres_cuda_available is True
     if device_policy == "cuda-required" and not cuda_available:
         raise PersistentFixedLagBaError("persistent CUDA BA is unavailable")
-    use_gpu = device_policy != "cpu" and cuda_available
+    use_gpu = (
+        device_policy != "cpu"
+        and cuda_available
+        and dense_linear_algebra_policy == "auto"
+    )
+    dense_library_types = {
+        "eigen": pyceres.DenseLinearAlgebraLibraryType.EIGEN,
+        "lapack": pyceres.DenseLinearAlgebraLibraryType.LAPACK,
+    }
+    if dense_linear_algebra_policy in dense_library_types:
+        solver_options.dense_linear_algebra_library_type = dense_library_types[
+            dense_linear_algebra_policy
+        ]
+    elif dense_linear_algebra_policy != "auto":
+        raise PersistentFixedLagBaError(
+            "persistent BA dense algebra policy is invalid"
+        )
     return solver_options, requested_threads, use_gpu
 
 
@@ -640,6 +657,7 @@ class PersistentFixedLagBaProblem:
         *,
         max_num_iterations: int,
         linear_solver_policy: str,
+        dense_linear_algebra_policy: str = "auto",
         linear_solver_ordering_policy: str,
         device_policy: str,
         ceres_cuda_available: bool | None,
@@ -650,6 +668,7 @@ class PersistentFixedLagBaProblem:
             frame_count=len(self.poses),
             max_num_iterations=max_num_iterations,
             linear_solver_policy=linear_solver_policy,
+            dense_linear_algebra_policy=dense_linear_algebra_policy,
             device_policy=device_policy,
             ceres_cuda_available=ceres_cuda_available,
         )
@@ -696,6 +715,7 @@ class PersistentFixedLagBaProblem:
             "status": "passed",
             "requestedThreadCount": requested_threads,
             "gpuRequested": use_gpu,
+            "denseLinearAlgebraPolicy": dense_linear_algebra_policy,
             "linearSolverOrdering": linear_solver_ordering_policy,
             "orderedPointCount": len(self._ordered_track_uids),
             "orderedPoseCount": len(self._ordered_frame_ids),

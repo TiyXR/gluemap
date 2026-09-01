@@ -75,6 +75,7 @@ def test_auto_solver_tracks_the_active_camera_frontier() -> None:
         frame_count=AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS,
         max_num_iterations=100,
         linear_solver_policy="auto",
+        dense_linear_algebra_policy="auto",
         device_policy="cpu",
         ceres_cuda_available=False,
     )
@@ -83,12 +84,17 @@ def test_auto_solver_tracks_the_active_camera_frontier() -> None:
         frame_count=AUTO_DENSE_SCHUR_MAXIMUM_CAMERAS + 1,
         max_num_iterations=100,
         linear_solver_policy="auto",
+        dense_linear_algebra_policy="lapack",
         device_policy="cpu",
         ceres_cuda_available=False,
     )
 
     assert dense_options.linear_solver_type == pyceres.LinearSolverType.DENSE_SCHUR
     assert sparse_options.linear_solver_type == pyceres.LinearSolverType.SPARSE_SCHUR
+    assert (
+        sparse_options.dense_linear_algebra_library_type
+        == pyceres.DenseLinearAlgebraLibraryType.LAPACK
+    )
     assert requested_threads >= 1
     assert use_gpu is False
 

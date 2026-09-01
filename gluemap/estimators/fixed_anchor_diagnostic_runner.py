@@ -85,6 +85,7 @@ class FixedAnchorDiagnosticRunner:
         triangulation_solver_fallback_relative_eigenvalue: float = 1e-6,
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
+        ba_dense_linear_algebra_policy: str = "auto",
         ba_max_iterations: int = 20,
         ba_refinement_passes: int = 1,
         ceres_cuda_available: bool | None = None,
@@ -110,6 +111,7 @@ class FixedAnchorDiagnosticRunner:
         )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
+        self.ba_dense_linear_algebra_policy = ba_dense_linear_algebra_policy
         self.ba_max_iterations = ba_max_iterations
         self.ba_refinement_passes = ba_refinement_passes
         self.ceres_cuda_available = ceres_cuda_available
@@ -203,6 +205,7 @@ class FixedAnchorDiagnosticRunner:
             max_num_iterations=self.ba_max_iterations,
             refinement_passes=self.ba_refinement_passes,
             linear_solver_policy=self.ba_linear_solver_policy,
+            dense_linear_algebra_policy=self.ba_dense_linear_algebra_policy,
             device_policy=self.ba_device_policy,
             ceres_cuda_available=self.ceres_cuda_available,
         )

@@ -330,6 +330,7 @@ def bundle_adjustment(
     loss_type_normal: str = "huber",
     loss_type_virtual: str = "arctan",
     linear_solver_type: str = "auto",
+    dense_linear_algebra_policy: str = "auto",
     fixed_pose_ids: set[int] | None = None,
     fix_intrinsics: bool = False,
     device_policy: str = "cuda-preferred",
@@ -421,12 +422,28 @@ def bundle_adjustment(
         ]
     elif linear_solver_type != "auto":
         raise ValueError(f"Unsupported BA solver: {linear_solver_type}")
+    dense_library_types = {
+        "eigen": pyceres.DenseLinearAlgebraLibraryType.EIGEN,
+        "lapack": pyceres.DenseLinearAlgebraLibraryType.LAPACK,
+    }
+    if dense_linear_algebra_policy in dense_library_types:
+        ba_options.ceres.solver_options.dense_linear_algebra_library_type = (
+            dense_library_types[dense_linear_algebra_policy]
+        )
+    elif dense_linear_algebra_policy != "auto":
+        raise ValueError(
+            f"Unsupported dense algebra backend: {dense_linear_algebra_policy}"
+        )
     if device_policy not in {"cuda-required", "cuda-preferred", "cpu"}:
         raise ValueError("Unsupported BA device policy")
     cuda_available = ceres_cuda_available is True
     if device_policy == "cuda-required" and not cuda_available:
         raise RuntimeError("CUDA/cuDSS bundle adjustment is unavailable")
-    ba_options.ceres.use_gpu = device_policy != "cpu" and cuda_available
+    ba_options.ceres.use_gpu = (
+        device_policy != "cpu"
+        and cuda_available
+        and dense_linear_algebra_policy == "auto"
+    )
     ba_options.ceres.loss_function_type = _pycolmap_loss_type(loss_type_normal)
 
     ba_config = pycolmap.BundleAdjustmentConfig()

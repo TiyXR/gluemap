@@ -168,6 +168,7 @@ class SchurFejFixedLagRunner:
         triangulation_cache_budget_bytes: int | None = None,
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
+        ba_dense_linear_algebra_policy: str = "auto",
         ba_linear_solver_ordering_policy: str = "auto",
         ba_max_iterations: int = 100,
         ba_refinement_passes: int = 1,
@@ -198,6 +199,10 @@ class SchurFejFixedLagRunner:
         if ba_linear_solver_ordering_policy not in {"auto", "point-first"}:
             raise SchurFejFixedLagRunnerError(
                 "BA linear solver ordering policy is invalid"
+            )
+        if ba_dense_linear_algebra_policy not in {"auto", "eigen", "lapack"}:
+            raise SchurFejFixedLagRunnerError(
+                "BA dense linear algebra policy is invalid"
             )
         if triangulation_initialization_policy not in {
             "full-dlt",
@@ -300,6 +305,7 @@ class SchurFejFixedLagRunner:
         )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
+        self.ba_dense_linear_algebra_policy = ba_dense_linear_algebra_policy
         self.ba_linear_solver_ordering_policy = (
             ba_linear_solver_ordering_policy
         )
@@ -629,6 +635,7 @@ class SchurFejFixedLagRunner:
             max_num_iterations=self.ba_max_iterations,
             refinement_passes=self.ba_refinement_passes,
             linear_solver_policy=self.ba_linear_solver_policy,
+            dense_linear_algebra_policy=self.ba_dense_linear_algebra_policy,
             linear_solver_ordering_policy=(
                 self.ba_linear_solver_ordering_policy
             ),
