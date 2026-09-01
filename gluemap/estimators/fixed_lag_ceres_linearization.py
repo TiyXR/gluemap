@@ -130,6 +130,7 @@ def capture_explicit_ceres_problem_linearization(
 ) -> CeresProblemLinearization:
     """Capture CRS from explicit stable blocks owned by a persistent problem."""
     started = time.perf_counter()
+    cpu_started = time.process_time()
     if (
         not camera_ids
         or len(camera_ids) != len(image_ids)
@@ -259,6 +260,7 @@ def capture_explicit_ceres_problem_linearization(
     ):
         raise FixedLagCeresLinearizationError("Ceres CRS layout is invalid")
     wall = time.perf_counter() - started
+    cpu_seconds = time.process_time() - cpu_started
     report = {
         "contractId": "jarailsense.gluemap-ceres-linearization/v1",
         "status": "passed",
@@ -298,6 +300,10 @@ def capture_explicit_ceres_problem_linearization(
             else 0.0
         ),
         "captureWallSeconds": wall,
+        "captureCpuSeconds": cpu_seconds,
+        "cpuEquivalentCoreUtilization": (
+            cpu_seconds / wall if wall > 0.0 else 0.0
+        ),
     }
     return CeresProblemLinearization(
         camera_ids=camera_ids,

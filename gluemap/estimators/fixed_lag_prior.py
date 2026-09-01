@@ -1092,6 +1092,7 @@ def marginalize_ceres_linearization(
         raise FixedLagPriorError("Ceres pose ambient values differ")
 
     sparse_started = time.perf_counter()
+    sparse_cpu_started = time.process_time()
     native_normal_values = (
         linearization.camera_hessian,
         linearization.camera_gradient,
@@ -1213,12 +1214,14 @@ def marginalize_ceres_linearization(
     padded_camera_indexes[block_points, block_positions] = block_cameras
     padded_camera_point[block_points, block_positions] = camera_point_blocks
     sparse_wall = time.perf_counter() - sparse_started
+    sparse_cpu = time.process_time() - sparse_cpu_started
 
     device = _resolve_device(device_policy)
     dtype = torch.float64
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     schur_started = time.perf_counter()
+    schur_cpu_started = time.process_time()
     hessian = _as_tensor(camera_hessian, dtype=dtype, device=device)
     gradient = _as_tensor(camera_gradient, dtype=dtype, device=device)
     camera_indexes = _as_tensor(
@@ -1460,6 +1463,7 @@ def marginalize_ceres_linearization(
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     schur_wall = time.perf_counter() - schur_started
+    schur_cpu = time.process_time() - schur_cpu_started
     report = {
         "contractId": "jarailsense.gluemap-schur-fej-prior/v1",
         "status": status,
@@ -1526,7 +1530,9 @@ def marginalize_ceres_linearization(
             .tolist()
         ],
         "cpuSparseNormalWallSeconds": sparse_wall,
+        "cpuSparseNormalCpuSeconds": sparse_cpu,
         "resolvedSchurWallSeconds": schur_wall,
+        "resolvedSchurCpuSeconds": schur_cpu,
         "pointSchurMicrobatchPoints": schur_microbatch_points,
         "pointSchurMicrobatchCount": schur_microbatch_count,
         "previousPriorMerged": previous_prior is not None,

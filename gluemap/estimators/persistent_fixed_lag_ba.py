@@ -692,6 +692,7 @@ class PersistentFixedLagBaProblem:
         ceres_cuda_available: bool | None,
     ) -> tuple[pyceres.SolverSummary, dict[str, Any]]:
         started = time.perf_counter()
+        cpu_started = time.process_time()
         options, requested_threads, use_gpu = _solver_configuration(
             self.problem,
             frame_count=len(self.poses),
@@ -704,7 +705,11 @@ class PersistentFixedLagBaProblem:
             device_policy=device_policy,
             ceres_cuda_available=ceres_cuda_available,
         )
+        configuration_wall_seconds = time.perf_counter() - started
+        configuration_cpu_seconds = time.process_time() - cpu_started
         summary = pyceres.SolverSummary()
+        solver_started = time.perf_counter()
+        solver_cpu_started = time.process_time()
         if linear_solver_ordering_policy == "auto":
             if use_gpu:
                 pygluemap.solve_cuda(options, self.problem, summary)
@@ -742,7 +747,11 @@ class PersistentFixedLagBaProblem:
             raise PersistentFixedLagBaError(
                 "persistent BA ordering policy is invalid"
             )
+        solver_wall_seconds = time.perf_counter() - solver_started
+        solver_cpu_seconds = time.process_time() - solver_cpu_started
         _validate_resolved_ba_backend(summary, use_gpu)
+        total_wall_seconds = time.perf_counter() - started
+        total_cpu_seconds = time.process_time() - cpu_started
         return summary, {
             "status": "passed",
             "requestedThreadCount": requested_threads,
@@ -754,7 +763,17 @@ class PersistentFixedLagBaProblem:
             "linearSolverOrdering": linear_solver_ordering_policy,
             "orderedPointCount": len(self._ordered_track_uids),
             "orderedPoseCount": len(self._ordered_frame_ids),
-            "wallSeconds": time.perf_counter() - started,
+            "configurationWallSeconds": configuration_wall_seconds,
+            "configurationCpuSeconds": configuration_cpu_seconds,
+            "solverWallSeconds": solver_wall_seconds,
+            "solverCpuSeconds": solver_cpu_seconds,
+            "wallSeconds": total_wall_seconds,
+            "processCpuSeconds": total_cpu_seconds,
+            "cpuEquivalentCoreUtilization": (
+                total_cpu_seconds / total_wall_seconds
+                if total_wall_seconds > 0.0
+                else 0.0
+            ),
         }
 
     def pose_values(self, frame_id: int) -> np.ndarray:

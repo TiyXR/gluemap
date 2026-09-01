@@ -150,6 +150,10 @@ def test_persistent_problem_applies_native_visual_enter_leave_delta() -> None:
         device_policy="cpu",
         ceres_cuda_available=False,
     )
+    assert solve["configurationCpuSeconds"] >= 0.0
+    assert solve["solverCpuSeconds"] >= 0.0
+    assert solve["processCpuSeconds"] >= solve["solverCpuSeconds"]
+    assert solve["cpuEquivalentCoreUtilization"] >= 0.0
     second = problem.synchronize(
         frame_ids=(0, 2, 3, 4, 5),
         rotations={value: rotations[value] for value in (0, 2, 3, 4, 5)},

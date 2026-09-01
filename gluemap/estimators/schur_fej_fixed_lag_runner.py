@@ -418,6 +418,7 @@ class SchurFejFixedLagRunner:
     ) -> SchurFejFixedLagBatch:
         """Run one BA and finalize a bounded oldest-pose batch."""
         started = time.perf_counter()
+        cpu_started = time.process_time()
         frame_ids = tuple(coarse.frame_ids)
         frame_id_set = set(frame_ids)
         marginalize_ids = tuple(int(value) for value in marginalize_frame_ids)
@@ -480,6 +481,7 @@ class SchurFejFixedLagRunner:
         matrix_k = self._frozen_intrinsics
 
         triangulation_started = time.perf_counter()
+        triangulation_cpu_started = time.process_time()
         cache_before = len(self._track_point_cache)
         cached_by_uid: dict[str, TriangulatedTrackState] = {}
         dlt_tracks: list[SelectedTrackState] = []
@@ -631,8 +633,10 @@ class SchurFejFixedLagRunner:
             }
         )
         triangulation_wall = time.perf_counter() - triangulation_started
+        triangulation_cpu = time.process_time() - triangulation_cpu_started
         triangulation_report["wallSeconds"] = triangulation_wall
         solve_started = time.perf_counter()
+        solve_cpu_started = time.process_time()
         if (
             self._persistent_ba_session is not None
             and self.ba_problem_policy == "native-rebuild-every-window"
@@ -676,8 +680,10 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError("fixed-lag BA/prior did not pass")
         next_prior = refined.next_prior
         batch_prior_wall = 0.0
+        batch_prior_cpu = 0.0
         if len(marginalize_ids) > 1:
             batch_prior_started = time.perf_counter()
+            batch_prior_cpu_started = time.process_time()
             next_prior = marginalize_pose_prior_batch(
                 next_prior,
                 eliminate_camera_ids=marginalize_ids[1:],
@@ -692,7 +698,9 @@ class SchurFejFixedLagRunner:
                 expected_nullity=self.prior_expected_nullity,
             )
             batch_prior_wall = time.perf_counter() - batch_prior_started
+            batch_prior_cpu = time.process_time() - batch_prior_cpu_started
         solve_wall = time.perf_counter() - solve_started
+        solve_cpu = time.process_time() - solve_cpu_started
         if next_prior.report["status"] != "passed":
             raise SchurFejPriorQualityError(next_prior.report)
 
@@ -814,9 +822,13 @@ class SchurFejFixedLagRunner:
             "maximumOverlapRotationMatrixDelta": overlap_rotation_delta,
             "maximumOverlapCenterDelta": overlap_center_delta,
             "triangulationWallSeconds": triangulation_wall,
+            "triangulationCpuSeconds": triangulation_cpu,
             "solveAndPriorWallSeconds": solve_wall,
+            "solveAndPriorCpuSeconds": solve_cpu,
             "batchPriorWallSeconds": batch_prior_wall,
+            "batchPriorCpuSeconds": batch_prior_cpu,
             "totalWallSeconds": time.perf_counter() - started,
+            "totalCpuSeconds": time.process_time() - cpu_started,
             "triangulation": triangulation_report,
             "localBa": refined.report,
             "prior": next_prior.report,

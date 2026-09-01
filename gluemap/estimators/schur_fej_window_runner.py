@@ -117,6 +117,7 @@ class SchurFejWindowRunner:
     ) -> SchurFejWindowBatch:
         """Advance a bounded keyframe batch with one coarse and BA solve."""
         started = time.perf_counter()
+        cpu_started = time.process_time()
         if (
             len(frame_ids) < 3
             or frame_ids != sorted(set(frame_ids))
@@ -164,6 +165,7 @@ class SchurFejWindowRunner:
         marginalize_frame_ids = body_frame_ids[:solve_every_advances]
 
         coarse_started = time.perf_counter()
+        coarse_cpu_started = time.process_time()
         coarse = self.coarse_solver.solve(
             predictions,
             frame_ids,
@@ -172,6 +174,7 @@ class SchurFejWindowRunner:
             fixed_pose_ids=overlap,
         )
         coarse_wall = time.perf_counter() - coarse_started
+        coarse_cpu = time.process_time() - coarse_cpu_started
         solved = self.fixed_lag.advance_batch(
             coarse,
             selected_tracks,
@@ -220,8 +223,10 @@ class SchurFejWindowRunner:
                 if frame_id != self.fixed_gauge_frame_id
             ),
             "coarseWallSeconds": coarse_wall,
+            "coarseCpuSeconds": coarse_cpu,
             "coarse": coarse.report,
             "totalWallSeconds": time.perf_counter() - started,
+            "totalCpuSeconds": time.process_time() - cpu_started,
         }
         return SchurFejWindowBatch(
             window_ordinal=solved.window_ordinal,

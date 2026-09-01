@@ -166,6 +166,7 @@ def refine_fixed_anchor_window(
     fallback_size = next(iter(image_size_by_id.values()))
 
     build_started = time.perf_counter()
+    build_cpu_started = time.process_time()
     persistent_mode = persistent_ba_session is not None
     reconstruction = pycolmap.Reconstruction()
     width, height = fallback_size
@@ -297,6 +298,7 @@ def refine_fixed_anchor_window(
             else None
         )
     build_wall = time.perf_counter() - build_started
+    build_cpu = time.process_time() - build_cpu_started
 
     before_fixed_rotations = {
         frame_id: np.asarray(coarse.rotations[frame_id]).copy()
@@ -307,6 +309,7 @@ def refine_fixed_anchor_window(
         for frame_id in fixed_pose_ids
     }
     solve_started = time.perf_counter()
+    solve_cpu_started = time.process_time()
     summaries = []
     persistent_solve_reports = []
     captured_linearization: list[CeresProblemLinearization] = []
@@ -419,6 +422,7 @@ def refine_fixed_anchor_window(
                 )
         summaries.append(summary)
     solve_wall = time.perf_counter() - solve_started
+    solve_cpu = time.process_time() - solve_cpu_started
     next_prior = None
     if marginalize_pose_id is not None:
         if len(captured_linearization) != 1:
@@ -505,6 +509,14 @@ def refine_fixed_anchor_window(
         float(value.report["captureWallSeconds"])
         for value in captured_linearization
     )
+    linearization_capture_cpu = sum(
+        float(value.report.get("captureCpuSeconds", 0.0))
+        for value in captured_linearization
+    )
+    ceres_solve_cpu = sum(
+        float(value.get("solverCpuSeconds", 0.0))
+        for value in persistent_solve_reports
+    )
     linearization_selection_wall = sum(
         float(value.report.get("nativeSelectionWallSeconds", 0.0))
         for value in captured_linearization
@@ -569,6 +581,7 @@ def refine_fixed_anchor_window(
         "trackCount": len(point_rows),
         "observationCount": observation_count,
         "buildWallSeconds": build_wall,
+        "buildCpuSeconds": build_cpu,
         "reconstructionBuildWallSeconds": reconstruction_build_wall,
         "persistentProblemSyncWallSeconds": (
             0.0
@@ -576,7 +589,9 @@ def refine_fixed_anchor_window(
             else float(persistent_sync_report["wallSeconds"])
         ),
         "solveWallSeconds": solve_wall,
+        "solveCpuSeconds": solve_cpu,
         "ceresSolveWallSeconds": ceres_solve_wall,
+        "ceresSolveCpuSeconds": ceres_solve_cpu,
         "ceresPreprocessorWallSeconds": ceres_preprocessor_wall,
         "ceresResidualEvaluationWallSeconds": (
             ceres_residual_evaluation_wall
@@ -585,6 +600,7 @@ def refine_fixed_anchor_window(
         "ceresLinearSolverWallSeconds": ceres_linear_solver_wall,
         "ceresPostprocessorWallSeconds": ceres_postprocessor_wall,
         "linearizationCaptureWallSeconds": linearization_capture_wall,
+        "linearizationCaptureCpuSeconds": linearization_capture_cpu,
         "linearizationSelectionWallSeconds": linearization_selection_wall,
         "linearizationEvaluationWallSeconds": linearization_evaluation_wall,
         "linearizationNormalBuildWallSeconds": (
@@ -595,6 +611,7 @@ def refine_fixed_anchor_window(
             solve_wall - ceres_solve_wall - linearization_capture_wall,
         ),
         "totalWallSeconds": build_wall + solve_wall,
+        "totalCpuSeconds": build_cpu + solve_cpu,
         "termination": getattr(termination, "name", str(termination)),
         "solveAcceptance": pass_acceptance[-1][1],
         "degradedPassCount": sum(
