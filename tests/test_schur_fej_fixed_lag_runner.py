@@ -14,7 +14,6 @@ from gluemap.estimators.schur_fej_fixed_lag_runner import (
     SchurFejPriorQualityError,
     _CachedTrackPoint,
     _cache_reuse_kind,
-    _merge_track_point_cache,
 )
 
 
@@ -35,60 +34,24 @@ def test_track_point_cache_requires_exact_or_two_observation_overlap():
         estimated_bytes=512,
     )
 
-    assert (
-        _cache_reuse_kind(
-            cached,
-            observation_signature="a" * 64,
-            observation_uids=frozenset({"z"}),
-            minimum_shared_observations=2,
-        )
-        == "exact-observation-identity"
-    )
-    assert (
-        _cache_reuse_kind(
-            cached,
-            observation_signature="b" * 64,
-            observation_uids=frozenset({"b", "c", "d"}),
-            minimum_shared_observations=2,
-        )
-        == "overlap-compatible"
-    )
-    assert (
-        _cache_reuse_kind(
-            cached,
-            observation_signature="b" * 64,
-            observation_uids=frozenset({"c", "d", "e"}),
-            minimum_shared_observations=2,
-        )
-        is None
-    )
-
-
-def test_track_point_cache_spends_spare_budget_on_previous_tracks():
-    old = _CachedTrackPoint(
-        xyz=np.array((1.0, 2.0, 3.0)),
+    assert _cache_reuse_kind(
+        cached,
         observation_signature="a" * 64,
-        observation_uids=frozenset({"a", "b"}),
-        estimated_bytes=512,
-    )
-    current = _CachedTrackPoint(
-        xyz=np.array((4.0, 5.0, 6.0)),
+        observation_uids=frozenset({"z"}),
+        minimum_shared_observations=2,
+    ) == "exact-observation-identity"
+    assert _cache_reuse_kind(
+        cached,
         observation_signature="b" * 64,
-        observation_uids=frozenset({"c", "d"}),
-        estimated_bytes=512,
-    )
-
-    retained, dropped = _merge_track_point_cache(
-        {"old": old}, {"current": current}, budget_bytes=1024
-    )
-    constrained, constrained_dropped = _merge_track_point_cache(
-        {"old": old}, {"current": current}, budget_bytes=512
-    )
-
-    assert retained == {"current": current, "old": old}
-    assert dropped == 0
-    assert constrained == {"current": current}
-    assert constrained_dropped == 1
+        observation_uids=frozenset({"b", "c", "d"}),
+        minimum_shared_observations=2,
+    ) == "overlap-compatible"
+    assert _cache_reuse_kind(
+        cached,
+        observation_signature="b" * 64,
+        observation_uids=frozenset({"c", "d", "e"}),
+        minimum_shared_observations=2,
+    ) is None
 
 
 def _observation(track: int, frame: int, point, center, intrinsics):
@@ -144,12 +107,18 @@ def _window(frame_ids, centers, intrinsics):
 
 
 def test_two_advances_consume_previous_prior_on_real_cuda_backend():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
     runner = SchurFejFixedLagRunner(
         fixed_gauge_frame_ids={0},
         camera_model="PINHOLE",
@@ -160,7 +129,9 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
         prior_expected_nullity=1,
     )
 
-    first = runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+    first = runner.advance(
+        first_coarse, first_tracks, marginalize_frame_id=1
+    )
     checkpoint = runner.snapshot()
     second = runner.advance(
         second_coarse, second_tracks, marginalize_frame_id=2
@@ -219,7 +190,9 @@ def test_two_advances_consume_previous_prior_on_real_cuda_backend():
 
 
 def test_three_pose_batches_use_one_ba_and_resume_exactly():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(12)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(12)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
@@ -291,12 +264,18 @@ def test_three_pose_batches_use_one_ba_and_resume_exactly():
 
 
 def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
     stable_frames = {0, 2, 3, 4}
     first_tracks = [
         SelectedTrackState(
@@ -338,7 +317,9 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
         )
 
     runner = create_runner()
-    first = runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+    first = runner.advance(
+        first_coarse, first_tracks, marginalize_frame_id=1
+    )
     checkpoint = runner.snapshot()
     second = runner.advance(
         second_coarse, second_tracks, marginalize_frame_id=2
@@ -357,22 +338,17 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
     )
     assert len(checkpoint["trackPointCache"]) == 64
     assert second.report["triangulation"]["cacheReusedTrackCount"] == 64
-    assert (
-        second.report["triangulation"]["cacheRejectedObservationIdentityCount"]
-        == 0
-    )
-    assert (
-        second.report["triangulation"]["cacheReusedOverlapCompatibleCount"]
-        == 32
-    )
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 0
+    assert second.report["triangulation"][
+        "cacheReusedOverlapCompatibleCount"
+    ] == 32
     assert second.report["triangulation"]["dltInputTrackCount"] == 0
-    assert (
-        sum(
-            value.initialization_source == "refined-ba-cache"
-            for value in second.triangulated_tracks
-        )
-        == 64
-    )
+    assert sum(
+        value.initialization_source == "refined-ba-cache"
+        for value in second.triangulated_tracks
+    ) == 64
     assert resumed_second.report["triangulation"]["dltInputTrackCount"] == 0
     np.testing.assert_allclose(
         resumed_second.finalized_center,
@@ -395,13 +371,19 @@ def test_refined_point_cache_skips_repeated_dlt_and_resumes_exactly():
         incompatible.restore(checkpoint)
 
 
-def test_refined_point_cache_retains_tracks_outside_the_active_window():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+def test_refined_point_cache_evicts_tracks_outside_the_active_window():
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
     stable_frames = {0, 2, 3, 4}
     first_tracks = [
         SelectedTrackState(
@@ -450,18 +432,12 @@ def test_refined_point_cache_retains_tracks_outside_the_active_window():
     checkpoint = runner.snapshot()
 
     assert second.report["triangulation"]["cacheReusedTrackCount"] == 32
-    assert (
-        second.report["triangulation"]["cacheRejectedObservationIdentityCount"]
-        == 0
-    )
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 0
     assert second.report["triangulation"]["dltInputTrackCount"] == 32
-    assert second.report["triangulation"]["cacheEvictedTrackCount"] == 0
-    assert second.report["triangulation"]["cacheResidentTrackCountAfter"] == 96
-    assert (
-        second.report["triangulation"]["cacheRetainedPreviousOnlyTrackCount"]
-        == 32
-    )
-    assert second.report["triangulation"]["cacheCheckpointTrackCount"] == 64
+    assert second.report["triangulation"]["cacheEvictedTrackCount"] == 32
+    assert second.report["triangulation"]["cacheResidentTrackCountAfter"] == 64
     assert len(checkpoint["trackPointCache"]) == 64
     assert not any(
         row[0].startswith("track-") and int(row[0].split("-")[1]) >= 32
@@ -470,12 +446,18 @@ def test_refined_point_cache_retains_tracks_outside_the_active_window():
 
 
 def test_refined_point_cache_rejects_same_uid_without_two_shared_observations():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(9)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(9)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
     second_tracks = [
         SelectedTrackState(
             track_uid=value.track_uid,
@@ -504,15 +486,16 @@ def test_refined_point_cache_rejects_same_uid_without_two_shared_observations():
     )
 
     assert second.report["triangulation"]["cacheReusedTrackCount"] == 0
-    assert (
-        second.report["triangulation"]["cacheRejectedObservationIdentityCount"]
-        == 64
-    )
+    assert second.report["triangulation"][
+        "cacheRejectedObservationIdentityCount"
+    ] == 64
     assert second.report["triangulation"]["dltInputTrackCount"] == 64
 
 
 def test_refined_point_cache_respects_explicit_memory_budget():
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(5)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(5)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
@@ -539,12 +522,18 @@ def test_refined_point_cache_respects_explicit_memory_budget():
 
 
 def test_two_advances_reuse_persistent_ceres_problem() -> None:
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
     runner = SchurFejFixedLagRunner(
         fixed_gauge_frame_ids={0},
         camera_model="PINHOLE",
@@ -556,7 +545,9 @@ def test_two_advances_reuse_persistent_ceres_problem() -> None:
         ba_problem_policy="persistent-delta",
     )
 
-    first = runner.advance(first_coarse, first_tracks, marginalize_frame_id=1)
+    first = runner.advance(
+        first_coarse, first_tracks, marginalize_frame_id=1
+    )
     second = runner.advance(
         second_coarse, second_tracks, marginalize_frame_id=2
     )
@@ -577,12 +568,18 @@ def test_two_advances_reuse_persistent_ceres_problem() -> None:
 
 
 def test_persistent_problem_matches_rebuild_two_window_solution() -> None:
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
 
     def run(policy: str):
         runner = SchurFejFixedLagRunner(
@@ -630,12 +627,18 @@ def test_persistent_problem_matches_rebuild_two_window_solution() -> None:
 
 
 def test_native_rebuild_matches_reconstruction_rebuild() -> None:
-    centers = {frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)}
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(6)
+    }
     intrinsics = np.array(
         ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
     )
-    first_coarse, first_tracks = _window((0, 1, 2, 3, 4), centers, intrinsics)
-    second_coarse, second_tracks = _window((0, 2, 3, 4, 5), centers, intrinsics)
+    first_coarse, first_tracks = _window(
+        (0, 1, 2, 3, 4), centers, intrinsics
+    )
+    second_coarse, second_tracks = _window(
+        (0, 2, 3, 4, 5), centers, intrinsics
+    )
 
     def run(policy: str):
         runner = SchurFejFixedLagRunner(
@@ -659,15 +662,15 @@ def test_native_rebuild_matches_reconstruction_rebuild() -> None:
     assert native.refined.report["baProblemPolicy"] == (
         "native-rebuild-every-window"
     )
-    assert native.refined.report["persistentProblem"]["createdPointCount"] == 64
-    assert (
-        native.refined.report["persistentProblem"]["visualResidualBindingMode"]
-        == "native-image-major-implicit-parameters"
-    )
-    assert (
-        native.refined.report["persistentProblem"]["problemParameterBlockCount"]
-        == 69
-    )
+    assert native.refined.report["persistentProblem"][
+        "createdPointCount"
+    ] == 64
+    assert native.refined.report["persistentProblem"][
+        "visualResidualBindingMode"
+    ] == "native-image-major-implicit-parameters"
+    assert native.refined.report["persistentProblem"][
+        "problemParameterBlockCount"
+    ] == 69
     np.testing.assert_allclose(
         native.finalized_rotation,
         rebuilt.finalized_rotation,
