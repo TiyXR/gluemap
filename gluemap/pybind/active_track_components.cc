@@ -620,6 +620,85 @@ public:
     return result;
   }
 
+  py::tuple SnapshotState(const std::vector<std::string> &uids) {
+    std::vector<std::string> edge_first_uids;
+    std::vector<std::string> edge_second_uids;
+    std::vector<std::string> component_uids;
+    std::vector<int64_t> owner_ordinals;
+    {
+      py::gil_scoped_release release;
+      std::unordered_set<int64_t> retained_nodes;
+      retained_nodes.reserve(uids.size());
+      component_uids.reserve(uids.size());
+      owner_ordinals.reserve(uids.size());
+      for (const std::string &uid : uids) {
+        const int64_t node = Node(uid);
+        retained_nodes.insert(node);
+        const size_t root = static_cast<size_t>(Find(node));
+        component_uids.push_back(component_uids_[root]);
+        owner_ordinals.push_back(component_owner_ordinals_[root]);
+      }
+      edge_first_uids.reserve(edges_.size());
+      edge_second_uids.reserve(edges_.size());
+      std::vector<std::pair<std::string, std::string>> retained_edges;
+      retained_edges.reserve(edges_.size());
+      for (const uint64_t edge : edges_) {
+        const int64_t first = static_cast<int64_t>(edge >> 32);
+        const int64_t second = static_cast<int64_t>(edge & 0xffffffffULL);
+        if (retained_nodes.find(first) == retained_nodes.end() ||
+            retained_nodes.find(second) == retained_nodes.end()) {
+          continue;
+        }
+        retained_edges.emplace_back(
+            uid_by_node_[static_cast<size_t>(first)],
+            uid_by_node_[static_cast<size_t>(second)]);
+      }
+      std::sort(retained_edges.begin(), retained_edges.end());
+      for (const auto &[first_uid, second_uid] : retained_edges) {
+        edge_first_uids.push_back(first_uid);
+        edge_second_uids.push_back(second_uid);
+      }
+    }
+    return py::make_tuple(std::move(edge_first_uids),
+                          std::move(edge_second_uids),
+                          std::move(component_uids),
+                          VecToArray1D(std::move(owner_ordinals)));
+  }
+
+  void RestoreComponentMetadata(
+      const std::vector<std::string> &uids,
+      const std::vector<std::string> &component_uids,
+      py::array_t<int64_t, py::array::c_style> owner_ordinals) {
+    if (uids.size() != component_uids.size() ||
+        owner_ordinals.size() != static_cast<int64_t>(uids.size())) {
+      throw std::invalid_argument(
+          "active track component metadata columns differ");
+    }
+    py::gil_scoped_release release;
+    const int64_t *owners = owner_ordinals.data();
+    std::unordered_map<int64_t, std::pair<std::string, int64_t>> metadata;
+    metadata.reserve(uids.size());
+    for (size_t index = 0; index < uids.size(); ++index) {
+      const int64_t root = Find(Node(uids[index]));
+      const auto inserted = metadata.emplace(
+          root, std::make_pair(component_uids[index], owners[index]));
+      if (!inserted.second &&
+          (inserted.first->second.first != component_uids[index] ||
+           inserted.first->second.second != owners[index])) {
+        throw std::invalid_argument(
+            "active track component metadata is inconsistent");
+      }
+    }
+    for (const auto &[root, value] : metadata) {
+      if (value.first.empty() || value.second < -1) {
+        throw std::invalid_argument(
+            "active track component metadata is invalid");
+      }
+      component_uids_[static_cast<size_t>(root)] = value.first;
+      component_owner_ordinals_[static_cast<size_t>(root)] = value.second;
+    }
+  }
+
   py::tuple GroupComponents(const std::vector<std::string> &uids) {
     std::vector<int64_t> ordered_indexes;
     std::vector<int64_t> offsets;
@@ -1008,6 +1087,11 @@ void BindActiveTrackGraph(py::module_ &module) {
            py::arg("uids"), py::arg("owner_ordinal"))
       .def("component_uids", &ActiveTrackGraph::ComponentUids,
            py::arg("uids"))
+      .def("snapshot_state", &ActiveTrackGraph::SnapshotState,
+           py::arg("uids"))
+      .def("restore_component_metadata",
+           &ActiveTrackGraph::RestoreComponentMetadata, py::arg("uids"),
+           py::arg("component_uids"), py::arg("owner_ordinals"))
       .def("group_components", &ActiveTrackGraph::GroupComponents,
            py::arg("uids"))
       .def("group_component_rows", &ActiveTrackGraph::GroupComponentRows,

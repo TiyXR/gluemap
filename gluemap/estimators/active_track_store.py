@@ -602,6 +602,240 @@ class ActiveTrackStore:
     def last_gate_phase_wall(self) -> dict[str, float]:
         return dict(self._last_gate_phase_wall)
 
+    def checkpoint_after_release(self, proposal_uid: str) -> dict[str, Any]:
+        """Capture the exact bounded graph that remains after a pending release.
+
+        The release itself still happens only after the journal record is durable.
+        Encoding the projected state in that record lets recovery rebuild the
+        active lag directly instead of replaying every historical frontend shard.
+        """
+        if (
+            self._pending_release is None
+            or self._pending_release["proposalUid"] != proposal_uid
+        ):
+            raise ActiveTrackStoreError("release proposal identity differs")
+        released_uids = set(self._pending_release["uids"])
+        observation_uids = sorted(set(self._observations) - released_uids)
+        observations = [self._observations[uid] for uid in observation_uids]
+        if self._native_graph is not None:
+            if not hasattr(self._native_graph, "snapshot_state"):
+                raise ActiveTrackStoreError(
+                    "native active track checkpoint backend is unavailable"
+                )
+            (
+                edge_first_uids,
+                edge_second_uids,
+                component_uids,
+                component_owner_ordinals,
+            ) = self._native_graph.snapshot_state(observation_uids)
+            component_owner_values = component_owner_ordinals.tolist()
+        else:
+            retained = set(observation_uids)
+            retained_edges = sorted(
+                edge
+                for edge in self._edges
+                if edge[0] in retained and edge[1] in retained
+            )
+            edge_first_uids = [edge[0] for edge in retained_edges]
+            edge_second_uids = [edge[1] for edge in retained_edges]
+            component_uids = [
+                self._component_uid_by_root[self._union_find.find(uid)]
+                for uid in observation_uids
+            ]
+            owner_by_component: dict[str, int] = {}
+            for uid, component_uid in zip(
+                observation_uids, component_uids, strict=True
+            ):
+                owner = self._landmark_owner_by_observation_uid.get(uid)
+                if owner is None:
+                    continue
+                current = owner_by_component.get(component_uid)
+                owner_by_component[component_uid] = (
+                    owner if current is None else min(current, owner)
+                )
+            component_owner_values = [
+                owner_by_component.get(component_uid, -1)
+                for component_uid in component_uids
+            ]
+        checkpoint = {
+            "contractId": "jarailsense.gluemap-active-track-checkpoint/v1",
+            "storeIdentitySha256": self.store_identity_sha256,
+            "observationColumns": {
+                "observationUid": observation_uids,
+                "geometryOrdinal": [
+                    value.geometry_ordinal for value in observations
+                ],
+                "frameUid": [value.frame_uid for value in observations],
+                "ptsValue": [value.pts_value for value in observations],
+                "timeBaseNumerator": [
+                    value.time_base_numerator for value in observations
+                ],
+                "timeBaseDenominator": [
+                    value.time_base_denominator for value in observations
+                ],
+                "x": [value.x for value in observations],
+                "y": [value.y for value in observations],
+                "imageWidth": [value.image_width for value in observations],
+                "imageHeight": [value.image_height for value in observations],
+                "score": [value.score for value in observations],
+                "landmarkOwnerOrdinal": [
+                    self._landmark_owner_by_observation_uid.get(uid, -1)
+                    for uid in observation_uids
+                ],
+                "componentUid": list(component_uids),
+                "componentOwnerOrdinal": component_owner_values,
+            },
+            "edgeColumns": {
+                "firstObservationUid": list(edge_first_uids),
+                "secondObservationUid": list(edge_second_uids),
+            },
+            "observationCount": len(observation_uids),
+            "edgeCount": len(edge_first_uids),
+            "pixelArtifactCount": 0,
+        }
+        checkpoint["checkpointSha256"] = _canonical_sha256(checkpoint)
+        return checkpoint
+
+    def restore_checkpoint(
+        self, checkpoint: dict[str, Any], accepted_journal_head: str
+    ) -> dict[str, Any]:
+        """Restore one exact active-lag graph from a durable journal record."""
+        _require_sha256(accepted_journal_head, "accepted journal head")
+        if (
+            self._observations
+            or self._pending_release is not None
+            or self._last_accepted_journal_head is not None
+        ):
+            raise ActiveTrackStoreError("active track store is not empty")
+        expected_sha256 = checkpoint.get("checkpointSha256")
+        identity_payload = {
+            key: value
+            for key, value in checkpoint.items()
+            if key != "checkpointSha256"
+        }
+        if (
+            checkpoint.get("contractId")
+            != "jarailsense.gluemap-active-track-checkpoint/v1"
+            or checkpoint.get("storeIdentitySha256")
+            != self.store_identity_sha256
+            or expected_sha256 != _canonical_sha256(identity_payload)
+        ):
+            raise ActiveTrackStoreError(
+                "active track checkpoint identity differs"
+            )
+        columns = checkpoint.get("observationColumns")
+        edges = checkpoint.get("edgeColumns")
+        if not isinstance(columns, dict) or not isinstance(edges, dict):
+            raise ActiveTrackStoreError("active track checkpoint columns differ")
+        names = (
+            "observationUid",
+            "geometryOrdinal",
+            "frameUid",
+            "ptsValue",
+            "timeBaseNumerator",
+            "timeBaseDenominator",
+            "x",
+            "y",
+            "imageWidth",
+            "imageHeight",
+            "score",
+            "landmarkOwnerOrdinal",
+            "componentUid",
+            "componentOwnerOrdinal",
+        )
+        if any(not isinstance(columns.get(name), list) for name in names):
+            raise ActiveTrackStoreError("active track checkpoint columns differ")
+        observation_count = checkpoint.get("observationCount")
+        if (
+            isinstance(observation_count, bool)
+            or not isinstance(observation_count, int)
+            or any(len(columns[name]) != observation_count for name in names)
+        ):
+            raise ActiveTrackStoreError("active track checkpoint rows differ")
+        observations = [
+            TrackObservation(
+                observation_uid=columns["observationUid"][index],
+                geometry_ordinal=columns["geometryOrdinal"][index],
+                frame_uid=columns["frameUid"][index],
+                pts_value=columns["ptsValue"][index],
+                time_base_numerator=columns["timeBaseNumerator"][index],
+                time_base_denominator=columns["timeBaseDenominator"][index],
+                x=columns["x"][index],
+                y=columns["y"][index],
+                image_width=columns["imageWidth"][index],
+                image_height=columns["imageHeight"][index],
+                score=columns["score"][index],
+            )
+            for index in range(observation_count)
+        ]
+        for observation in observations:
+            self._validate_observation(observation)
+        self._insert_observation_batch(observations)
+        first_uids = edges.get("firstObservationUid")
+        second_uids = edges.get("secondObservationUid")
+        if (
+            not isinstance(first_uids, list)
+            or not isinstance(second_uids, list)
+            or len(first_uids) != len(second_uids)
+            or checkpoint.get("edgeCount") != len(first_uids)
+        ):
+            raise ActiveTrackStoreError("active track checkpoint edges differ")
+        self.add_correspondence_pairs(
+            zip(first_uids, second_uids, strict=True)
+        )
+        observation_uids = columns["observationUid"]
+        component_uids = columns["componentUid"]
+        component_owner_ordinals = columns["componentOwnerOrdinal"]
+        if self._native_graph is not None:
+            if not hasattr(self._native_graph, "restore_component_metadata"):
+                raise ActiveTrackStoreError(
+                    "native active track checkpoint backend is unavailable"
+                )
+            import numpy as np
+
+            self._native_graph.restore_component_metadata(
+                observation_uids,
+                component_uids,
+                np.asarray(component_owner_ordinals, dtype=np.int64),
+            )
+        else:
+            metadata_by_root: dict[str, tuple[str, int]] = {}
+            for uid, component_uid, owner in zip(
+                observation_uids,
+                component_uids,
+                component_owner_ordinals,
+                strict=True,
+            ):
+                root = self._union_find.find(uid)
+                metadata = (component_uid, owner)
+                if root in metadata_by_root and metadata_by_root[root] != metadata:
+                    raise ActiveTrackStoreError(
+                        "active track checkpoint component metadata differs"
+                    )
+                metadata_by_root[root] = metadata
+            self._component_uid_by_root = {
+                root: metadata[0]
+                for root, metadata in metadata_by_root.items()
+            }
+        self._landmark_owner_by_observation_uid = {
+            uid: owner
+            for uid, owner in zip(
+                observation_uids,
+                columns["landmarkOwnerOrdinal"],
+                strict=True,
+            )
+            if owner >= 0
+        }
+        self._last_accepted_journal_head = accepted_journal_head
+        return {
+            "contractId": "jarailsense.gluemap-active-track-restore/v1",
+            "status": "passed",
+            "checkpointSha256": expected_sha256,
+            "acceptedJournalHead": accepted_journal_head,
+            "observationCount": self.observation_count,
+            "edgeCount": self.edge_count,
+        }
+
     def _persistent_tensor_report(self) -> dict[str, Any]:
         table = self._gpu_observation_table
         if table is None:

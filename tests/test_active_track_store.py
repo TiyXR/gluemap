@@ -737,6 +737,53 @@ def test_release_requires_accepted_journal_head_and_rebuilds_components():
     assert report["candidateTrackCount"] == 1
 
 
+def test_checkpoint_restores_exact_projected_graph_without_history_replay():
+    store = ActiveTrackStore(budget())
+    add_track(store, 0, [0, 1, 2, 3])
+    add_track(store, 1, [0, 1, 2, 3])
+    proposal = store.propose_release_frame_ids([0, 1])
+    checkpoint = store.checkpoint_after_release(proposal["proposalUid"])
+    head = hashlib.sha256(b"bounded-checkpoint-head").hexdigest()
+    store.commit_release(proposal["proposalUid"], head)
+
+    restored = ActiveTrackStore(budget())
+    report = restored.restore_checkpoint(checkpoint, head)
+    assert report["observationCount"] == store.observation_count == 4
+    assert report["edgeCount"] == store.edge_count == 2
+    assert checkpoint["pixelArtifactCount"] == 0
+
+    expected_gate = store.evaluate(
+        active_first_ordinal=2,
+        active_last_ordinal=3,
+        freeze_through_ordinal=2,
+    )
+    actual_gate = restored.evaluate(
+        active_first_ordinal=2,
+        active_last_ordinal=3,
+        freeze_through_ordinal=2,
+    )
+    assert actual_gate["reportSha256"] == expected_gate["reportSha256"]
+    assert actual_gate["selectedTrackUidsSha256"] == expected_gate[
+        "selectedTrackUidsSha256"
+    ]
+
+    expected_release = store.propose_release_frame_ids([2])
+    actual_release = restored.propose_release_frame_ids([2])
+    assert actual_release == expected_release
+
+
+def test_checkpoint_rejects_changed_payload_identity():
+    store = ActiveTrackStore(budget())
+    add_track(store, 0, [0, 1])
+    proposal = store.propose_release_frame_ids([0])
+    checkpoint = store.checkpoint_after_release(proposal["proposalUid"])
+    checkpoint["observationColumns"]["x"][0] += 1.0
+    restored = ActiveTrackStore(budget())
+    head = hashlib.sha256(b"changed-checkpoint-head").hexdigest()
+    with pytest.raises(ActiveTrackStoreError, match="identity differs"):
+        restored.restore_checkpoint(checkpoint, head)
+
+
 def test_per_frame_observation_bound_and_identity_reuse_are_rejected():
     store = ActiveTrackStore(
         budget(
