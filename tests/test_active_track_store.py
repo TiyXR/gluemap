@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from gluemap.estimators.active_track_store import (
+    ActiveTrackExecutionOptions,
     ActiveTrackStore,
     ActiveTrackStoreError,
     TrackBudget,
@@ -64,6 +65,55 @@ def add_track(store, track, frames):
         )
         for index in range(len(observations) - 1)
     )
+
+
+def test_execution_options_disable_all_optimized_track_backends():
+    options = ActiveTrackExecutionOptions(
+        persistent_observation_table=False,
+        cuda_track_metrics=False,
+        native_track_gate=False,
+    )
+    store = ActiveTrackStore(budget(), options)
+    assert store.parallax_backend == "cpu"
+    assert store._native_graph is None
+    assert store._component_rebuild_backend == "python"
+    assert store._spatial_intern_backend == "python"
+    assert store._persistent_tensor_report() == {
+        "persistentObservationTensorBackend": "disabled",
+        "persistentObservationTensorCapacity": 0,
+        "persistentObservationTensorResidentRows": 0,
+        "persistentObservationTensorPendingRows": 0,
+        "persistentObservationTensorUploadedRows": 0,
+        "persistentObservationTensorReusedRows": 0,
+    }
+
+
+def test_execution_options_are_part_of_store_identity():
+    default = ActiveTrackStore(budget())
+    reference = ActiveTrackStore(
+        budget(),
+        ActiveTrackExecutionOptions(
+            persistent_observation_table=False,
+            cuda_track_metrics=False,
+            native_track_gate=False,
+        ),
+    )
+    assert default.store_identity_sha256 != reference.store_identity_sha256
+
+
+def test_accelerated_track_backends_require_persistent_observation_table():
+    with pytest.raises(
+        ActiveTrackStoreError,
+        match="CUDA track metrics require",
+    ):
+        ActiveTrackStore(
+            budget(),
+            ActiveTrackExecutionOptions(
+                persistent_observation_table=False,
+                cuda_track_metrics=True,
+                native_track_gate=False,
+            ),
+        )
 
 
 def test_native_batched_selector_matches_reference_round_robin_exactly():

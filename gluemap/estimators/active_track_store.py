@@ -69,6 +69,15 @@ class TrackBudget:
         return self.window_size_keyframes * self.active_track_budget_per_keyframe
 
 
+@dataclass(frozen=True)
+class ActiveTrackExecutionOptions:
+    """Select optimized track-store backends without changing gate semantics."""
+
+    persistent_observation_table: bool = True
+    cuda_track_metrics: bool = True
+    native_track_gate: bool = True
+
+
 @dataclass(frozen=True, slots=True)
 class TrackObservation:
     observation_uid: str
@@ -417,9 +426,19 @@ class ActiveTrackStore:
     the SHA-256 of an already accepted durable journal head.
     """
 
-    def __init__(self, budget: TrackBudget) -> None:
+    def __init__(
+        self,
+        budget: TrackBudget,
+        execution_options: ActiveTrackExecutionOptions | None = None,
+    ) -> None:
         self.budget = budget
+        self.execution_options = (
+            ActiveTrackExecutionOptions()
+            if execution_options is None
+            else execution_options
+        )
         self._validate_budget()
+        self._validate_execution_options()
         self._observations: dict[str, TrackObservation] = {}
         self._observations_by_frame: dict[int, set[str]] = defaultdict(set)
         self._spatial_buckets_by_frame: dict[
@@ -433,22 +452,63 @@ class ActiveTrackStore:
         self._union_find = UnionFind()
         self._component_uid_by_root: dict[Any, str] = {}
         self._landmark_owner_by_observation_uid: dict[str, int] = {}
-        self._native_graph = self._create_native_graph()
+        self._native_graph = (
+            self._create_native_graph()
+            if self.execution_options.native_track_gate
+            else None
+        )
         self._native_tensor_rows = self._supports_native_tensor_rows()
         self._last_accepted_journal_head: str | None = None
         self._pending_release: dict[str, Any] | None = None
-        self._parallax_backend = self._resolve_parallax_backend()
+        self._parallax_backend = (
+            self._resolve_parallax_backend()
+            if self.execution_options.cuda_track_metrics
+            else "cpu"
+        )
         self._gpu_observation_table = (
             _PersistentObservationTensorTable(self._parallax_backend)
-            if self._parallax_backend == "cuda"
+            if self.execution_options.persistent_observation_table
+            and self._parallax_backend == "cuda"
             else None
         )
-        self._component_rebuild_backend = self._resolve_component_rebuild_backend()
-        self._spatial_intern_backend = self._resolve_spatial_intern_backend()
+        self._component_rebuild_backend = (
+            self._resolve_component_rebuild_backend()
+            if self.execution_options.native_track_gate
+            else "python"
+        )
+        self._spatial_intern_backend = (
+            self._resolve_spatial_intern_backend()
+            if self.execution_options.native_track_gate
+            else "python"
+        )
         self._last_gate_tensor_report: dict[str, int] = {}
         self._last_gate_phase_wall: dict[str, float] = {}
         self._last_gate_metric_phase_wall: dict[str, float] = {}
-        self.store_identity_sha256 = _canonical_sha256(asdict(budget))
+        self.store_identity_sha256 = _canonical_sha256(
+            {
+                "budget": asdict(budget),
+                "executionOptions": asdict(self.execution_options),
+            }
+        )
+
+    def _validate_execution_options(self) -> None:
+        values = asdict(self.execution_options)
+        if any(not isinstance(value, bool) for value in values.values()):
+            raise ActiveTrackStoreError("track execution options must be boolean")
+        if (
+            self.execution_options.cuda_track_metrics
+            and not self.execution_options.persistent_observation_table
+        ):
+            raise ActiveTrackStoreError(
+                "CUDA track metrics require the persistent observation table"
+            )
+        if (
+            self.execution_options.native_track_gate
+            and not self.execution_options.persistent_observation_table
+        ):
+            raise ActiveTrackStoreError(
+                "native track gate requires the persistent observation table"
+            )
 
     def _supports_native_tensor_rows(self) -> bool:
         graph = self._native_graph
@@ -2788,6 +2848,7 @@ class ActiveTrackStore:
             "status": status,
             "reasonCodes": reason_codes,
             "storeIdentitySha256": self.store_identity_sha256,
+            "executionOptions": asdict(self.execution_options),
             "activeFirstOrdinal": active_first_ordinal,
             "activeLastOrdinal": active_last_ordinal,
             "freezeThroughOrdinal": freeze_through_ordinal,
