@@ -76,6 +76,9 @@ def test_auto_solver_tracks_the_active_camera_frontier() -> None:
         max_num_iterations=100,
         linear_solver_policy="auto",
         dense_linear_algebra_policy="auto",
+        trust_region_policy="levenberg-marquardt",
+        dogleg_policy="subspace",
+        use_nonmonotonic_steps=False,
         device_policy="cpu",
         ceres_cuda_available=False,
     )
@@ -85,12 +88,24 @@ def test_auto_solver_tracks_the_active_camera_frontier() -> None:
         max_num_iterations=100,
         linear_solver_policy="auto",
         dense_linear_algebra_policy="lapack",
+        trust_region_policy="dogleg",
+        dogleg_policy="subspace",
+        use_nonmonotonic_steps=True,
         device_policy="cpu",
         ceres_cuda_available=False,
     )
 
     assert dense_options.linear_solver_type == pyceres.LinearSolverType.DENSE_SCHUR
     assert sparse_options.linear_solver_type == pyceres.LinearSolverType.SPARSE_SCHUR
+    assert (
+        dense_options.trust_region_strategy_type
+        == pyceres.TrustRegionStrategyType.LEVENBERG_MARQUARDT
+    )
+    assert sparse_options.trust_region_strategy_type == (
+        pyceres.TrustRegionStrategyType.DOGLEG
+    )
+    assert sparse_options.dogleg_type == pyceres.DoglegType.SUBSPACE_DOGLEG
+    assert sparse_options.use_nonmonotonic_steps is True
     assert (
         sparse_options.dense_linear_algebra_library_type
         == pyceres.DenseLinearAlgebraLibraryType.LAPACK

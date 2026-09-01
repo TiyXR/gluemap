@@ -331,6 +331,9 @@ def bundle_adjustment(
     loss_type_virtual: str = "arctan",
     linear_solver_type: str = "auto",
     dense_linear_algebra_policy: str = "auto",
+    trust_region_policy: str = "levenberg-marquardt",
+    dogleg_policy: str = "subspace",
+    use_nonmonotonic_steps: bool = False,
     fixed_pose_ids: set[int] | None = None,
     fix_intrinsics: bool = False,
     device_policy: str = "cuda-preferred",
@@ -409,6 +412,29 @@ def bundle_adjustment(
     ba_options.ceres.solver_options = pyceres.SolverOptions()
     ba_options.ceres.solver_options.max_num_iterations = max_num_iterations
     requested_thread_count = _configure_ceres_cpu_concurrency(ba_options.ceres)
+    trust_region_types = {
+        "levenberg-marquardt": (
+            pyceres.TrustRegionStrategyType.LEVENBERG_MARQUARDT
+        ),
+        "dogleg": pyceres.TrustRegionStrategyType.DOGLEG,
+    }
+    if trust_region_policy not in trust_region_types:
+        raise ValueError(
+            f"Unsupported trust region strategy: {trust_region_policy}"
+        )
+    dogleg_types = {
+        "traditional": pyceres.DoglegType.TRADITIONAL_DOGLEG,
+        "subspace": pyceres.DoglegType.SUBSPACE_DOGLEG,
+    }
+    if dogleg_policy not in dogleg_types:
+        raise ValueError(f"Unsupported dogleg strategy: {dogleg_policy}")
+    ba_options.ceres.solver_options.trust_region_strategy_type = (
+        trust_region_types[trust_region_policy]
+    )
+    ba_options.ceres.solver_options.dogleg_type = dogleg_types[dogleg_policy]
+    ba_options.ceres.solver_options.use_nonmonotonic_steps = (
+        use_nonmonotonic_steps
+    )
     ba_options.ceres.auto_select_solver_type = True
     solver_types = {
         "dense-schur": pyceres.LinearSolverType.DENSE_SCHUR,

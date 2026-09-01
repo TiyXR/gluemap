@@ -74,6 +74,9 @@ def _solver_configuration(
     max_num_iterations: int,
     linear_solver_policy: str,
     dense_linear_algebra_policy: str,
+    trust_region_policy: str,
+    dogleg_policy: str,
+    use_nonmonotonic_steps: bool,
     device_policy: str,
     ceres_cuda_available: bool | None,
 ) -> tuple[pyceres.SolverOptions, int, bool]:
@@ -83,6 +86,29 @@ def _solver_configuration(
     solver_options.max_num_iterations = max_num_iterations
     requested_threads = resolve_native_thread_count()
     solver_options.num_threads = requested_threads
+    trust_region_types = {
+        "levenberg-marquardt": (
+            pyceres.TrustRegionStrategyType.LEVENBERG_MARQUARDT
+        ),
+        "dogleg": pyceres.TrustRegionStrategyType.DOGLEG,
+    }
+    if trust_region_policy not in trust_region_types:
+        raise PersistentFixedLagBaError(
+            "persistent BA trust region policy is invalid"
+        )
+    dogleg_types = {
+        "traditional": pyceres.DoglegType.TRADITIONAL_DOGLEG,
+        "subspace": pyceres.DoglegType.SUBSPACE_DOGLEG,
+    }
+    if dogleg_policy not in dogleg_types:
+        raise PersistentFixedLagBaError(
+            "persistent BA dogleg policy is invalid"
+        )
+    solver_options.trust_region_strategy_type = trust_region_types[
+        trust_region_policy
+    ]
+    solver_options.dogleg_type = dogleg_types[dogleg_policy]
+    solver_options.use_nonmonotonic_steps = use_nonmonotonic_steps
     solver_types = {
         "dense-schur": pyceres.LinearSolverType.DENSE_SCHUR,
         "sparse-schur": pyceres.LinearSolverType.SPARSE_SCHUR,
@@ -658,6 +684,9 @@ class PersistentFixedLagBaProblem:
         max_num_iterations: int,
         linear_solver_policy: str,
         dense_linear_algebra_policy: str = "auto",
+        trust_region_policy: str = "levenberg-marquardt",
+        dogleg_policy: str = "subspace",
+        use_nonmonotonic_steps: bool = False,
         linear_solver_ordering_policy: str,
         device_policy: str,
         ceres_cuda_available: bool | None,
@@ -669,6 +698,9 @@ class PersistentFixedLagBaProblem:
             max_num_iterations=max_num_iterations,
             linear_solver_policy=linear_solver_policy,
             dense_linear_algebra_policy=dense_linear_algebra_policy,
+            trust_region_policy=trust_region_policy,
+            dogleg_policy=dogleg_policy,
+            use_nonmonotonic_steps=use_nonmonotonic_steps,
             device_policy=device_policy,
             ceres_cuda_available=ceres_cuda_available,
         )
@@ -716,6 +748,9 @@ class PersistentFixedLagBaProblem:
             "requestedThreadCount": requested_threads,
             "gpuRequested": use_gpu,
             "denseLinearAlgebraPolicy": dense_linear_algebra_policy,
+            "trustRegionPolicy": trust_region_policy,
+            "doglegPolicy": dogleg_policy,
+            "useNonmonotonicSteps": use_nonmonotonic_steps,
             "linearSolverOrdering": linear_solver_ordering_policy,
             "orderedPointCount": len(self._ordered_track_uids),
             "orderedPoseCount": len(self._ordered_frame_ids),

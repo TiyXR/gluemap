@@ -169,6 +169,9 @@ class SchurFejFixedLagRunner:
         ba_device_policy: str = "cuda-preferred",
         ba_linear_solver_policy: str = "auto",
         ba_dense_linear_algebra_policy: str = "auto",
+        ba_trust_region_policy: str = "levenberg-marquardt",
+        ba_dogleg_policy: str = "subspace",
+        ba_use_nonmonotonic_steps: bool = False,
         ba_linear_solver_ordering_policy: str = "auto",
         ba_max_iterations: int = 100,
         ba_refinement_passes: int = 1,
@@ -204,6 +207,12 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "BA dense linear algebra policy is invalid"
             )
+        if ba_trust_region_policy not in {"levenberg-marquardt", "dogleg"}:
+            raise SchurFejFixedLagRunnerError(
+                "BA trust region policy is invalid"
+            )
+        if ba_dogleg_policy not in {"traditional", "subspace"}:
+            raise SchurFejFixedLagRunnerError("BA dogleg policy is invalid")
         if triangulation_initialization_policy not in {
             "full-dlt",
             "refined-point-cache",
@@ -306,6 +315,9 @@ class SchurFejFixedLagRunner:
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
         self.ba_dense_linear_algebra_policy = ba_dense_linear_algebra_policy
+        self.ba_trust_region_policy = ba_trust_region_policy
+        self.ba_dogleg_policy = ba_dogleg_policy
+        self.ba_use_nonmonotonic_steps = ba_use_nonmonotonic_steps
         self.ba_linear_solver_ordering_policy = (
             ba_linear_solver_ordering_policy
         )
@@ -636,6 +648,9 @@ class SchurFejFixedLagRunner:
             refinement_passes=self.ba_refinement_passes,
             linear_solver_policy=self.ba_linear_solver_policy,
             dense_linear_algebra_policy=self.ba_dense_linear_algebra_policy,
+            trust_region_policy=self.ba_trust_region_policy,
+            dogleg_policy=self.ba_dogleg_policy,
+            use_nonmonotonic_steps=self.ba_use_nonmonotonic_steps,
             linear_solver_ordering_policy=(
                 self.ba_linear_solver_ordering_policy
             ),

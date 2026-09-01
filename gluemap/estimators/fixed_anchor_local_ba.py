@@ -98,6 +98,9 @@ def refine_fixed_anchor_window(
     refinement_passes: int = 1,
     linear_solver_policy: str = "auto",
     dense_linear_algebra_policy: str = "auto",
+    trust_region_policy: str = "levenberg-marquardt",
+    dogleg_policy: str = "subspace",
+    use_nonmonotonic_steps: bool = False,
     linear_solver_ordering_policy: str = "auto",
     device_policy: str = "cuda-preferred",
     ceres_cuda_available: bool | None = None,
@@ -322,6 +325,9 @@ def refine_fixed_anchor_window(
                 loss_type_normal="huber",
                 linear_solver_type=linear_solver_policy,
                 dense_linear_algebra_policy=dense_linear_algebra_policy,
+                trust_region_policy=trust_region_policy,
+                dogleg_policy=dogleg_policy,
+                use_nonmonotonic_steps=use_nonmonotonic_steps,
                 fixed_pose_ids={
                     image_id_by_frame[value] for value in fixed_pose_ids
                 },
@@ -359,6 +365,9 @@ def refine_fixed_anchor_window(
                     max_num_iterations=max_num_iterations,
                     linear_solver_policy=linear_solver_policy,
                     dense_linear_algebra_policy=dense_linear_algebra_policy,
+                    trust_region_policy=trust_region_policy,
+                    dogleg_policy=dogleg_policy,
+                    use_nonmonotonic_steps=use_nonmonotonic_steps,
                     linear_solver_ordering_policy=(
                         linear_solver_ordering_policy
                     ),
@@ -541,6 +550,9 @@ def refine_fixed_anchor_window(
         ),
         "linearSolverPolicy": linear_solver_policy,
         "denseLinearAlgebraPolicy": dense_linear_algebra_policy,
+        "trustRegionPolicy": trust_region_policy,
+        "doglegPolicy": dogleg_policy,
+        "useNonmonotonicSteps": use_nonmonotonic_steps,
         "linearSolverOrderingPolicy": linear_solver_ordering_policy,
         "refinementPassCount": refinement_passes,
         "marginalizationResidualPolicy": marginalization_residual_policy,
