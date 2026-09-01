@@ -12,7 +12,9 @@ import numpy as np
 import torch
 
 from gluemap.estimators.active_track_store import SelectedTrackState
-from gluemap.estimators.fixed_anchor_approximation import FixedAnchorWindowSolution
+from gluemap.estimators.fixed_anchor_approximation import (
+    FixedAnchorWindowSolution,
+)
 from gluemap.estimators.fixed_anchor_diagnostic_runner import (
     _resolve_shared_intrinsics,
 )
@@ -150,6 +152,35 @@ def _cache_reuse_kind(
     return None
 
 
+def _merge_track_point_cache(
+    previous: dict[str, _CachedTrackPoint],
+    current: dict[str, _CachedTrackPoint],
+    *,
+    budget_bytes: int,
+) -> tuple[dict[str, _CachedTrackPoint], int]:
+    """Keep the newest solved tracks first, then spend spare RAM on history."""
+    candidates = [
+        (0, -len(cached.observation_uids), track_uid, cached)
+        for track_uid, cached in current.items()
+    ]
+    candidates.extend(
+        (1, -len(cached.observation_uids), track_uid, cached)
+        for track_uid, cached in previous.items()
+        if track_uid not in current
+    )
+    candidates.sort(key=lambda value: (value[0], value[1], value[2]))
+    merged: dict[str, _CachedTrackPoint] = {}
+    resident_bytes = 0
+    dropped = 0
+    for _, _, track_uid, cached in candidates:
+        if resident_bytes + cached.estimated_bytes > budget_bytes:
+            dropped += 1
+            continue
+        merged[track_uid] = cached
+        resident_bytes += cached.estimated_bytes
+    return merged, dropped
+
+
 class SchurFejFixedLagRunner:
     """Own one canonical gauge and a persistent pose-only FEJ prior."""
 
@@ -233,12 +264,9 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "triangulation cache shared observation threshold is invalid"
             )
-        if (
-            triangulation_cache_budget_bytes is not None
-            and (
-                isinstance(triangulation_cache_budget_bytes, bool)
-                or triangulation_cache_budget_bytes < 1
-            )
+        if triangulation_cache_budget_bytes is not None and (
+            isinstance(triangulation_cache_budget_bytes, bool)
+            or triangulation_cache_budget_bytes < 1
         ):
             raise SchurFejFixedLagRunnerError(
                 "triangulation cache byte budget is invalid"
@@ -268,12 +296,8 @@ class SchurFejFixedLagRunner:
             triangulation_cache_minimum_shared_observations
         )
         if triangulation_cache_budget_bytes is None:
-            self._triangulation_cache_memory_budget = (
-                probe_memory_cache_budget(
-                    cache_headroom_ratio=(
-                        triangulation_cache_memory_headroom_ratio
-                    )
-                )
+            self._triangulation_cache_memory_budget = probe_memory_cache_budget(
+                cache_headroom_ratio=(triangulation_cache_memory_headroom_ratio)
             )
         else:
             self._triangulation_cache_memory_budget = {
@@ -294,15 +318,12 @@ class SchurFejFixedLagRunner:
         )
         self._resolved_triangulation_solver_policy = (
             None
-            if triangulation_solver_policy
-            == "homogeneous-svd-auto-benchmark"
+            if triangulation_solver_policy == "homogeneous-svd-auto-benchmark"
             else triangulation_solver_policy
         )
         self.ba_device_policy = ba_device_policy
         self.ba_linear_solver_policy = ba_linear_solver_policy
-        self.ba_linear_solver_ordering_policy = (
-            ba_linear_solver_ordering_policy
-        )
+        self.ba_linear_solver_ordering_policy = ba_linear_solver_ordering_policy
         self.ba_max_iterations = ba_max_iterations
         self.ba_refinement_passes = ba_refinement_passes
         self.ceres_cuda_available = ceres_cuda_available
@@ -319,6 +340,7 @@ class SchurFejFixedLagRunner:
         self._next_window_ordinal = 0
         self._terminal_finalized = False
         self._track_point_cache: dict[str, _CachedTrackPoint] = {}
+        self._checkpoint_track_point_cache: dict[str, _CachedTrackPoint] = {}
         self._persistent_ba_session = (
             PersistentFixedLagBaSession(policy=ba_problem_policy)
             if ba_problem_policy
@@ -408,9 +430,13 @@ class SchurFejFixedLagRunner:
             or tuple(sorted(frame_id_set)) != frame_ids
             or self.fixed_gauge_frame_ids - frame_id_set
         ):
-            raise SchurFejFixedLagRunnerError("fixed-lag frame identity is invalid")
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag frame identity is invalid"
+            )
         body_frame_ids = tuple(
-            value for value in frame_ids if value not in self.fixed_gauge_frame_ids
+            value
+            for value in frame_ids
+            if value not in self.fixed_gauge_frame_ids
         )
         if (
             not marginalize_ids
@@ -421,12 +447,17 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "fixed-lag marginal pose identity is invalid"
             )
-        if self._prior is not None and set(self._prior.camera_ids) - frame_id_set:
+        if (
+            self._prior is not None
+            and set(self._prior.camera_ids) - frame_id_set
+        ):
             raise SchurFejFixedLagRunnerError(
                 "fixed-lag window dropped a retained prior pose"
             )
         if not selected_tracks:
-            raise SchurFejFixedLagRunnerError("fixed-lag selected tracks are empty")
+            raise SchurFejFixedLagRunnerError(
+                "fixed-lag selected tracks are empty"
+            )
         if any(
             observation.geometry_ordinal not in frame_id_set
             for track in selected_tracks
@@ -437,11 +468,15 @@ class SchurFejFixedLagRunner:
             )
 
         rotations = {
-            frame_id: np.asarray(coarse.rotations[frame_id], dtype=np.float64).copy()
+            frame_id: np.asarray(
+                coarse.rotations[frame_id], dtype=np.float64
+            ).copy()
             for frame_id in frame_ids
         }
         centers = {
-            frame_id: np.asarray(coarse.centers[frame_id], dtype=np.float64).copy()
+            frame_id: np.asarray(
+                coarse.centers[frame_id], dtype=np.float64
+            ).copy()
             for frame_id in frame_ids
         }
         overlap_ids: set[int] = set()
@@ -458,7 +493,9 @@ class SchurFejFixedLagRunner:
             report=coarse.report,
         )
         if self._frozen_intrinsics is None:
-            self._frozen_intrinsics = _resolve_shared_intrinsics(coarse.intrinsics)
+            self._frozen_intrinsics = _resolve_shared_intrinsics(
+                coarse.intrinsics
+            )
         matrix_k = self._frozen_intrinsics
 
         triangulation_started = time.perf_counter()
@@ -472,6 +509,7 @@ class SchurFejFixedLagRunner:
         cache_rejected_observation_identity_count = 0
         cache_reused_exact_observation_identity_count = 0
         cache_reused_overlap_compatible_count = 0
+        cache_reused_historical_only_count = 0
         if self.triangulation_initialization_policy == "refined-point-cache":
             for track in selected_tracks:
                 cached = self._track_point_cache.get(track.track_uid)
@@ -497,6 +535,8 @@ class SchurFejFixedLagRunner:
                     cache_reused_exact_observation_identity_count += 1
                 else:
                     cache_reused_overlap_compatible_count += 1
+                if track.track_uid not in self._checkpoint_track_point_cache:
+                    cache_reused_historical_only_count += 1
                 cached_by_uid[track.track_uid] = TriangulatedTrackState(
                     track_uid=track.track_uid,
                     xyz=tuple(float(value) for value in cached.xyz),
@@ -604,6 +644,9 @@ class SchurFejFixedLagRunner:
                 "cacheReusedOverlapCompatibleCount": (
                     cache_reused_overlap_compatible_count
                 ),
+                "cacheReusedHistoricalOnlyCount": (
+                    cache_reused_historical_only_count
+                ),
                 "cacheRejectedObservationIdentityCount": (
                     cache_rejected_observation_identity_count
                 ),
@@ -675,8 +718,7 @@ class SchurFejFixedLagRunner:
             raise SchurFejPriorQualityError(next_prior.report)
 
         previous_cache_uids = set(self._track_point_cache)
-        next_track_point_cache: dict[str, _CachedTrackPoint] = {}
-        cache_candidates: list[tuple[int, str, _CachedTrackPoint]] = []
+        current_track_point_cache: dict[str, _CachedTrackPoint] = {}
         if self.triangulation_initialization_policy == "refined-point-cache":
             persistent_problem = (
                 None
@@ -707,22 +749,25 @@ class SchurFejFixedLagRunner:
                         observation_uids=observation_uids,
                         estimated_bytes=estimated_bytes,
                     )
-                    cache_candidates.append(
-                        (-len(observation_uids), track_uid, cached_track)
-                    )
-        cache_candidates.sort(key=lambda value: (value[0], value[1]))
-        cache_resident_bytes = 0
-        cache_dropped_by_memory_budget_count = 0
-        for _, track_uid, cached_track in cache_candidates:
-            if (
-                cache_resident_bytes + cached_track.estimated_bytes
-                > self._triangulation_cache_budget_bytes
-            ):
-                cache_dropped_by_memory_budget_count += 1
-                continue
-            next_track_point_cache[track_uid] = cached_track
-            cache_resident_bytes += cached_track.estimated_bytes
-        self._track_point_cache = next_track_point_cache
+                    current_track_point_cache[track_uid] = cached_track
+        self._track_point_cache, cache_dropped_by_memory_budget_count = (
+            _merge_track_point_cache(
+                self._track_point_cache,
+                current_track_point_cache,
+                budget_bytes=self._triangulation_cache_budget_bytes,
+            )
+        )
+        current_cache_uids = set(current_track_point_cache)
+        self._checkpoint_track_point_cache = {
+            track_uid: self._track_point_cache[track_uid]
+            for track_uid in sorted(
+                current_cache_uids & set(self._track_point_cache)
+            )
+        }
+        cache_resident_bytes = sum(
+            cached.estimated_bytes
+            for cached in self._track_point_cache.values()
+        )
         triangulation_report.update(
             {
                 "cacheResidentTrackCountAfter": len(self._track_point_cache),
@@ -736,6 +781,12 @@ class SchurFejFixedLagRunner:
                 ),
                 "cacheDroppedByMemoryBudgetCount": (
                     cache_dropped_by_memory_budget_count
+                ),
+                "cacheRetainedPreviousOnlyTrackCount": len(
+                    set(self._track_point_cache) - current_cache_uids
+                ),
+                "cacheCheckpointTrackCount": len(
+                    self._checkpoint_track_point_cache
                 ),
                 "cacheEvictedTrackCount": len(
                     previous_cache_uids - set(self._track_point_cache)
@@ -844,6 +895,7 @@ class SchurFejFixedLagRunner:
                 "terminal fixed-lag state is unavailable"
             )
         self._track_point_cache.clear()
+        self._checkpoint_track_point_cache.clear()
         frame_ids = tuple(
             sorted(self.fixed_gauge_frame_ids | set(self._prior.camera_ids))
         )
@@ -1087,7 +1139,7 @@ class SchurFejFixedLagRunner:
                     sorted(cached.observation_uids),
                 ]
                 for track_uid, cached in sorted(
-                    self._track_point_cache.items()
+                    self._checkpoint_track_point_cache.items()
                 )
             ],
         }
@@ -1096,7 +1148,9 @@ class SchurFejFixedLagRunner:
     def restore(self, checkpoint: dict[str, Any]) -> None:
         """Restore an exact prior/pose state without recomputing old windows."""
         state = {
-            key: value for key, value in checkpoint.items() if key != "stateSha256"
+            key: value
+            for key, value in checkpoint.items()
+            if key != "stateSha256"
         }
         if checkpoint.get("contractId") == (
             "jarailsense.gluemap-schur-fej-terminal-state/v1"
@@ -1114,7 +1168,9 @@ class SchurFejFixedLagRunner:
             raise SchurFejFixedLagRunnerError(
                 "fixed-lag checkpoint identity differs"
             )
-        frame_ids = tuple(int(value) for value in checkpoint.get("frameIds", []))
+        frame_ids = tuple(
+            int(value) for value in checkpoint.get("frameIds", [])
+        )
         rotations = {
             int(key): np.asarray(value, dtype=np.float64)
             for key, value in checkpoint.get("rotations", {}).items()
@@ -1198,9 +1254,7 @@ class SchurFejFixedLagRunner:
         gradient = torch.as_tensor(
             prior_value.get("gradient"), dtype=torch.float64
         )
-        factor = torch.as_tensor(
-            prior_value.get("factor"), dtype=torch.float64
-        )
+        factor = torch.as_tensor(prior_value.get("factor"), dtype=torch.float64)
         factor_residual = torch.as_tensor(
             prior_value.get("factorResidual"), dtype=torch.float64
         )
@@ -1256,8 +1310,7 @@ class SchurFejFixedLagRunner:
                 or len(row[4]) != 64
                 or (len(row) == 6 and not isinstance(row[5], list))
                 or any(
-                    character not in "0123456789abcdef"
-                    for character in row[4]
+                    character not in "0123456789abcdef" for character in row[4]
                 )
             ):
                 raise SchurFejFixedLagRunnerError(
@@ -1302,6 +1355,7 @@ class SchurFejFixedLagRunner:
                 "full-DLT checkpoint cannot contain a track-point cache"
             )
         self._track_point_cache = restored_cache
+        self._checkpoint_track_point_cache = dict(restored_cache)
         if self._persistent_ba_session is not None:
             self._persistent_ba_session.problem = None
 
@@ -1378,5 +1432,6 @@ class SchurFejFixedLagRunner:
             checkpoint_resolved_triangulation_solver_policy
         )
         self._track_point_cache = {}
+        self._checkpoint_track_point_cache = {}
         if self._persistent_ba_session is not None:
             self._persistent_ba_session.problem = None
