@@ -1092,65 +1092,118 @@ def marginalize_ceres_linearization(
         raise FixedLagPriorError("Ceres pose ambient values differ")
 
     sparse_started = time.perf_counter()
-    jacobian = csr_matrix(
-        (
-            linearization.jacobian_values,
-            linearization.column_indices,
-            linearization.row_offsets,
-        ),
-        shape=(len(linearization.residuals), expected_columns),
+    native_normal_values = (
+        linearization.camera_hessian,
+        linearization.camera_gradient,
+        linearization.point_hessian,
+        linearization.point_gradient,
+        linearization.block_point_indexes,
+        linearization.block_camera_indexes,
+        linearization.camera_point_hessian,
     )
-    camera_jacobian = jacobian[:, :camera_dimension]
-    point_jacobian = jacobian[:, camera_dimension:]
-    residual = linearization.residuals
-    camera_hessian = (camera_jacobian.T @ camera_jacobian).toarray()
-    camera_gradient = np.asarray(camera_jacobian.T @ residual).reshape(-1)
-    camera_point_hessian = (camera_jacobian.T @ point_jacobian).tocoo()
-    point_hessian_sparse = (point_jacobian.T @ point_jacobian).tocoo()
-    point_gradient = np.asarray(point_jacobian.T @ residual).reshape(
-        point_count, 3
-    )
+    has_native_normals = all(value is not None for value in native_normal_values)
+    if (
+        any(value is not None for value in native_normal_values)
+        and not has_native_normals
+    ):
+        raise FixedLagPriorError("native Ceres normal block set is incomplete")
+    if has_native_normals:
+        camera_hessian = np.asarray(
+            linearization.camera_hessian, dtype=np.float64
+        )
+        camera_gradient = np.asarray(
+            linearization.camera_gradient, dtype=np.float64
+        )
+        point_hessian = np.asarray(
+            linearization.point_hessian, dtype=np.float64
+        )
+        point_gradient = np.asarray(
+            linearization.point_gradient, dtype=np.float64
+        )
+        block_points = np.asarray(
+            linearization.block_point_indexes, dtype=np.int64
+        )
+        block_cameras = np.asarray(
+            linearization.block_camera_indexes, dtype=np.int64
+        )
+        camera_point_blocks = np.asarray(
+            linearization.camera_point_hessian, dtype=np.float64
+        )
+        block_count = len(block_points)
+        if (
+            camera_hessian.shape != (camera_dimension, camera_dimension)
+            or camera_gradient.shape != (camera_dimension,)
+            or point_hessian.shape != (point_count, 3, 3)
+            or point_gradient.shape != (point_count, 3)
+            or block_cameras.shape != (block_count,)
+            or camera_point_blocks.shape != (block_count, 6, 3)
+            or np.any(block_points < 0)
+            or np.any(block_points >= point_count)
+            or np.any(block_cameras < 0)
+            or np.any(block_cameras >= camera_count)
+            or np.any(np.diff(block_points) < 0)
+        ):
+            raise FixedLagPriorError("native Ceres normal block layout is invalid")
+    else:
+        jacobian = csr_matrix(
+            (
+                linearization.jacobian_values,
+                linearization.column_indices,
+                linearization.row_offsets,
+            ),
+            shape=(len(linearization.residuals), expected_columns),
+        )
+        camera_jacobian = jacobian[:, :camera_dimension]
+        point_jacobian = jacobian[:, camera_dimension:]
+        residual = linearization.residuals
+        camera_hessian = (camera_jacobian.T @ camera_jacobian).toarray()
+        camera_gradient = np.asarray(camera_jacobian.T @ residual).reshape(-1)
+        camera_point_hessian = (camera_jacobian.T @ point_jacobian).tocoo()
+        point_hessian_sparse = (point_jacobian.T @ point_jacobian).tocoo()
+        point_gradient = np.asarray(point_jacobian.T @ residual).reshape(
+            point_count, 3
+        )
 
-    point_rows = point_hessian_sparse.row // 3
-    point_columns = point_hessian_sparse.col // 3
-    if np.any(point_rows != point_columns):
-        raise FixedLagPriorError("Ceres point Hessian is not block diagonal")
-    point_hessian = np.zeros((point_count, 3, 3), dtype=np.float64)
-    np.add.at(
-        point_hessian,
-        (
-            point_rows,
-            point_hessian_sparse.row % 3,
-            point_hessian_sparse.col % 3,
-        ),
-        point_hessian_sparse.data,
-    )
+        point_rows = point_hessian_sparse.row // 3
+        point_columns = point_hessian_sparse.col // 3
+        if np.any(point_rows != point_columns):
+            raise FixedLagPriorError("Ceres point Hessian is not block diagonal")
+        point_hessian = np.zeros((point_count, 3, 3), dtype=np.float64)
+        np.add.at(
+            point_hessian,
+            (
+                point_rows,
+                point_hessian_sparse.row % 3,
+                point_hessian_sparse.col % 3,
+            ),
+            point_hessian_sparse.data,
+        )
 
-    block_camera_indexes = camera_point_hessian.row // 6
-    block_point_indexes = camera_point_hessian.col // 3
-    block_keys = block_point_indexes * camera_count + block_camera_indexes
-    unique_keys, inverse_keys = np.unique(block_keys, return_inverse=True)
-    camera_point_blocks = np.zeros(
-        (len(unique_keys), 6, 3), dtype=np.float64
-    )
-    np.add.at(
-        camera_point_blocks,
-        (
-            inverse_keys,
-            camera_point_hessian.row % 6,
-            camera_point_hessian.col % 3,
-        ),
-        camera_point_hessian.data,
-    )
-    block_points = unique_keys // camera_count
-    block_cameras = unique_keys % camera_count
+        block_camera_indexes = camera_point_hessian.row // 6
+        block_point_indexes = camera_point_hessian.col // 3
+        block_keys = block_point_indexes * camera_count + block_camera_indexes
+        unique_keys, inverse_keys = np.unique(block_keys, return_inverse=True)
+        camera_point_blocks = np.zeros(
+            (len(unique_keys), 6, 3), dtype=np.float64
+        )
+        np.add.at(
+            camera_point_blocks,
+            (
+                inverse_keys,
+                camera_point_hessian.row % 6,
+                camera_point_hessian.col % 3,
+            ),
+            camera_point_hessian.data,
+        )
+        block_points = unique_keys // camera_count
+        block_cameras = unique_keys % camera_count
     block_counts = np.bincount(block_points, minlength=point_count)
     points_without_variable_camera = int(np.count_nonzero(block_counts == 0))
     maximum_views = max(1, int(block_counts.max()))
     first_block = np.repeat(
         np.cumsum(block_counts) - block_counts, block_counts
     )
-    block_positions = np.arange(len(unique_keys)) - first_block
+    block_positions = np.arange(len(block_points)) - first_block
     padded_camera_indexes = np.full(
         (point_count, maximum_views), -1, dtype=np.int64
     )
@@ -1418,7 +1471,14 @@ def marginalize_ceres_linearization(
         "eliminatedCameraId": eliminate_camera_id,
         "pointCount": point_count,
         "pointWithoutVariableCameraCount": points_without_variable_camera,
-        "residualCount": len(residual),
+        "residualCount": int(
+            linearization.report.get(
+                "residualCount", len(linearization.residuals)
+            )
+        ),
+        "linearizationRepresentation": linearization.report.get(
+            "representation", "ceres-crs"
+        ),
         "maximumPointCameraCount": maximum_views,
         "degeneratePointCount": int(
             (point_rank_mask.sum(dim=1) < 3).sum().item()

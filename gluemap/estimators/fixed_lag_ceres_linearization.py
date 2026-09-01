@@ -32,6 +32,13 @@ class CeresProblemLinearization:
     column_indices: np.ndarray
     jacobian_values: np.ndarray
     report: dict[str, Any]
+    camera_hessian: np.ndarray | None = None
+    camera_gradient: np.ndarray | None = None
+    point_hessian: np.ndarray | None = None
+    point_gradient: np.ndarray | None = None
+    block_point_indexes: np.ndarray | None = None
+    block_camera_indexes: np.ndarray | None = None
+    camera_point_hessian: np.ndarray | None = None
 
     @property
     def pose_tangent_dimension(self) -> int:
@@ -50,6 +57,7 @@ def capture_ceres_problem_linearization(
     point3d_ids: list[int] | tuple[int, ...] | None = None,
     residual_seed_point3d_ids: list[int] | tuple[int, ...] | None = None,
     apply_loss_function: bool = True,
+    build_normal_blocks: bool = False,
 ) -> CeresProblemLinearization:
     """Evaluate residual/J once with deterministic local parameter ordering."""
     camera_ids = tuple(int(value) for value in image_id_by_camera_id)
@@ -104,6 +112,7 @@ def capture_ceres_problem_linearization(
         point_parameters=point_parameters,
         residual_seed_parameters=seed_parameters,
         apply_loss_function=apply_loss_function,
+        build_normal_blocks=build_normal_blocks,
     )
 
 
@@ -117,6 +126,7 @@ def capture_explicit_ceres_problem_linearization(
     point_parameters: list[np.ndarray],
     residual_seed_parameters: list[np.ndarray] | None = None,
     apply_loss_function: bool = True,
+    build_normal_blocks: bool = False,
 ) -> CeresProblemLinearization:
     """Capture CRS from explicit stable blocks owned by a persistent problem."""
     started = time.perf_counter()
@@ -167,7 +177,7 @@ def capture_explicit_ceres_problem_linearization(
         jacobian_values = np.asarray(jacobian.values, dtype=np.float64)
         jacobian_num_rows = jacobian.num_rows
         jacobian_num_cols = jacobian.num_cols
-    else:
+    elif not build_normal_blocks:
         if not residual_seed_parameters or any(
             not problem.has_parameter_block(value)
             or problem.is_parameter_block_constant(value)
@@ -199,20 +209,53 @@ def capture_explicit_ceres_problem_linearization(
         connected_residual_block_count = int(
             evaluated["residualBlockCount"]
         )
+    else:
+        if not residual_seed_parameters or any(
+            not problem.has_parameter_block(value)
+            or problem.is_parameter_block_constant(value)
+            for value in residual_seed_parameters
+        ):
+            raise FixedLagCeresLinearizationError(
+                "connected residual seed parameter is invalid"
+            )
+        evaluated = pygluemap.evaluate_connected_normal_blocks(
+            problem,
+            [int(np.asarray(value).ctypes.data) for value in parameters],
+            [
+                int(np.asarray(value).ctypes.data)
+                for value in residual_seed_parameters
+            ],
+            len(pose_parameters),
+            len(point_parameters),
+            apply_loss_function,
+            native_thread_count,
+        )
+        residuals = np.empty((0,), dtype=np.float64)
+        row_offsets = np.empty((0,), dtype=np.int64)
+        column_indices = np.empty((0,), dtype=np.int64)
+        jacobian_values = np.empty((0,), dtype=np.float64)
+        jacobian_num_rows = int(evaluated["residualCount"])
+        jacobian_num_cols = int(evaluated["columnCount"])
+        connected_residual_block_count = int(
+            evaluated["residualBlockCount"]
+        )
     expected_columns = len(pose_parameters) * 6 + len(point_parameters) * 3
     if jacobian_num_cols != expected_columns:
         raise FixedLagCeresLinearizationError(
             "Ceres Jacobian column ordering differs"
         )
-    if jacobian_num_rows != len(residuals):
+    if not build_normal_blocks and jacobian_num_rows != len(residuals):
         raise FixedLagCeresLinearizationError(
             "Ceres residual/Jacobian row count differs"
         )
     if (
+        not build_normal_blocks
+        and (
         row_offsets.shape != (len(residuals) + 1,)
         or row_offsets[0] != 0
         or row_offsets[-1] != len(jacobian_values)
         or len(column_indices) != len(jacobian_values)
+        )
     ):
         raise FixedLagCeresLinearizationError("Ceres CRS layout is invalid")
     wall = time.perf_counter() - started
@@ -222,9 +265,13 @@ def capture_explicit_ceres_problem_linearization(
         "applyLossFunction": apply_loss_function,
         "cameraCount": len(camera_ids),
         "pointCount": len(point3d_ids),
-        "residualCount": len(residuals),
+        "residualCount": jacobian_num_rows,
         "columnCount": expected_columns,
-        "jacobianNonzeroCount": len(jacobian_values),
+        "jacobianNonzeroCount": (
+            int(evaluated["jacobianNonzeroCount"])
+            if build_normal_blocks
+            else len(jacobian_values)
+        ),
         "nativeThreadCount": native_thread_count,
         "residualSelection": (
             "all-problem-residuals"
@@ -232,6 +279,24 @@ def capture_explicit_ceres_problem_linearization(
             else "seed-point-connected-residuals"
         ),
         "connectedResidualBlockCount": connected_residual_block_count,
+        "representation": (
+            "native-normal-blocks" if build_normal_blocks else "ceres-crs"
+        ),
+        "nativeSelectionWallSeconds": (
+            float(evaluated["selectionWallSeconds"])
+            if build_normal_blocks
+            else 0.0
+        ),
+        "nativeEvaluationWallSeconds": (
+            float(evaluated["evaluationWallSeconds"])
+            if build_normal_blocks
+            else 0.0
+        ),
+        "nativeNormalBuildWallSeconds": (
+            float(evaluated["normalBuildWallSeconds"])
+            if build_normal_blocks
+            else 0.0
+        ),
         "captureWallSeconds": wall,
     }
     return CeresProblemLinearization(
@@ -249,4 +314,39 @@ def capture_explicit_ceres_problem_linearization(
         column_indices=column_indices,
         jacobian_values=jacobian_values,
         report=report,
+        camera_hessian=(
+            np.asarray(evaluated["cameraHessian"], dtype=np.float64)
+            if build_normal_blocks
+            else None
+        ),
+        camera_gradient=(
+            np.asarray(evaluated["cameraGradient"], dtype=np.float64)
+            if build_normal_blocks
+            else None
+        ),
+        point_hessian=(
+            np.asarray(evaluated["pointHessian"], dtype=np.float64)
+            if build_normal_blocks
+            else None
+        ),
+        point_gradient=(
+            np.asarray(evaluated["pointGradient"], dtype=np.float64)
+            if build_normal_blocks
+            else None
+        ),
+        block_point_indexes=(
+            np.asarray(evaluated["blockPointIndexes"], dtype=np.int64)
+            if build_normal_blocks
+            else None
+        ),
+        block_camera_indexes=(
+            np.asarray(evaluated["blockCameraIndexes"], dtype=np.int64)
+            if build_normal_blocks
+            else None
+        ),
+        camera_point_hessian=(
+            np.asarray(evaluated["cameraPointHessian"], dtype=np.float64)
+            if build_normal_blocks
+            else None
+        ),
     )

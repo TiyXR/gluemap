@@ -2,6 +2,10 @@ import numpy as np
 import pygluemap
 
 from gluemap.estimators.active_track_store import TrackObservation
+from gluemap.estimators.fixed_lag_ceres_linearization import (
+    capture_explicit_ceres_problem_linearization,
+)
+from gluemap.estimators.fixed_lag_prior import marginalize_ceres_linearization
 from gluemap.estimators.fixed_lag_triangulation import TriangulatedTrackState
 from gluemap.estimators.persistent_fixed_lag_ba import (
     PersistentFixedLagBaProblem,
@@ -182,6 +186,86 @@ def test_native_rebuild_skips_discarded_observation_bookkeeping() -> None:
     assert all(not point.observations for point in problem.points.values())
     assert len(problem._native_batches) == 1
     assert summary.final_cost <= summary.initial_cost
+
+
+def test_native_normal_blocks_match_crs_prior() -> None:
+    intrinsics = np.array(
+        ((500.0, 0.0, 320.0), (0.0, 500.0, 240.0), (0.0, 0.0, 1.0))
+    )
+    centers = {
+        frame: np.array((frame * 0.5, 0.0, 0.0)) for frame in range(5)
+    }
+    rotations = {frame: np.eye(3) for frame in centers}
+    camera = camera_from_intrinsics_matrix(
+        intrinsics,
+        camera_model="PINHOLE",
+        width=640,
+        height=480,
+        camera_id=1,
+    )
+    problem = PersistentFixedLagBaProblem(
+        camera_model_id=camera.model,
+        camera_params=camera.params,
+        policy="native-rebuild-every-window",
+    )
+    tracks = _tracks(tuple(centers), centers, intrinsics)
+    problem.synchronize(
+        frame_ids=tuple(centers),
+        rotations=rotations,
+        centers=centers,
+        fixed_pose_ids={0},
+        tracks=tracks,
+        camera_model_id=camera.model,
+        camera_params=camera.params,
+    )
+    problem.solve(
+        max_num_iterations=20,
+        linear_solver_policy="auto",
+        linear_solver_ordering_policy="point-first",
+        device_policy="cpu",
+        ceres_cuda_available=False,
+    )
+    camera_ids = tuple(frame for frame in centers if frame != 0)
+    point_uids = tuple(track.track_uid for track in tracks)
+    point_parameters = problem.point_parameter_blocks(point_uids)
+    capture_arguments = {
+        "camera_ids": camera_ids,
+        "image_ids": camera_ids,
+        "point3d_ids": tuple(problem.point_id(value) for value in point_uids),
+        "pose_parameters": problem.pose_parameter_blocks(camera_ids),
+        "point_parameters": point_parameters,
+        "residual_seed_parameters": point_parameters,
+    }
+    crs = capture_explicit_ceres_problem_linearization(
+        problem.problem, **capture_arguments
+    )
+    normal_blocks = capture_explicit_ceres_problem_linearization(
+        problem.problem, build_normal_blocks=True, **capture_arguments
+    )
+
+    crs_prior = marginalize_ceres_linearization(
+        crs, eliminate_camera_id=camera_ids[0], device_policy="cpu"
+    )
+    normal_prior = marginalize_ceres_linearization(
+        normal_blocks,
+        eliminate_camera_id=camera_ids[0],
+        device_policy="cpu",
+    )
+
+    assert normal_blocks.report["representation"] == "native-normal-blocks"
+    assert normal_blocks.report["nativeNormalBuildWallSeconds"] >= 0.0
+    np.testing.assert_allclose(
+        normal_prior.hessian.numpy(),
+        crs_prior.hessian.numpy(),
+        rtol=1e-10,
+        atol=2e-9,
+    )
+    np.testing.assert_allclose(
+        normal_prior.gradient.numpy(),
+        crs_prior.gradient.numpy(),
+        rtol=1e-10,
+        atol=1e-10,
+    )
 
 
 def test_native_csr_matches_image_major_residual_solution() -> None:

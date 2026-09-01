@@ -6,7 +6,11 @@
 #include "cost_functions.h"
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <memory>
+#include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -577,6 +581,312 @@ py::dict EvaluateConnectedCRS(
   return result;
 }
 
+struct ConnectedNormalContribution {
+  int camera_index = -1;
+  std::array<double, 36> camera_hessian{};
+  std::array<double, 6> camera_gradient{};
+  std::array<double, 18> camera_point_hessian{};
+};
+
+py::dict EvaluateConnectedNormalBlocks(
+    ceres::Problem *problem,
+    const std::vector<uintptr_t> &ordered_parameter_addresses,
+    const std::vector<uintptr_t> &seed_parameter_addresses,
+    int camera_parameter_count, int point_parameter_count,
+    bool apply_loss_function, int num_threads) {
+  if (problem == nullptr || camera_parameter_count < 1 ||
+      point_parameter_count < 1 || num_threads < 1 ||
+      ordered_parameter_addresses.size() !=
+          static_cast<size_t>(camera_parameter_count +
+                              point_parameter_count) ||
+      seed_parameter_addresses.empty()) {
+    throw std::invalid_argument(
+        "connected normal block evaluation identity is invalid");
+  }
+
+  const auto selection_started = std::chrono::steady_clock::now();
+  ceres::Problem::EvaluateOptions options;
+  options.apply_loss_function = apply_loss_function;
+  options.num_threads = num_threads;
+  options.parameter_blocks.reserve(ordered_parameter_addresses.size());
+  for (const uintptr_t address : ordered_parameter_addresses) {
+    auto *parameter = reinterpret_cast<double *>(address);
+    if (!problem->HasParameterBlock(parameter)) {
+      throw std::invalid_argument(
+          "ordered parameter address is absent from Ceres problem");
+    }
+    options.parameter_blocks.push_back(parameter);
+  }
+
+  std::unordered_set<double *> seed_parameters;
+  seed_parameters.reserve(seed_parameter_addresses.size());
+  for (const uintptr_t address : seed_parameter_addresses) {
+    auto *parameter = reinterpret_cast<double *>(address);
+    if (!problem->HasParameterBlock(parameter)) {
+      throw std::invalid_argument(
+          "seed parameter address is absent from Ceres problem");
+    }
+    seed_parameters.insert(parameter);
+  }
+
+  std::vector<ceres::ResidualBlockId> all_residuals;
+  problem->GetResidualBlocks(&all_residuals);
+  options.residual_blocks.reserve(all_residuals.size());
+  std::vector<double *> residual_parameters;
+  for (const ceres::ResidualBlockId residual : all_residuals) {
+    residual_parameters.clear();
+    problem->GetParameterBlocksForResidualBlock(residual,
+                                                &residual_parameters);
+    if (std::any_of(residual_parameters.begin(), residual_parameters.end(),
+                    [&seed_parameters](double *parameter) {
+                      return seed_parameters.count(parameter) != 0;
+                    })) {
+      options.residual_blocks.push_back(residual);
+    }
+  }
+  if (options.residual_blocks.empty()) {
+    throw std::invalid_argument("seed parameters have no connected residuals");
+  }
+  const auto selection_finished = std::chrono::steady_clock::now();
+
+  double cost = 0.0;
+  std::vector<double> residuals;
+  ceres::CRSMatrix jacobian;
+  bool evaluated = false;
+  const auto evaluation_started = std::chrono::steady_clock::now();
+  {
+    py::gil_scoped_release release;
+    evaluated = problem->Evaluate(options, &cost, &residuals, nullptr,
+                                  &jacobian);
+  }
+  const auto evaluation_finished = std::chrono::steady_clock::now();
+  if (!evaluated) {
+    throw std::runtime_error("connected Ceres normal evaluation failed");
+  }
+
+  const int camera_dimension = camera_parameter_count * 6;
+  const int point_dimension = point_parameter_count * 3;
+  const int expected_columns = camera_dimension + point_dimension;
+  const size_t residual_count = residuals.size();
+  if (jacobian.num_cols != expected_columns ||
+      jacobian.num_rows != static_cast<int>(residual_count) ||
+      jacobian.rows.size() != residual_count + 1 || jacobian.rows.front() != 0 ||
+      jacobian.rows.back() != static_cast<int>(jacobian.values.size()) ||
+      jacobian.cols.size() != jacobian.values.size()) {
+    throw std::runtime_error("connected Ceres normal CRS layout is invalid");
+  }
+
+  const auto normal_started = std::chrono::steady_clock::now();
+  std::vector<int> row_points(residual_count, -1);
+  std::vector<int> row_cameras(residual_count, -1);
+  std::vector<size_t> point_row_counts(point_parameter_count, 0);
+  for (size_t row = 0; row < residual_count; ++row) {
+    int point_index = -1;
+    int camera_index = -1;
+    for (int offset = jacobian.rows[row]; offset < jacobian.rows[row + 1];
+         ++offset) {
+      const int column = jacobian.cols[offset];
+      if (column < 0 || column >= expected_columns) {
+        throw std::runtime_error("connected Ceres normal column is invalid");
+      }
+      if (column < camera_dimension) {
+        const int candidate = column / 6;
+        if (camera_index >= 0 && camera_index != candidate) {
+          throw std::runtime_error(
+              "connected Ceres row contains multiple camera blocks");
+        }
+        camera_index = candidate;
+      } else {
+        const int candidate = (column - camera_dimension) / 3;
+        if (point_index >= 0 && point_index != candidate) {
+          throw std::runtime_error(
+              "connected Ceres row contains multiple point blocks");
+        }
+        point_index = candidate;
+      }
+    }
+    if (point_index < 0 || point_index >= point_parameter_count) {
+      throw std::runtime_error(
+          "connected Ceres row has no ordered point block");
+    }
+    row_points[row] = point_index;
+    row_cameras[row] = camera_index;
+    ++point_row_counts[point_index];
+  }
+
+  std::vector<size_t> point_row_offsets(point_parameter_count + 1, 0);
+  std::partial_sum(point_row_counts.begin(), point_row_counts.end(),
+                   point_row_offsets.begin() + 1);
+  std::vector<size_t> point_row_cursor = point_row_offsets;
+  std::vector<size_t> point_rows(residual_count, 0);
+  for (size_t row = 0; row < residual_count; ++row) {
+    const int point_index = row_points[row];
+    point_rows[point_row_cursor[point_index]++] = row;
+  }
+
+  std::vector<double> point_hessian(
+      static_cast<size_t>(point_parameter_count) * 9, 0.0);
+  std::vector<double> point_gradient(
+      static_cast<size_t>(point_parameter_count) * 3, 0.0);
+  std::vector<std::vector<ConnectedNormalContribution>> point_contributions(
+      point_parameter_count);
+
+#pragma omp parallel for schedule(static) num_threads(num_threads)
+  for (int point_index = 0; point_index < point_parameter_count;
+       ++point_index) {
+    std::unordered_map<int, ConnectedNormalContribution> by_camera;
+    for (size_t cursor = point_row_offsets[point_index];
+         cursor < point_row_offsets[point_index + 1]; ++cursor) {
+      const size_t row = point_rows[cursor];
+      const int camera_index = row_cameras[row];
+      std::array<double, 6> camera_jacobian{};
+      std::array<double, 3> point_jacobian{};
+      for (int offset = jacobian.rows[row]; offset < jacobian.rows[row + 1];
+           ++offset) {
+        const int column = jacobian.cols[offset];
+        const double value = jacobian.values[offset];
+        if (column < camera_dimension) {
+          camera_jacobian[column % 6] = value;
+        } else {
+          point_jacobian[(column - camera_dimension) % 3] = value;
+        }
+      }
+      const double residual = residuals[row];
+      double *point_hessian_block =
+          point_hessian.data() + static_cast<size_t>(point_index) * 9;
+      double *point_gradient_block =
+          point_gradient.data() + static_cast<size_t>(point_index) * 3;
+      for (int point_row = 0; point_row < 3; ++point_row) {
+        point_gradient_block[point_row] +=
+            point_jacobian[point_row] * residual;
+        for (int point_column = 0; point_column < 3; ++point_column) {
+          point_hessian_block[point_row * 3 + point_column] +=
+              point_jacobian[point_row] * point_jacobian[point_column];
+        }
+      }
+      if (camera_index < 0) {
+        continue;
+      }
+      auto &contribution = by_camera[camera_index];
+      contribution.camera_index = camera_index;
+      for (int camera_row = 0; camera_row < 6; ++camera_row) {
+        contribution.camera_gradient[camera_row] +=
+            camera_jacobian[camera_row] * residual;
+        for (int camera_column = 0; camera_column < 6; ++camera_column) {
+          contribution.camera_hessian[camera_row * 6 + camera_column] +=
+              camera_jacobian[camera_row] * camera_jacobian[camera_column];
+        }
+        for (int point_column = 0; point_column < 3; ++point_column) {
+          contribution.camera_point_hessian[camera_row * 3 + point_column] +=
+              camera_jacobian[camera_row] * point_jacobian[point_column];
+        }
+      }
+    }
+    auto &ordered = point_contributions[point_index];
+    ordered.reserve(by_camera.size());
+    for (auto &entry : by_camera) {
+      ordered.push_back(std::move(entry.second));
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const ConnectedNormalContribution &left,
+                 const ConnectedNormalContribution &right) {
+                return left.camera_index < right.camera_index;
+              });
+  }
+
+  size_t camera_point_block_count = 0;
+  for (const auto &value : point_contributions) {
+    camera_point_block_count += value.size();
+  }
+  std::vector<double> camera_hessian(
+      static_cast<size_t>(camera_dimension) * camera_dimension, 0.0);
+  std::vector<double> camera_gradient(camera_dimension, 0.0);
+  std::vector<int64_t> block_point_indexes;
+  std::vector<int64_t> block_camera_indexes;
+  std::vector<double> camera_point_hessian;
+  block_point_indexes.reserve(camera_point_block_count);
+  block_camera_indexes.reserve(camera_point_block_count);
+  camera_point_hessian.reserve(camera_point_block_count * 18);
+  for (int point_index = 0; point_index < point_parameter_count;
+       ++point_index) {
+    for (const auto &contribution : point_contributions[point_index]) {
+      const int camera_index = contribution.camera_index;
+      for (int row = 0; row < 6; ++row) {
+        camera_gradient[camera_index * 6 + row] +=
+            contribution.camera_gradient[row];
+        for (int column = 0; column < 6; ++column) {
+          camera_hessian[static_cast<size_t>(camera_index * 6 + row) *
+                             camera_dimension +
+                         camera_index * 6 + column] +=
+              contribution.camera_hessian[row * 6 + column];
+        }
+      }
+      block_point_indexes.push_back(point_index);
+      block_camera_indexes.push_back(camera_index);
+      camera_point_hessian.insert(camera_point_hessian.end(),
+                                  contribution.camera_point_hessian.begin(),
+                                  contribution.camera_point_hessian.end());
+    }
+  }
+  const auto normal_finished = std::chrono::steady_clock::now();
+
+  const auto seconds = [](const auto &start, const auto &finish) {
+    return std::chrono::duration<double>(finish - start).count();
+  };
+  auto camera_hessian_array = py::array_t<double>(
+      {static_cast<py::ssize_t>(camera_dimension),
+       static_cast<py::ssize_t>(camera_dimension)});
+  std::copy(camera_hessian.begin(), camera_hessian.end(),
+            camera_hessian_array.mutable_data());
+  auto camera_gradient_array =
+      py::array_t<double>({static_cast<py::ssize_t>(camera_dimension)});
+  std::copy(camera_gradient.begin(), camera_gradient.end(),
+            camera_gradient_array.mutable_data());
+  auto point_hessian_array = py::array_t<double>(
+      {static_cast<py::ssize_t>(point_parameter_count),
+       static_cast<py::ssize_t>(3), static_cast<py::ssize_t>(3)});
+  std::copy(point_hessian.begin(), point_hessian.end(),
+            point_hessian_array.mutable_data());
+  auto point_gradient_array = py::array_t<double>(
+      {static_cast<py::ssize_t>(point_parameter_count),
+       static_cast<py::ssize_t>(3)});
+  std::copy(point_gradient.begin(), point_gradient.end(),
+            point_gradient_array.mutable_data());
+  auto block_point_array = py::array_t<int64_t>(
+      {static_cast<py::ssize_t>(camera_point_block_count)});
+  std::copy(block_point_indexes.begin(), block_point_indexes.end(),
+            block_point_array.mutable_data());
+  auto block_camera_array = py::array_t<int64_t>(
+      {static_cast<py::ssize_t>(camera_point_block_count)});
+  std::copy(block_camera_indexes.begin(), block_camera_indexes.end(),
+            block_camera_array.mutable_data());
+  auto camera_point_array = py::array_t<double>(
+      {static_cast<py::ssize_t>(camera_point_block_count),
+       static_cast<py::ssize_t>(6), static_cast<py::ssize_t>(3)});
+  std::copy(camera_point_hessian.begin(), camera_point_hessian.end(),
+            camera_point_array.mutable_data());
+
+  py::dict result;
+  result["cost"] = cost;
+  result["cameraHessian"] = std::move(camera_hessian_array);
+  result["cameraGradient"] = std::move(camera_gradient_array);
+  result["pointHessian"] = std::move(point_hessian_array);
+  result["pointGradient"] = std::move(point_gradient_array);
+  result["blockPointIndexes"] = std::move(block_point_array);
+  result["blockCameraIndexes"] = std::move(block_camera_array);
+  result["cameraPointHessian"] = std::move(camera_point_array);
+  result["residualBlockCount"] = options.residual_blocks.size();
+  result["residualCount"] = residual_count;
+  result["columnCount"] = jacobian.num_cols;
+  result["jacobianNonzeroCount"] = jacobian.values.size();
+  result["selectionWallSeconds"] =
+      seconds(selection_started, selection_finished);
+  result["evaluationWallSeconds"] =
+      seconds(evaluation_started, evaluation_finished);
+  result["normalBuildWallSeconds"] = seconds(normal_started, normal_finished);
+  return result;
+}
+
 PYBIND11_MODULE(pygluemap, m) {
   BindActiveTrackGraph(m);
   py::module_::import("pyceres");
@@ -684,6 +994,14 @@ PYBIND11_MODULE(pygluemap, m) {
         py::arg("apply_loss_function") = true, py::arg("num_threads") = 1,
         "Evaluate only residual blocks connected to seed parameter blocks, "
         "while preserving the requested tangent-column ordering.");
+
+  m.def("evaluate_connected_normal_blocks", &EvaluateConnectedNormalBlocks,
+        py::arg("problem"), py::arg("ordered_parameter_addresses"),
+        py::arg("seed_parameter_addresses"),
+        py::arg("camera_parameter_count"), py::arg("point_parameter_count"),
+        py::arg("apply_loss_function") = true, py::arg("num_threads") = 1,
+        "Evaluate connected residuals and build deterministic camera/point "
+        "normal blocks with bounded OpenMP working memory.");
 
   // Numpy-based track selection: returns point3D IDs to delete.
   // Python then calls reconstruction.delete_point3d(id) for each.

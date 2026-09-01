@@ -378,6 +378,9 @@ def refine_fixed_anchor_window(
                 point_parameters = persistent_problem.point_parameter_blocks(
                     ordered_track_uids
                 )
+                use_native_normal_blocks = (
+                    persistent_problem.policy == "native-rebuild-every-window"
+                )
                 captured_linearization.append(
                     capture_explicit_ceres_problem_linearization(
                         persistent_problem.problem,
@@ -395,9 +398,11 @@ def refine_fixed_anchor_window(
                         point_parameters=point_parameters,
                         residual_seed_parameters=(
                             point_parameters
-                            if capture_point3d_ids is not None
+                            if use_native_normal_blocks
+                            or capture_point3d_ids is not None
                             else None
                         ),
+                        build_normal_blocks=use_native_normal_blocks,
                     )
                 )
         summaries.append(summary)
@@ -467,6 +472,18 @@ def refine_fixed_anchor_window(
         float(value.report["captureWallSeconds"])
         for value in captured_linearization
     )
+    linearization_selection_wall = sum(
+        float(value.report.get("nativeSelectionWallSeconds", 0.0))
+        for value in captured_linearization
+    )
+    linearization_evaluation_wall = sum(
+        float(value.report.get("nativeEvaluationWallSeconds", 0.0))
+        for value in captured_linearization
+    )
+    linearization_normal_build_wall = sum(
+        float(value.report.get("nativeNormalBuildWallSeconds", 0.0))
+        for value in captured_linearization
+    )
     report = {
         "contractId": "jarailsense.gluemap-fixed-anchor-local-ba/v1",
         "status": "passed" if solve_passed else "failed",
@@ -505,6 +522,11 @@ def refine_fixed_anchor_window(
         "solveWallSeconds": solve_wall,
         "ceresSolveWallSeconds": ceres_solve_wall,
         "linearizationCaptureWallSeconds": linearization_capture_wall,
+        "linearizationSelectionWallSeconds": linearization_selection_wall,
+        "linearizationEvaluationWallSeconds": linearization_evaluation_wall,
+        "linearizationNormalBuildWallSeconds": (
+            linearization_normal_build_wall
+        ),
         "solveOrchestrationWallSeconds": max(
             0.0,
             solve_wall - ceres_solve_wall - linearization_capture_wall,
