@@ -11,7 +11,17 @@ from gluemap.estimators.fixed_anchor_approximation import (
 from gluemap.estimators.schur_fej_fixed_lag_runner import (
     SchurFejFixedLagRunner,
     SchurFejFixedLagRunnerError,
+    SchurFejPriorQualityError,
 )
+
+
+def test_prior_quality_error_preserves_the_failed_prior_report():
+    report = {"status": "failed", "reasonCodes": ["unexpected-prior-nullity"]}
+
+    error = SchurFejPriorQualityError(report)
+
+    assert error.report is report
+    assert isinstance(error, SchurFejFixedLagRunnerError)
 
 
 def _observation(track: int, frame: int, point, center, intrinsics):

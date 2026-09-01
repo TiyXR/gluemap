@@ -38,6 +38,14 @@ class SchurFejFixedLagRunnerError(ValueError):
     """Raised when the persistent Schur/FEJ state cannot advance exactly."""
 
 
+class SchurFejPriorQualityError(SchurFejFixedLagRunnerError):
+    """Raised when a solved batch would publish an invalid FEJ prior."""
+
+    def __init__(self, report: dict[str, Any]) -> None:
+        self.report = report
+        super().__init__(f"fixed-lag prior gate did not pass: {report}")
+
+
 @dataclass(frozen=True)
 class SchurFejFixedLagStep:
     window_ordinal: int
@@ -552,10 +560,7 @@ class SchurFejFixedLagRunner:
             batch_prior_wall = time.perf_counter() - batch_prior_started
         solve_wall = time.perf_counter() - solve_started
         if next_prior.report["status"] != "passed":
-            raise SchurFejFixedLagRunnerError(
-                "fixed-lag prior gate did not pass: "
-                f"{next_prior.report}"
-            )
+            raise SchurFejPriorQualityError(next_prior.report)
 
         previous_cache_uids = set(self._track_point_cache)
         next_track_point_cache: dict[str, _CachedTrackPoint] = {}
