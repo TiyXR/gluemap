@@ -4,7 +4,10 @@ import logging
 
 import numpy as np
 
-from gluemap.estimators.similarity_averaging import similarity_averaging
+from gluemap.estimators.similarity_averaging import (
+    _initialize_parameters,
+    similarity_averaging,
+)
 from tests.helpers import (
     build_predictions_dict,
     build_star_topology_full,
@@ -16,6 +19,30 @@ from tests.helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def test_missing_center_initialization_is_identity_seeded_and_order_independent():
+    rotations_forward = {7: np.eye(3), 2: np.eye(3), 11: np.eye(3)}
+    rotations_reverse = dict(reversed(list(rotations_forward.items())))
+    predictions = {"indexes": [[7, 2], [2, 11]]}
+
+    _, forward, _ = _initialize_parameters(
+        predictions, rotations_forward, None, None, initialization_seed=91
+    )
+    np.random.seed(999)
+    np.random.random(100)
+    _, reverse, _ = _initialize_parameters(
+        predictions, rotations_reverse, None, None, initialization_seed=91
+    )
+
+    assert all(
+        np.array_equal(forward[image_id], reverse[image_id])
+        for image_id in rotations_forward
+    )
+    _, different_seed, _ = _initialize_parameters(
+        predictions, rotations_forward, None, None, initialization_seed=92
+    )
+    assert not np.array_equal(forward[7], different_seed[7])
 
 
 # ---------------------------------------------------------------------------

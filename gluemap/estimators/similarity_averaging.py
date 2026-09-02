@@ -18,6 +18,7 @@ def _initialize_parameters(
     global_rotations: dict[int, np.ndarray],
     global_centers: dict[int, np.ndarray] | None,
     global_scales: list[np.ndarray] | dict[int, float] | None,
+    initialization_seed: int = 0,
 ) -> tuple[int, dict[int, np.ndarray], list[np.ndarray]]:
     """
     Allocate per-image centers and per-ministar scale parameter buffers.
@@ -36,15 +37,20 @@ def _initialize_parameters(
         two are normalized into the canonical containers used downstream.
     """
     num_ministar = len(predictions_dict["indexes"])
+    def deterministic_center(image_id: int) -> np.ndarray:
+        seed = np.random.SeedSequence(
+            [int(initialization_seed) & 0xFFFFFFFF, int(image_id) & 0xFFFFFFFF]
+        )
+        return np.random.default_rng(seed).random(3, dtype=np.float64)
+
     if global_centers is None:
         global_centers = {
-            idx: np.random.rand(3).astype(np.float64)
-            for idx in global_rotations
+            idx: deterministic_center(idx) for idx in global_rotations
         }
     else:
         for idx in global_rotations:
             if idx not in global_centers:
-                global_centers[idx] = np.random.rand(3).astype(np.float64)
+                global_centers[idx] = deterministic_center(idx)
     if global_scales is None:
         global_scales = [
             np.ones((1,)).astype(np.float64) for i in range(num_ministar)
@@ -247,6 +253,7 @@ def similarity_averaging(
     max_num_iterations: int = 50,
     fix_scales: bool = False,
     fixed_center_ids: set[int] | None = None,
+    initialization_seed: int = 0,
 ) -> dict[int, np.ndarray]:
     """
     Solve for global per-image translations and per-ministar scales.
@@ -279,6 +286,7 @@ def similarity_averaging(
         global_rotations,
         global_centers,
         global_scales,
+        initialization_seed,
     )
 
     prob = pyceres.Problem()
