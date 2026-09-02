@@ -160,7 +160,10 @@ class CovisibilityExtraction:
         evaluated_pair_count = (
             dense_pair_count
             if self.graph_policy == "dense-transitive"
-            else int(batch_count * (1 + 2 * max(0, view_count - 1)))
+            else int(
+                batch_count
+                * (1 if view_count == 1 else view_count * view_count - 1)
+            )
         )
         self.last_report = {
             "contractId": "jarailsense.gluemap-covisibility/v1",
@@ -662,26 +665,122 @@ class CovisibilityExtraction:
         images_shape_ori: torch.Tensor | None = None,
         **_unused: object,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Score only center-neighbor edges while preserving both directions.
+        """Preserve dense transitive scores with triangular GPU sweeps.
 
-        The explicit pair plan already defines every edge in a streaming Star.
-        One batched center sweep therefore evaluates the center-to-neighbor and
-        neighbor-to-center round trips without constructing the dense neighbor
-        graph or running a CPU shortest-path pass.
+        ``_verify_by_reprojection`` already calculates both directions of each
+        center-neighbor round trip.  The dense reference throws the reverse
+        score away and evaluates it again after swapping the reference view.
+        This implementation keeps both scores, evaluates every unordered view
+        pair exactly once, and performs the source-0 shortest-path reduction on
+        the current torch device.  It therefore preserves the dense graph
+        semantics without the duplicate reprojection work or NetworkX CPU
+        synchronization.
         """
 
-        return self._verify_by_reprojection(
-            world_points,
-            extrinsics,
-            intrinsic,
-            threshold_reproj,
-            consistent_threshold,
-            lambda_conf,
-            False,
-            images_change,
-            images_shape_ori,
-            symmetric_scores=True,
+        batch_count, view_count = world_points.shape[:2]
+        if view_count == 1:
+            return self._verify_by_reprojection(
+                world_points,
+                extrinsics,
+                intrinsic,
+                threshold_reproj,
+                consistent_threshold,
+                lambda_conf,
+                False,
+                images_change,
+                images_shape_ori,
+                symmetric_scores=True,
+            )
+
+        scores_all = torch.eye(
+            view_count,
+            dtype=world_points.dtype,
+            device=world_points.device,
+        ).unsqueeze(0).expand(batch_count, -1, -1).clone()
+        valid_mask_0 = None
+
+        for reference_index in range(view_count - 1):
+            order = torch.arange(
+                reference_index,
+                view_count,
+                device=world_points.device,
+            )
+            selected = _switch_tensor_order(
+                [world_points, extrinsics, intrinsic], order
+            )
+            world_selected, extrinsics_selected, intrinsic_selected = selected
+
+            images_change_selected = None
+            images_shape_selected = None
+            if images_change is not None:
+                images_change_selected, images_shape_selected = (
+                    _switch_tensor_order(
+                        [images_change, images_shape_ori], order
+                    )
+                )
+
+            scores, valid_mask = self._verify_by_reprojection(
+                world_selected,
+                extrinsics_selected,
+                intrinsic_selected,
+                threshold_reproj,
+                consistent_threshold,
+                lambda_conf,
+                False,
+                images_change_selected,
+                images_shape_selected,
+                symmetric_scores=True,
+            )
+            scores_all[:, reference_index, order] = scores
+            scores_all[:, order, reference_index] = scores
+            if reference_index == 0:
+                valid_mask_0 = valid_mask
+
+        if valid_mask_0 is None:
+            raise RuntimeError("planned-star did not produce a center valid mask")
+
+        return self._aggregate_transitive_scores_torch(scores_all), valid_mask_0
+
+    @staticmethod
+    def _aggregate_transitive_scores_torch(
+        scores_all: torch.Tensor,
+    ) -> torch.Tensor:
+        """Match NetworkX source-0 Dijkstra with device-side relaxation.
+
+        The reference first evaluates ``log`` in the input dtype, converts each
+        edge weight to a Python double, accumulates path distances as doubles,
+        then converts distances back to the input dtype before ``exp``.  Keeping
+        that same dtype boundary is required for bitwise-equivalent
+        ``pose_scores``.
+        """
+
+        if scores_all.ndim != 3 or scores_all.shape[1] != scores_all.shape[2]:
+            raise ValueError("scores_all must have shape (B, N, N)")
+
+        batch_count, view_count, _ = scores_all.shape
+        positive = scores_all > 0.0
+        finite_scores = torch.where(
+            positive, scores_all, torch.ones_like(scores_all)
         )
+        edge_weights = (-torch.log(finite_scores)).to(torch.float64)
+        edge_weights = torch.where(
+            positive,
+            edge_weights,
+            torch.full_like(edge_weights, float("inf")),
+        )
+
+        distances = torch.full(
+            (batch_count, view_count),
+            float("inf"),
+            dtype=torch.float64,
+            device=scores_all.device,
+        )
+        distances[:, 0] = 0.0
+        for _ in range(max(0, view_count - 1)):
+            candidates = distances.unsqueeze(-1) + edge_weights
+            distances = torch.minimum(distances, candidates.amin(dim=1))
+
+        return torch.exp(-distances.to(dtype=scores_all.dtype))
 
     def _verify_by_reprojection_n2(
         self,
